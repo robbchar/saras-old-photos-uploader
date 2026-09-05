@@ -143,8 +143,13 @@ IA-upload-specific documentation, but `session.py`'s default urllib3 `Retry`
 authors also treat it as rate-limit-adjacent.
 
 No `--live` run has ever happened, so no real rate-limit response has ever
-been captured — both structured sources above are verified against the
-installed library's *source*, not against actual IA behavior. A missed
+been captured. *Amended 2026-09-02:* source-reading is no longer the only
+evidence for the second source — a fault-injecting transport adapter mounted
+on `s3.us.archive.org` now drives the real `Item.upload_file()` and confirms
+that an S3 failure really does re-raise `HTTPError` with its `Response`
+attached, status intact, while the message loses it. What is still unverified
+is IA's own behavior: that a real rate limit arrives as one of these shapes at
+all. A missed
 detection (an exception with neither attribute, or a genuinely different
 status) is the safe failure direction: the row is logged as one ordinary
 failure and the run continues, same as any other transient error, whereas a
@@ -230,9 +235,53 @@ behind the library's three retries, it already returns `None` rather than
 raising so that a dry run which cannot reach one item still reports the other
 9,999, and retrying it would make a 10,000-row dry run crawl.
 
+**A `Retry-After` header is honoured, but bounded.** urllib3 sleeps the
+requested duration with no ceiling — `Retry.sleep_for_retry()` calls
+`time.sleep(retry_after)` directly, and `DEFAULT_BACKOFF_MAX` (120s) bounds
+only the exponential path. A `Retry-After: 3600` on a 503 would therefore
+sleep an hour inside one call, three times over, and the operator would see a
+run that had simply stopped producing output. `BoundedRetryAfter` caps it at
+`RETRY_AFTER_MAX_SECONDS` (30s). Ignoring the header outright would be worse —
+it is the server saying exactly what it wants — but this tool already has a
+better answer than waiting out a long one: a 429/503 stops the run so the
+operator resumes tomorrow. Anything longer than the bound becomes "stop the
+run" rather than "sleep through the afternoon".
+
+That is a subclass rather than urllib3's own `retry_after_max=` argument,
+which exists only in very recent urllib3 (absent through at least 2.6.0);
+pinning that tightly would constrain an environment whose urllib3 arrives as
+a transitive dependency of `requests`. urllib3 counts retries down by calling
+`increment()`, which rebuilds through `new()` as `type(self)(...)`, so the
+subclass — and the bound — survive every retry rather than applying only to
+the first. A test pins that, because a bound that silently vanished on the
+first retry would be a bound in name only.
+
+**The S3 leg is exercised, not just reasoned about.** `s3.us.archive.org` is
+hardcoded in `item.py`, so a local server cannot stand in for it — but a
+`requests` transport adapter mounted on that host can. The tests mount a
+canned metadata adapter on `archive.org` (so the upload actually reaches S3
+rather than failing before it) and a fault-injecting adapter on
+`s3.us.archive.org`, then run the real `upload_row()` through the real
+`Item.upload_file()`. This confirms by behavior what the decision above
+established by reading source: a real S3 failure re-raises `HTTPError` with
+`response=exc.response` passed through, so the parsed status survives even
+though the rebuilt message has lost it. One test asserts `"503" not in
+str(exc)` precisely to prove the classifier is not quietly succeeding by
+reading text.
+
 There is no `--retries` flag. The constants are `RETRY_ATTEMPTS`,
-`RETRY_BASE_SECONDS` and `RETRY_MAX_SECONDS` in `ia_bulk.py`; a flag can be
-added if a real run on the LCPS link wants one.
+`RETRY_BASE_SECONDS`, `RETRY_MAX_SECONDS` and `RETRY_AFTER_MAX_SECONDS` in
+`ia_bulk.py`; a flag can be added if a real run on the LCPS link wants one.
+
+**What none of this verifies.** Every probe and test above stands in for
+Internet Archive; none of them *is* Internet Archive. What is now established
+is how `internetarchive` 5.10.1 and urllib3 behave for a given response —
+which is a property of those libraries, not of IA. What remains unverified is
+whether IA's real responses take the shapes assumed: whether the daily cap
+surfaces as 429/503 at all rather than a 403 or a 200 with an error body,
+whether a real `SlowDown` carries a `Retry-After`, and how a genuinely slow
+multi-megabyte transfer behaves. No `--live` run has ever happened. Those
+answers only arrive with real traffic.
 
 ## A status the metadata call strips is recovered, still without reading text
 

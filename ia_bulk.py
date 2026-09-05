@@ -1151,7 +1151,46 @@ RATE_LIMIT_STATUS_CODES = (429, 503)
 # library's policy does not silently alter what it retries or how often - and
 # a test pins that equality against a session the library builds itself, so
 # a future version changing its defaults fails loudly rather than quietly.
-IA_RETRY = Retry(
+# How long a server-supplied Retry-After may hold a single call.
+#
+# urllib3 honours Retry-After by sleeping the requested duration with no
+# ceiling: Retry.sleep_for_retry() calls time.sleep(retry_after) directly, and
+# DEFAULT_BACKOFF_MAX (120s) bounds only the exponential path, not this one.
+# So `Retry-After: 3600` on a 503 would sleep an hour inside one call, three
+# times over, and the operator would see a run that had simply stopped
+# producing output.
+#
+# Ignoring the header entirely would be worse - it is the server telling us
+# precisely what it wants. But this tool already has a better answer than
+# waiting for a long one: a 429/503 stops the run so the operator resumes
+# tomorrow. So the header is honoured up to this bound, and anything longer
+# becomes "stop the run" rather than "sleep through the afternoon".
+RETRY_AFTER_MAX_SECONDS = 30.0
+
+
+class BoundedRetryAfter(Retry):
+    """urllib3's Retry, with a ceiling on how long a Retry-After header may
+    make one call sleep. See RETRY_AFTER_MAX_SECONDS above for why.
+
+    Subclassing rather than passing urllib3's own `retry_after_max=` because
+    that argument only exists in very recent urllib3 (absent through at least
+    2.6.0), and pinning that tightly would constrain an environment whose
+    urllib3 comes in as a transitive dependency of requests. Overriding the
+    accessor works on every version.
+
+    urllib3 does not reuse the Retry object it is given - it counts down by
+    calling increment(), which rebuilds through new() as `type(self)(...)`.
+    That preserves this subclass, so the ceiling survives every retry rather
+    than only applying to the first. A test pins that."""
+
+    def get_retry_after(self, response) -> float | None:
+        retry_after = super().get_retry_after(response)
+        if retry_after is None:
+            return None
+        return min(retry_after, RETRY_AFTER_MAX_SECONDS)
+
+
+IA_RETRY = BoundedRetryAfter(
     total=3,
     connect=3,
     read=3,

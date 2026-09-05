@@ -9,8 +9,10 @@ from argparse import Namespace
 from pathlib import Path
 
 import internetarchive
+import internetarchive.session
 import pytest
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
@@ -6231,6 +6233,240 @@ def test_fetch_current_metadata_asks_for_the_status_preserving_adapter(monkeypat
 
     assert fetch_current_metadata("zztest-x") == {"title": "Existing"}
     assert captured["http_adapter_kwargs"] == {"max_retries": IA_RETRY}
+
+
+# --- a hostile Retry-After cannot stall a run ---------------------------------
+
+
+def response_with_retry_after(value):
+    """A urllib3 response carrying (or not carrying) a Retry-After header -
+    the object Retry.get_retry_after() is handed."""
+    headers = {} if value is None else {"Retry-After": value}
+    return urllib3.HTTPResponse(headers=headers)
+
+
+def test_ia_retry_caps_a_hostile_retry_after():
+    """urllib3 honours Retry-After by calling time.sleep() on it UNCAPPED -
+    DEFAULT_BACKOFF_MAX bounds the exponential path only, not this one. A
+    `Retry-After: 3600` would therefore sleep an hour inside a single call,
+    three times over, and the run would look hung. The header is still
+    honoured, just bounded."""
+    from ia_bulk import IA_RETRY, RETRY_AFTER_MAX_SECONDS
+
+    assert IA_RETRY.get_retry_after(response_with_retry_after("3600")) == RETRY_AFTER_MAX_SECONDS
+
+
+def test_ia_retry_honours_a_reasonable_retry_after_unchanged():
+    from ia_bulk import IA_RETRY
+
+    assert IA_RETRY.get_retry_after(response_with_retry_after("5")) == 5
+
+
+def test_ia_retry_passes_through_an_absent_retry_after():
+    from ia_bulk import IA_RETRY
+
+    assert IA_RETRY.get_retry_after(response_with_retry_after(None)) is None
+
+
+def test_ia_retry_keeps_its_cap_through_urllib3s_own_countdown():
+    """urllib3 does not reuse the Retry object it is given - it counts down by
+    calling increment(), which builds a fresh copy through new(). A cap that
+    lived only on the original instance would silently vanish on the very
+    first retry, which is the only time it matters."""
+    from ia_bulk import IA_RETRY, RETRY_AFTER_MAX_SECONDS
+
+    counted_down = IA_RETRY.increment(method="GET", url="/metadata/x")
+
+    assert isinstance(counted_down, type(IA_RETRY))
+    assert counted_down.get_retry_after(response_with_retry_after("3600")) == RETRY_AFTER_MAX_SECONDS
+
+
+# --- the S3 leg, exercised rather than reasoned about -------------------------
+#
+# s3.us.archive.org is hardcoded in internetarchive's item.py, so a local
+# server cannot stand in for it. A requests transport adapter mounted on that
+# host can. These tests drive the REAL Item.upload_file() - the code the whole
+# retry feature exists for - with no network, by mounting one canned adapter on
+# archive.org (so the metadata step succeeds and the S3 leg is actually
+# reached) and one fault-injecting adapter on s3.us.archive.org.
+
+
+ITEM_METADATA_DOCUMENT = {
+    "created": 1,
+    "d1": "ia600000.us.archive.org",
+    "d2": "ia800000.us.archive.org",
+    "dir": "/0/items/some-identifier",
+    "files": [],
+    "item_size": 0,
+    "metadata": {"identifier": "some-identifier", "mediatype": "image"},
+    "server": "ia600000.us.archive.org",
+    "uniq": 1,
+    "workable_servers": ["ia600000.us.archive.org"],
+}
+
+S3_SLOWDOWN_XML = (
+    b"<?xml version='1.0' encoding='UTF-8'?><Error><Code>SlowDown</Code>"
+    b"<Message>Please reduce your request rate.</Message>"
+    b"<Resource>some/resource</Resource></Error>"
+)
+S3_ACCESS_DENIED_XML = (
+    b"<?xml version='1.0' encoding='UTF-8'?><Error><Code>AccessDenied</Code>"
+    b"<Message>Access Denied</Message><Resource>some/resource</Resource></Error>"
+)
+
+
+def _canned(request, status_code, body, content_type):
+    response = requests.Response()
+    response.status_code = status_code
+    response.raw = io.BytesIO(body)
+    response.headers["Content-Type"] = content_type
+    response.url = request.url or ""
+    response.request = request
+    return response
+
+
+class CannedMetadataAdapter(HTTPAdapter):
+    """archive.org answers a real, minimal item-metadata document, so the
+    upload reaches S3 instead of failing before it."""
+
+    def send(self, request, *args, **kwargs):
+        return _canned(request, 200, json.dumps(ITEM_METADATA_DOCUMENT).encode(), "application/json")
+
+
+class FaultInjectingS3Adapter(HTTPAdapter):
+    """s3.us.archive.org answers whatever failure the test asks for, and
+    counts the attempts so a test can prove a retry did or did not happen."""
+
+    def __init__(self, fault):
+        super().__init__()
+        self.fault = fault
+        self.calls = []
+
+    def send(self, request, *args, **kwargs):
+        self.calls.append(request.url)
+        if isinstance(self.fault, Exception):
+            raise self.fault
+        status_code, body = self.fault
+        return _canned(request, status_code, body, "text/xml")
+
+
+def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
+    """Runs the real upload_row() against the real internetarchive library,
+    with S3 replaced by a fault-injecting adapter. Returns that adapter so the
+    caller can count attempts.
+
+    internetarchive.upload() is wrapped rather than replaced: the wrapper adds
+    the prepared session and then calls the real function, so upload_row's own
+    metadata building, response checking and retry all run for real.
+    """
+    session = internetarchive.session.ArchiveSession()
+    # upload() refuses to send without credentials; these never leave the
+    # process, since no adapter here opens a socket.
+    session.access_key = "fake-access-key"
+    session.secret_key = "fake-secret-key"
+    s3_adapter = FaultInjectingS3Adapter(fault)
+    session.mount("https://archive.org", CannedMetadataAdapter())
+    session.mount("https://s3.us.archive.org", s3_adapter)
+
+    real_upload = internetarchive.upload
+
+    def upload_through_the_prepared_session(identifier, **kwargs):
+        # The prepared session already carries the adapters under test, so the
+        # adapter policy argument would be ignored anyway; dropping it keeps
+        # get_item from being handed two ways to build a session.
+        kwargs.pop("http_adapter_kwargs", None)
+        return real_upload(identifier, archive_session=session, **kwargs)
+
+    monkeypatch.setattr(internetarchive, "upload", upload_through_the_prepared_session)
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+
+    (tmp_path / "photo1.jpg").write_bytes(b"pretend-jpeg-bytes")
+    return s3_adapter
+
+
+def run_upload_row(tmp_path):
+    from ia_bulk import upload_row
+
+    upload_row(
+        {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"},
+        target_identifier="some-identifier",
+        collection="test_collection",
+        files_dir=tmp_path,
+    )
+
+
+def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tmp_path, monkeypatch):
+    """The control. Without it every test below could pass because the harness
+    is broken in a way that always fails, rather than because the classifier
+    works."""
+    s3 = upload_row_against_s3_fault((200, b""), tmp_path, monkeypatch)
+
+    run_upload_row(tmp_path)
+
+    assert len(s3.calls) == 1
+    assert any("s3.us.archive.org" in url for url in s3.calls)
+
+
+def test_upload_row_reads_a_real_s3_slowdown_as_a_rate_limit(tmp_path, monkeypatch):
+    """Until now this was reasoned about from the library's source: that a
+    real S3 failure re-raises HTTPError with `response=exc.response` passed
+    through, so the parsed status survives even though the message is rebuilt
+    from the XML body and loses it. Exercised here instead - and the 503 must
+    NOT be retried, because a rate limit stops the run."""
+    s3 = upload_row_against_s3_fault((503, S3_SLOWDOWN_XML), tmp_path, monkeypatch)
+
+    with pytest.raises(Exception) as caught:
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == 1
+    assert is_rate_limit_error(caught.value) is True
+    # The rebuilt message really has lost the status - the classifier is not
+    # quietly succeeding by reading text.
+    assert "503" not in str(caught.value)
+
+
+def test_upload_row_retries_a_real_s3_read_timeout(tmp_path, monkeypatch):
+    """The scenario the feature was filed for, driven through the real
+    library: a slow S3 transfer times out and the row is retried rather than
+    failed."""
+    from ia_bulk import RETRY_ATTEMPTS
+
+    s3 = upload_row_against_s3_fault(
+        requests.exceptions.ReadTimeout("read timeout=12"), tmp_path, monkeypatch
+    )
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == RETRY_ATTEMPTS
+
+
+def test_upload_row_retries_a_real_s3_500(tmp_path, monkeypatch):
+    from ia_bulk import RETRY_ATTEMPTS
+
+    s3 = upload_row_against_s3_fault(
+        (500, b"<Error><Code>InternalError</Code><Message>oops</Message></Error>"),
+        tmp_path,
+        monkeypatch,
+    )
+
+    with pytest.raises(Exception):
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == RETRY_ATTEMPTS
+
+
+def test_upload_row_does_not_retry_a_real_s3_access_denied(tmp_path, monkeypatch):
+    """A refusal costs one attempt, not three. Access Denied is what a
+    misconfigured collection or a revoked key looks like, and no amount of
+    waiting changes it."""
+    s3 = upload_row_against_s3_fault((403, S3_ACCESS_DENIED_XML), tmp_path, monkeypatch)
+
+    with pytest.raises(Exception) as caught:
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == 1
+    assert is_rate_limit_error(caught.value) is False
 
 
 def test_cmd_upload_limit_stops_after_n_planned_targets(tmp_path, monkeypatch, capsys):

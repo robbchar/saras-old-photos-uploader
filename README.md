@@ -276,7 +276,7 @@ Other behavior, both paths:
 - Retries a row through transient network failures — three attempts, backing
   off about 2s then 4s, printing a line each time. A refusal (`Access Denied`,
   a rejected field, any 4xx) is not retried, and a rate limit still stops the
-  run instead. See
+  run instead. A `Retry-After` header is honoured up to 30s, never longer. See
   [`docs/DECISIONS.md`](docs/decisions/QUOTA-AND-RUNS.md#retry-covers-transport-failures-never-refusals)
 - Writes a timestamped JSONL log to `logs/upload-<timestamp>.jsonl`, one
   line per row: `{identifier, file, status, error, uploaded_as, live, timestamp}`.

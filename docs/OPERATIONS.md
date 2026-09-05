@@ -529,6 +529,20 @@ gets the same answer. `429`/`503` also skip retry: they mean Internet Archive
 is rate-limiting, which stops the run entirely ("Pacing and batch limits"
 above) rather than being waited out row by row.
 
+If Internet Archive sends a `Retry-After` header, it is honoured — but never
+for longer than 30 seconds. A longer one is treated as "stop the run and come
+back tomorrow" rather than sleeping through it, so a run cannot silently
+stall for an hour inside a single row.
+
+**What this has and has not been tested against.** The retry and rate-limit
+handling is exercised against a fault-injecting stand-in for
+`s3.us.archive.org` and a local server answering real status codes, so how
+the `internetarchive` library behaves for a given response is settled. What is
+*not* settled is what Internet Archive actually sends — whether the daily cap
+arrives as a 429/503 at all, and how a genuinely slow multi-megabyte upload
+behaves. No `--live` run has ever happened. Treat `--limit` as the dependable
+control and watch the first real run.
+
 ## Reading a run
 
 ```bash
