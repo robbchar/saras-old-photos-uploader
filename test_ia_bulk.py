@@ -9,8 +9,11 @@ from argparse import Namespace
 from pathlib import Path
 
 import internetarchive
+import internetarchive.session
 import pytest
 import requests
+import urllib3
+from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
 from column_map import build_column_map
@@ -5717,6 +5720,753 @@ def test_is_rate_limit_error_reads_the_structured_status_from_requests_httperror
         response=response,
     )
     assert is_rate_limit_error(exc) is True
+
+
+# --- retry with backoff (issue #5) ------------------------------------------
+#
+# The classification table below is the point of the feature: a transient
+# transport failure must be absorbed, and a real refusal must NOT be, because
+# retrying a refusal costs the operator time and tells them nothing new.
+# 429/503 are deliberately NOT retryable - they already have a stronger
+# response than retrying (stop the run, resume tomorrow); see
+# is_rate_limit_error() and docs/decisions/QUOTA-AND-RUNS.md.
+
+
+def http_error_with_status(status_code):
+    """A requests.HTTPError carrying a real, parsed status - the shape
+    is_retryable_ia_error() reads for anything that is not our own
+    UploadFailed. Uses a real requests.Response for the same reason
+    test_is_rate_limit_error_reads_the_structured_status_from_requests_httperror
+    does: HTTPError.__init__ is typed to accept `Response | None`."""
+    response = requests.Response()
+    response.status_code = status_code
+    return requests.exceptions.HTTPError("boom", response=response)
+
+
+@pytest.mark.parametrize(
+    "make_exc, expected, why",
+    [
+        (lambda: requests.exceptions.ReadTimeout("read timeout=12"), True,
+         "the exact failure issue #5 was filed about"),
+        (lambda: requests.exceptions.ConnectTimeout("connect timed out"), True, "transport"),
+        (lambda: requests.exceptions.ConnectionError("connection reset"), True, "transport"),
+        (lambda: http_error_with_status(500), True, "server-side; no reason a retry repeats it"),
+        (lambda: http_error_with_status(502), True, "bad gateway"),
+        (lambda: http_error_with_status(504), True, "gateway timeout"),
+        (lambda: UploadFailed("failed with status 500", status_code=500), True,
+         "same rule via our own parsed status_code"),
+        (lambda: UploadFailed("failed with status 503: SlowDown", status_code=503), False,
+         "rate limit - stops the run instead, never retried here"),
+        (lambda: UploadFailed("failed with status 429", status_code=429), False, "rate limit"),
+        (lambda: http_error_with_status(503), False, "rate limit, via .response.status_code"),
+        (lambda: http_error_with_status(403), False, "Access Denied is a real refusal"),
+        (lambda: http_error_with_status(400), False, "a rejected metadata field is rejected again"),
+        (lambda: UploadFailed("failed with status 404", status_code=404), False, "real refusal"),
+        (lambda: ValueError("the row has no 'file' value"), False,
+         "our own guard - a problem in the data, not the network"),
+        (lambda: RuntimeError("returned an unprepared Request"), False, "our own guard"),
+    ],
+)
+def test_is_retryable_ia_error(make_exc, expected, why):
+    from ia_bulk import is_retryable_ia_error
+
+    assert is_retryable_ia_error(make_exc()) is expected, why
+
+
+def test_is_retryable_ia_error_treats_an_unrecognized_exception_as_a_refusal():
+    """No parsed status and not a known transport failure means we cannot
+    tell that repeating the call is safe, so we do not. Failing the row costs
+    one re-run; repeating something unrecognized could cost more."""
+    from ia_bulk import is_retryable_ia_error
+
+    assert is_retryable_ia_error(Exception("something unrecognized")) is False
+
+
+def test_retry_ia_call_returns_the_first_attempts_value_without_sleeping(monkeypatch):
+    from ia_bulk import retry_ia_call
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: pytest.fail("slept on a success"))
+
+    assert retry_ia_call(lambda: "done", "uploading photo1.jpg") == "done"
+
+
+def test_retry_ia_call_absorbs_a_transient_failure_and_returns_the_retrys_value(
+    monkeypatch, capsys
+):
+    from ia_bulk import retry_ia_call
+
+    slept = []
+    monkeypatch.setattr("ia_bulk.time.sleep", slept.append)
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise requests.exceptions.ReadTimeout("read timeout=12")
+        return "done"
+
+    assert retry_ia_call(flaky, "uploading photo1.jpg") == "done"
+    assert len(attempts) == 2
+    assert len(slept) == 1
+    # The operator has to see that a flake was absorbed; silence here would
+    # make a slow run look like a hung one.
+    printed = capsys.readouterr().out
+    assert "attempt 1 of 3" in printed
+    assert "read timeout=12" in printed
+
+
+def test_retry_ia_call_reraises_the_last_failure_after_exhausting_attempts(monkeypatch):
+    """The exception that escapes must be the real one, unwrapped: the
+    callers' `except Exception` branches log str(exc) and hand the object to
+    is_rate_limit_error(), and both need the original."""
+    from ia_bulk import retry_ia_call, RETRY_ATTEMPTS
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    attempts = []
+    final = requests.exceptions.ReadTimeout("read timeout=12")
+
+    def always_times_out():
+        attempts.append(1)
+        raise final
+
+    with pytest.raises(requests.exceptions.ReadTimeout) as caught:
+        retry_ia_call(always_times_out, "uploading photo1.jpg")
+
+    assert caught.value is final
+    assert len(attempts) == RETRY_ATTEMPTS
+
+
+def test_retry_ia_call_does_not_retry_a_refusal(monkeypatch):
+    from ia_bulk import retry_ia_call
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: pytest.fail("slept on a refusal"))
+    attempts = []
+
+    def refused():
+        attempts.append(1)
+        raise UploadFailed("failed with status 403: Access Denied", status_code=403)
+
+    with pytest.raises(UploadFailed):
+        retry_ia_call(refused, "uploading photo1.jpg")
+
+    assert len(attempts) == 1
+
+
+def test_retry_ia_call_does_not_retry_a_rate_limit(monkeypatch):
+    """A 503 must reach the caller on the FIRST attempt, still carrying its
+    status_code, so SheetUploadRun's is_rate_limit_error() branch stops the
+    run exactly as promptly as it did before retry existed."""
+    from ia_bulk import retry_ia_call
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: pytest.fail("slept on a rate limit"))
+    attempts = []
+
+    def rate_limited():
+        attempts.append(1)
+        raise UploadFailed("failed with status 503: SlowDown", status_code=503)
+
+    with pytest.raises(UploadFailed) as caught:
+        retry_ia_call(rate_limited, "uploading photo1.jpg")
+
+    assert len(attempts) == 1
+    assert is_rate_limit_error(caught.value) is True
+
+
+def test_retry_delay_grows_and_never_returns_zero():
+    """Equal jitter, not full jitter: every wait is at least half its
+    ceiling. A backoff that can randomly pick ~0s does not actually wait out
+    a slow archive.org, which is the only thing the wait is for."""
+    from ia_bulk import retry_delay, RETRY_BASE_SECONDS, RETRY_MAX_SECONDS
+
+    first = [retry_delay(0) for _ in range(200)]
+    second = [retry_delay(1) for _ in range(200)]
+
+    assert min(first) >= RETRY_BASE_SECONDS / 2
+    assert max(first) <= RETRY_BASE_SECONDS
+    assert min(second) >= RETRY_BASE_SECONDS
+    assert max(second) <= RETRY_BASE_SECONDS * 2
+    # Jitter is real, not a constant dressed up as one.
+    assert len(set(first)) > 1
+    # Growth is capped rather than unbounded.
+    assert retry_delay(50) <= RETRY_MAX_SECONDS
+
+
+def test_upload_row_retries_a_transient_failure_from_the_library(tmp_path, monkeypatch):
+    """The S3 transfer is the one IA call with no retry of any kind
+    underneath it: internetarchive 5.10.1 deliberately does NOT mount its
+    retrying HTTP adapter on s3.us.archive.org (session.py: "IA-S3 requires a
+    more complicated retry workflow"), and upload_file()'s own `retries`
+    argument defaults to 0 and only ever fires on a 503. This is the case the
+    feature exists for."""
+    from ia_bulk import upload_row
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    (tmp_path / "photo1.jpg").write_bytes(b"data")
+    row = {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"}
+    calls = []
+
+    def flaky_upload(identifier, files, metadata, **kwargs):
+        calls.append(identifier)
+        if len(calls) == 1:
+            raise requests.exceptions.ReadTimeout("read timeout=12")
+        return [FakeResponse(ok=True)]
+
+    monkeypatch.setattr(internetarchive, "upload", flaky_upload)
+
+    upload_row(
+        row,
+        target_identifier="zztest-lcps-astoriaphotos-00001",
+        collection="test_collection",
+        files_dir=tmp_path,
+    )
+
+    assert len(calls) == 2
+
+
+def test_upload_row_retries_a_not_ok_500_response(tmp_path, monkeypatch):
+    """A failed *Response* rather than a raised exception becomes
+    upload_row()'s own UploadFailed, and has to classify by the same rule."""
+    from ia_bulk import upload_row
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    (tmp_path / "photo1.jpg").write_bytes(b"data")
+    row = {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"}
+    calls = []
+
+    def flaky_upload(identifier, files, metadata, **kwargs):
+        calls.append(identifier)
+        if len(calls) == 1:
+            return [FakeResponse(ok=False, status_code=500, text="Internal Server Error")]
+        return [FakeResponse(ok=True)]
+
+    monkeypatch.setattr(internetarchive, "upload", flaky_upload)
+
+    upload_row(
+        row,
+        target_identifier="zztest-lcps-astoriaphotos-00001",
+        collection="test_collection",
+        files_dir=tmp_path,
+    )
+
+    assert len(calls) == 2
+
+
+def test_upload_row_does_not_retry_a_503(tmp_path, monkeypatch):
+    """Guards the interaction retry could most easily break: 503 keeps its
+    old meaning - fail this row at once so the run can stop - instead of
+    being slowly retried first."""
+    from ia_bulk import upload_row
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: pytest.fail("slept on a rate limit"))
+    (tmp_path / "photo1.jpg").write_bytes(b"data")
+    row = {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"}
+    calls = []
+
+    def rate_limited_upload(identifier, files, metadata, **kwargs):
+        calls.append(identifier)
+        return [FakeResponse(ok=False, status_code=503, text="SlowDown")]
+
+    monkeypatch.setattr(internetarchive, "upload", rate_limited_upload)
+
+    with pytest.raises(UploadFailed) as caught:
+        upload_row(
+            row,
+            target_identifier="zztest-lcps-astoriaphotos-00001",
+            collection="test_collection",
+            files_dir=tmp_path,
+        )
+
+    assert len(calls) == 1
+    assert is_rate_limit_error(caught.value) is True
+
+
+def test_upload_row_does_not_retry_a_blank_filename(tmp_path, monkeypatch):
+    """The blank-file guard is defence against sending the whole data tree
+    into one permanent item. Retrying it would be pointless and would triple
+    the time spent reaching the same refusal."""
+    from ia_bulk import upload_row
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: pytest.fail("slept on a data error"))
+    monkeypatch.setattr(
+        internetarchive, "upload", lambda *a, **k: pytest.fail("reached the network")
+    )
+
+    with pytest.raises(ValueError, match="no 'file' value"):
+        upload_row(
+            {"identifier": "lcps-astoriaphotos-00001", "file": "  "},
+            target_identifier="zztest-lcps-astoriaphotos-00001",
+            collection="test_collection",
+            files_dir=tmp_path,
+        )
+
+
+def test_update_metadata_row_retries_a_transient_failure(monkeypatch):
+    from ia_bulk import update_metadata_row
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    calls = []
+
+    def flaky_modify(identifier, metadata, **kwargs):
+        calls.append(identifier)
+        if len(calls) == 1:
+            raise requests.exceptions.ConnectionError("connection reset by peer")
+        return FakeResponse(ok=True)
+
+    monkeypatch.setattr(internetarchive, "modify_metadata", flaky_modify)
+
+    update_metadata_row(
+        {"identifier": "lcps-astoriaphotos-00001", "title": "New title"},
+        "zztest-lcps-astoriaphotos-00001",
+    )
+
+    assert len(calls) == 2
+
+
+def test_update_metadata_row_does_not_retry_metadata_unchanged(monkeypatch):
+    """MetadataUnchanged is a normal, expected outcome the sync loop counts
+    separately - not a failure, and not something to repeat three times."""
+    from ia_bulk import update_metadata_row, MetadataUnchanged
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: pytest.fail("slept on an unchanged row"))
+    calls = []
+
+    def unchanged(identifier, metadata, **kwargs):
+        calls.append(identifier)
+        return FakeResponse(
+            ok=False, status_code=400, text=json.dumps({"error": "no changes to _meta.xml"})
+        )
+
+    monkeypatch.setattr(internetarchive, "modify_metadata", unchanged)
+
+    with pytest.raises(MetadataUnchanged):
+        update_metadata_row(
+            {"identifier": "lcps-astoriaphotos-00001", "title": "New title"},
+            "zztest-lcps-astoriaphotos-00001",
+        )
+
+    assert len(calls) == 1
+
+
+# --- recovering a status the metadata call strips -----------------------------
+#
+# internetarchive's session.get_metadata() re-raises every failure as
+# `type(exc)(error_msg)` - a fresh exception of the same class built from the
+# message alone - which drops `.response` and with it the only structured
+# status this codebase is willing to read. Two changes recover it, both
+# verified against a local server answering real status codes rather than
+# reasoned about: IA_RETRY makes a retried status arrive as a real HTTPError
+# instead of an opaque RetryError, and parsed_status_code() walks the implicit
+# __context__ chain that still holds the original exception.
+
+
+def stripped_like_get_metadata(status_code) -> requests.exceptions.HTTPError:
+    """Reproduces exactly what session.get_metadata() does to an exception:
+    catches the real one and re-raises `type(exc)(error_msg)`, losing
+    `.response` but leaving the original as the new exception's implicit
+    __context__. Built by raising for real rather than by hand-assembling a
+    chain, so the test breaks if that chaining ever stops happening."""
+    response = requests.Response()
+    response.status_code = status_code
+    try:
+        try:
+            raise requests.exceptions.HTTPError(
+                f"{status_code} Server Error: for url: https://archive.org/metadata/x",
+                response=response,
+            )
+        except Exception as exc:
+            raise type(exc)(f"Error retrieving metadata from https://archive.org/metadata/x, {exc}")
+    except requests.exceptions.HTTPError as stripped:
+        return stripped
+    raise AssertionError("unreachable: the inner raise always fires")
+
+
+def test_parsed_status_code_reads_a_status_the_metadata_call_stripped():
+    from ia_bulk import parsed_status_code
+
+    exc = stripped_like_get_metadata(503)
+
+    # The premise: the exception itself really has lost it.
+    assert exc.response is None
+    assert parsed_status_code(exc) == 503
+
+
+def test_is_rate_limit_error_catches_a_503_the_metadata_call_stripped():
+    """The gap this closes. `internetarchive.upload()` fetches the item's
+    metadata before transferring anything, so a rate limit can surface from
+    that GET rather than from S3. Stripped of its status it read as an
+    ordinary failure, and the run ground on through 500 rows of the same
+    503 instead of stopping."""
+    assert is_rate_limit_error(stripped_like_get_metadata(503)) is True
+    assert is_rate_limit_error(stripped_like_get_metadata(429)) is True
+
+
+def test_is_retryable_ia_error_reads_a_chained_status_both_ways():
+    from ia_bulk import is_retryable_ia_error
+
+    assert is_retryable_ia_error(stripped_like_get_metadata(500)) is True
+    assert is_retryable_ia_error(stripped_like_get_metadata(403)) is False
+    # A stripped rate limit stays non-retryable, exactly as an unstripped one
+    # does - recovering the status must not quietly reclassify it.
+    assert is_retryable_ia_error(stripped_like_get_metadata(503)) is False
+
+
+def test_parsed_status_code_prefers_the_exceptions_own_status_over_a_chained_one():
+    """An UploadFailed raised while handling something else must report its
+    own status, not the older one further down the chain."""
+    from ia_bulk import parsed_status_code
+
+    try:
+        raise stripped_like_get_metadata(503)
+    except Exception:
+        outer = UploadFailed("failed with status 403: Access Denied", status_code=403)
+
+    outer.__context__ = stripped_like_get_metadata(503)
+    assert parsed_status_code(outer) == 403
+
+
+def test_parsed_status_code_returns_none_when_nothing_in_the_chain_has_a_status():
+    from ia_bulk import parsed_status_code
+
+    try:
+        try:
+            raise requests.exceptions.ReadTimeout("read timeout=12")
+        except Exception as exc:
+            raise type(exc)(f"Error retrieving metadata from https://archive.org/metadata/x, {exc}")
+    except Exception as stripped:
+        assert parsed_status_code(stripped) is None
+
+
+def test_parsed_status_code_terminates_on_a_self_referential_chain():
+    """A cycle in __context__ is possible - CPython only breaks the cycle it
+    can see when setting the context, and one can also be assigned by hand.
+    Walking it without a guard would hang the run rather than fail a row."""
+    from ia_bulk import parsed_status_code
+
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__context__ = second
+    second.__context__ = first
+
+    assert parsed_status_code(first) is None
+
+
+def test_ia_retry_matches_the_librarys_own_policy_except_for_raise_on_status():
+    """IA_RETRY replaces internetarchive's default adapter policy, so it must
+    match it in every respect but the one being changed - otherwise this
+    silently alters how often and on what the library retries. Compared
+    against a session the library built itself, so the test fails if a future
+    version changes those defaults out from under us."""
+    from ia_bulk import IA_RETRY
+
+    library_adapter = internetarchive.get_session().get_adapter("https://archive.org/metadata/x")
+    assert isinstance(library_adapter, HTTPAdapter)
+    library_default = library_adapter.max_retries
+
+    assert library_default.raise_on_status is True
+    assert IA_RETRY.raise_on_status is False
+
+    assert IA_RETRY.total == library_default.total
+    assert IA_RETRY.connect == library_default.connect
+    assert IA_RETRY.read == library_default.read
+    assert IA_RETRY.status_forcelist == library_default.status_forcelist
+    assert IA_RETRY.backoff_factor == library_default.backoff_factor
+    assert IA_RETRY.allowed_methods is not None
+    assert library_default.allowed_methods is not None
+    assert set(IA_RETRY.allowed_methods) == set(library_default.allowed_methods)
+    assert IA_RETRY.respect_retry_after_header == library_default.respect_retry_after_header
+
+
+def test_upload_row_asks_for_the_status_preserving_adapter(tmp_path, monkeypatch):
+    from ia_bulk import upload_row, IA_RETRY
+
+    (tmp_path / "photo1.jpg").write_bytes(b"data")
+    captured = {}
+
+    def fake_upload(identifier, files, metadata, **kwargs):
+        captured.update(kwargs)
+        return [FakeResponse(ok=True)]
+
+    monkeypatch.setattr(internetarchive, "upload", fake_upload)
+
+    upload_row(
+        {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"},
+        target_identifier="zztest-lcps-astoriaphotos-00001",
+        collection="test_collection",
+        files_dir=tmp_path,
+    )
+
+    assert captured["http_adapter_kwargs"] == {"max_retries": IA_RETRY}
+
+
+def test_update_metadata_row_asks_for_the_status_preserving_adapter(monkeypatch):
+    from ia_bulk import update_metadata_row, IA_RETRY
+
+    captured = {}
+
+    def fake_modify(identifier, metadata, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse(ok=True)
+
+    monkeypatch.setattr(internetarchive, "modify_metadata", fake_modify)
+
+    update_metadata_row({"identifier": "x", "title": "New title"}, "zztest-x")
+
+    assert captured["http_adapter_kwargs"] == {"max_retries": IA_RETRY}
+
+
+def test_fetch_current_metadata_asks_for_the_status_preserving_adapter(monkeypatch):
+    """The dry run is not retried, but it reads the same endpoint - and a
+    session built with a different policy is a second, divergent way of
+    talking to Internet Archive."""
+    from ia_bulk import fetch_current_metadata, IA_RETRY
+
+    captured = {}
+
+    class FakeItem:
+        metadata = {"title": "Existing"}
+
+    def fake_get_item(identifier, **kwargs):
+        captured.update(kwargs)
+        return FakeItem()
+
+    monkeypatch.setattr(internetarchive, "get_item", fake_get_item)
+
+    assert fetch_current_metadata("zztest-x") == {"title": "Existing"}
+    assert captured["http_adapter_kwargs"] == {"max_retries": IA_RETRY}
+
+
+# --- a hostile Retry-After cannot stall a run ---------------------------------
+
+
+def response_with_retry_after(value):
+    """A urllib3 response carrying (or not carrying) a Retry-After header -
+    the object Retry.get_retry_after() is handed."""
+    headers = {} if value is None else {"Retry-After": value}
+    return urllib3.HTTPResponse(headers=headers)
+
+
+def test_ia_retry_caps_a_hostile_retry_after():
+    """urllib3 honours Retry-After by calling time.sleep() on it UNCAPPED -
+    DEFAULT_BACKOFF_MAX bounds the exponential path only, not this one. A
+    `Retry-After: 3600` would therefore sleep an hour inside a single call,
+    three times over, and the run would look hung. The header is still
+    honoured, just bounded."""
+    from ia_bulk import IA_RETRY, RETRY_AFTER_MAX_SECONDS
+
+    assert IA_RETRY.get_retry_after(response_with_retry_after("3600")) == RETRY_AFTER_MAX_SECONDS
+
+
+def test_ia_retry_honours_a_reasonable_retry_after_unchanged():
+    from ia_bulk import IA_RETRY
+
+    assert IA_RETRY.get_retry_after(response_with_retry_after("5")) == 5
+
+
+def test_ia_retry_passes_through_an_absent_retry_after():
+    from ia_bulk import IA_RETRY
+
+    assert IA_RETRY.get_retry_after(response_with_retry_after(None)) is None
+
+
+def test_ia_retry_keeps_its_cap_through_urllib3s_own_countdown():
+    """urllib3 does not reuse the Retry object it is given - it counts down by
+    calling increment(), which builds a fresh copy through new(). A cap that
+    lived only on the original instance would silently vanish on the very
+    first retry, which is the only time it matters."""
+    from ia_bulk import IA_RETRY, RETRY_AFTER_MAX_SECONDS
+
+    counted_down = IA_RETRY.increment(method="GET", url="/metadata/x")
+
+    assert isinstance(counted_down, type(IA_RETRY))
+    assert counted_down.get_retry_after(response_with_retry_after("3600")) == RETRY_AFTER_MAX_SECONDS
+
+
+# --- the S3 leg, exercised rather than reasoned about -------------------------
+#
+# s3.us.archive.org is hardcoded in internetarchive's item.py, so a local
+# server cannot stand in for it. A requests transport adapter mounted on that
+# host can. These tests drive the REAL Item.upload_file() - the code the whole
+# retry feature exists for - with no network, by mounting one canned adapter on
+# archive.org (so the metadata step succeeds and the S3 leg is actually
+# reached) and one fault-injecting adapter on s3.us.archive.org.
+
+
+ITEM_METADATA_DOCUMENT = {
+    "created": 1,
+    "d1": "ia600000.us.archive.org",
+    "d2": "ia800000.us.archive.org",
+    "dir": "/0/items/some-identifier",
+    "files": [],
+    "item_size": 0,
+    "metadata": {"identifier": "some-identifier", "mediatype": "image"},
+    "server": "ia600000.us.archive.org",
+    "uniq": 1,
+    "workable_servers": ["ia600000.us.archive.org"],
+}
+
+S3_SLOWDOWN_XML = (
+    b"<?xml version='1.0' encoding='UTF-8'?><Error><Code>SlowDown</Code>"
+    b"<Message>Please reduce your request rate.</Message>"
+    b"<Resource>some/resource</Resource></Error>"
+)
+S3_ACCESS_DENIED_XML = (
+    b"<?xml version='1.0' encoding='UTF-8'?><Error><Code>AccessDenied</Code>"
+    b"<Message>Access Denied</Message><Resource>some/resource</Resource></Error>"
+)
+
+
+def _canned(request, status_code, body, content_type):
+    response = requests.Response()
+    response.status_code = status_code
+    response.raw = io.BytesIO(body)
+    response.headers["Content-Type"] = content_type
+    response.url = request.url or ""
+    response.request = request
+    return response
+
+
+class CannedMetadataAdapter(HTTPAdapter):
+    """archive.org answers a real, minimal item-metadata document, so the
+    upload reaches S3 instead of failing before it."""
+
+    def send(self, request, *args, **kwargs):
+        return _canned(request, 200, json.dumps(ITEM_METADATA_DOCUMENT).encode(), "application/json")
+
+
+class FaultInjectingS3Adapter(HTTPAdapter):
+    """s3.us.archive.org answers whatever failure the test asks for, and
+    counts the attempts so a test can prove a retry did or did not happen."""
+
+    def __init__(self, fault):
+        super().__init__()
+        self.fault = fault
+        self.calls = []
+
+    def send(self, request, *args, **kwargs):
+        self.calls.append(request.url)
+        if isinstance(self.fault, Exception):
+            raise self.fault
+        status_code, body = self.fault
+        return _canned(request, status_code, body, "text/xml")
+
+
+def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
+    """Runs the real upload_row() against the real internetarchive library,
+    with S3 replaced by a fault-injecting adapter. Returns that adapter so the
+    caller can count attempts.
+
+    internetarchive.upload() is wrapped rather than replaced: the wrapper adds
+    the prepared session and then calls the real function, so upload_row's own
+    metadata building, response checking and retry all run for real.
+    """
+    session = internetarchive.session.ArchiveSession()
+    # upload() refuses to send without credentials; these never leave the
+    # process, since no adapter here opens a socket.
+    session.access_key = "fake-access-key"
+    session.secret_key = "fake-secret-key"
+    s3_adapter = FaultInjectingS3Adapter(fault)
+    session.mount("https://archive.org", CannedMetadataAdapter())
+    session.mount("https://s3.us.archive.org", s3_adapter)
+
+    real_upload = internetarchive.upload
+
+    def upload_through_the_prepared_session(identifier, **kwargs):
+        # The prepared session already carries the adapters under test, so the
+        # adapter policy argument would be ignored anyway; dropping it keeps
+        # get_item from being handed two ways to build a session.
+        kwargs.pop("http_adapter_kwargs", None)
+        return real_upload(identifier, archive_session=session, **kwargs)
+
+    monkeypatch.setattr(internetarchive, "upload", upload_through_the_prepared_session)
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+
+    (tmp_path / "photo1.jpg").write_bytes(b"pretend-jpeg-bytes")
+    return s3_adapter
+
+
+def run_upload_row(tmp_path):
+    from ia_bulk import upload_row
+
+    upload_row(
+        {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"},
+        target_identifier="some-identifier",
+        collection="test_collection",
+        files_dir=tmp_path,
+    )
+
+
+def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tmp_path, monkeypatch):
+    """The control. Without it every test below could pass because the harness
+    is broken in a way that always fails, rather than because the classifier
+    works."""
+    s3 = upload_row_against_s3_fault((200, b""), tmp_path, monkeypatch)
+
+    run_upload_row(tmp_path)
+
+    assert len(s3.calls) == 1
+    assert any("s3.us.archive.org" in url for url in s3.calls)
+
+
+def test_upload_row_reads_a_real_s3_slowdown_as_a_rate_limit(tmp_path, monkeypatch):
+    """Until now this was reasoned about from the library's source: that a
+    real S3 failure re-raises HTTPError with `response=exc.response` passed
+    through, so the parsed status survives even though the message is rebuilt
+    from the XML body and loses it. Exercised here instead - and the 503 must
+    NOT be retried, because a rate limit stops the run."""
+    s3 = upload_row_against_s3_fault((503, S3_SLOWDOWN_XML), tmp_path, monkeypatch)
+
+    with pytest.raises(Exception) as caught:
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == 1
+    assert is_rate_limit_error(caught.value) is True
+    # The rebuilt message really has lost the status - the classifier is not
+    # quietly succeeding by reading text.
+    assert "503" not in str(caught.value)
+
+
+def test_upload_row_retries_a_real_s3_read_timeout(tmp_path, monkeypatch):
+    """The scenario the feature was filed for, driven through the real
+    library: a slow S3 transfer times out and the row is retried rather than
+    failed."""
+    from ia_bulk import RETRY_ATTEMPTS
+
+    s3 = upload_row_against_s3_fault(
+        requests.exceptions.ReadTimeout("read timeout=12"), tmp_path, monkeypatch
+    )
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == RETRY_ATTEMPTS
+
+
+def test_upload_row_retries_a_real_s3_500(tmp_path, monkeypatch):
+    from ia_bulk import RETRY_ATTEMPTS
+
+    s3 = upload_row_against_s3_fault(
+        (500, b"<Error><Code>InternalError</Code><Message>oops</Message></Error>"),
+        tmp_path,
+        monkeypatch,
+    )
+
+    with pytest.raises(Exception):
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == RETRY_ATTEMPTS
+
+
+def test_upload_row_does_not_retry_a_real_s3_access_denied(tmp_path, monkeypatch):
+    """A refusal costs one attempt, not three. Access Denied is what a
+    misconfigured collection or a revoked key looks like, and no amount of
+    waiting changes it."""
+    s3 = upload_row_against_s3_fault((403, S3_ACCESS_DENIED_XML), tmp_path, monkeypatch)
+
+    with pytest.raises(Exception) as caught:
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == 1
+    assert is_rate_limit_error(caught.value) is False
 
 
 def test_cmd_upload_limit_stops_after_n_planned_targets(tmp_path, monkeypatch, capsys):
