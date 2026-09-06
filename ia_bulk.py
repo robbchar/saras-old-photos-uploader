@@ -960,11 +960,15 @@ def _read_log_results(log_path: str | Path, live: bool) -> list[dict]:
                 continue
             try:
                 entry = json.loads(line)
-                # A run_header is skipped explicitly rather than by merely
-                # lacking a "status" key - the header schema is free to grow a
-                # "status"-named field of its own later without silently
-                # turning this into a bug.
-                if entry.get("record") == "run_header":
+                # Any record naming its own type is a run-level record, not
+                # a row - the header and the closing summary today, whatever
+                # else the log grows later. Skipped by the presence of
+                # "record" rather than by matching each type's name, so a new
+                # record type cannot arrive here as damage; and skipped
+                # explicitly rather than by merely lacking a "status" or
+                # "identifier" key, so those schemas stay free to grow a
+                # field of that name without silently turning this into a bug.
+                if "record" in entry:
                     continue
                 if entry.get("live") != live:
                     continue
@@ -2268,7 +2272,7 @@ def run_rows(
     describe,
     file_value_for,
     targets: dict[str, str] | None = None,
-) -> dict[str, int]:
+) -> PushOutcome:
     """Shared progress/log-and-count loop for cmd_upload and
     cmd_sync_metadata - they differ only in how a row is processed, how its
     progress line reads, and what (if anything) goes in the log's file
@@ -2296,7 +2300,9 @@ def run_rows(
     rather than letting a miss fall back to a recomputed target that names
     an item which has never existed."""
     total = len(rows)
-    counts = {"success": 0, "unchanged": 0, "failure": 0}
+    succeeded = 0
+    unchanged = 0
+    failures: list[RowFailure] = []
     position = 0
     for row in rows:
         position += 1
@@ -2309,18 +2315,18 @@ def run_rows(
         print(f"[{position}/{total}] {action} {describe(row, target_identifier)}")
         try:
             process_row(row, target_identifier)
-            counts["success"] += 1
+            succeeded += 1
             log_result(log_path, identifier, file_value, "success", live, uploaded_as=target_identifier)
         except MetadataUnchanged:
-            counts["unchanged"] += 1
+            unchanged += 1
             log_result(log_path, identifier, file_value, "unchanged", live, uploaded_as=target_identifier)
         except Exception as exc:
-            counts["failure"] += 1
+            failures.append(RowFailure(identifier=identifier, error=str(exc)))
             print(f"    - {format_row_error(exc)}")
             log_result(
                 log_path, identifier, file_value, "failure", live, error=str(exc), uploaded_as=target_identifier
             )
-    return counts
+    return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
 
 
 class MissingWriteBackColumns(Exception):
@@ -3308,7 +3314,7 @@ def upload_from_csv(args, csv_path: str) -> int:
     for identifier in skip_identifiers:
         log_result(log_path, identifier, "", "success", args.live, error="carried over from resumed log")
 
-    counts = run_rows(
+    outcome = run_rows(
         to_upload,
         log_path,
         args.live,
@@ -3319,9 +3325,9 @@ def upload_from_csv(args, csv_path: str) -> int:
         file_value_for=lambda row: row["file"].strip(),
     )
 
-    print(f"{counts['success']} file(s) uploaded successfully, {counts['failure']} error(s)")
+    print(f"{outcome.succeeded} file(s) uploaded successfully, {outcome.failed} error(s)")
     print(f"log written to {log_path}")
-    return 1 if counts["failure"] else 0
+    return 1 if outcome.failed else 0
 
 
 def upload_from_sheet(args) -> int:
@@ -3602,6 +3608,167 @@ class SyncTarget:
     metadata: dict[str, str]
 
 
+@dataclass(frozen=True)
+class RowFailure:
+    """One row that did not get its metadata onto Internet Archive, and why.
+
+    The same shape serves both reasons a row can miss: a send Internet
+    Archive refused, and a row this run declined to send at all. What
+    separates them is which list of SyncSummary it lands in, not its own
+    fields - a reader wanting only one kind reads only one list."""
+
+    identifier: str
+    error: str
+
+    def as_record(self) -> dict[str, str]:
+        return {"identifier": self.identifier, "error": self.error}
+
+
+def skipped_rows(problems: list[RowValidation]) -> list[RowFailure]:
+    """The rows a run declined to send, as summary entries.
+
+    A RowValidation carries a list of errors; a row is skipped for the first
+    thing wrong with it, so the reasons are joined rather than one being
+    chosen. A row with a blank identifier still gets an entry: the reason is
+    the useful half, and dropping the row entirely would make the summary's
+    skipped list disagree with the count printed beside it."""
+    return [
+        RowFailure(identifier=problem.identifier, error="; ".join(problem.errors))
+        for problem in problems
+    ]
+
+
+@dataclass(frozen=True)
+class PushOutcome:
+    """What a send loop did - one entry per row it actually sent. Shared by
+    `upload` and both `sync-metadata` paths, which is why the count is
+    `succeeded` rather than sync's own word for it: an upload that worked
+    did not "change" anything. SyncSummary is where it becomes `changed`.
+
+    `failures` is the list, never a count beside it: `failed` is derived, so
+    there is no second number to forget to bump."""
+
+    succeeded: int = 0
+    unchanged: int = 0
+    failures: tuple[RowFailure, ...] = ()
+
+    @property
+    def failed(self) -> int:
+        return len(self.failures)
+
+    @property
+    def pushed(self) -> int:
+        return self.succeeded + self.unchanged + self.failed
+
+
+@dataclass(frozen=True)
+class SyncSummary:
+    """One sync run, whole. The console's closing lines and the log's
+    `run_summary` record are both rendered from this object, so the number a
+    person reads and the number a program reads cannot drift apart.
+
+    The three counts the summary is asked for mean:
+
+    - `checked` - rows this run evaluated, every row it read. Subtracting
+      `pushed` and the skipped rows from it leaves the rows not marked
+      uploaded, which is what an unattended run needs to see to know it is
+      looking at the whole Sheet and not a slice of it.
+    - `pushed` - rows actually sent to Internet Archive.
+    - `changed` - sends Internet Archive accepted as a change. `unchanged` is
+      its "no changes to _meta.xml" answer, kept as its own count rather than
+      folded in: that answer is the idempotence signal a full re-sync is run
+      to see, and reading it as "nothing happened" gets it exactly backwards.
+
+    `skipped` is separate from `outcome.failures` on purpose. A failure means
+    the item was contacted and the send was refused; a skip means the row was
+    never safely targetable and nothing was sent. Months later, that is the
+    difference between "the item may be in a state I did not intend" and "the
+    item was not touched" - a distinction a single flat list destroys."""
+
+    checked: int
+    outcome: PushOutcome
+    skipped: tuple[RowFailure, ...] = ()
+
+    @property
+    def pushed(self) -> int:
+        return self.outcome.pushed
+
+    @property
+    def changed(self) -> int:
+        """A successful metadata send IS a change - PushOutcome's neutral
+        `succeeded` becomes sync's own word for it here."""
+        return self.outcome.succeeded
+
+    @property
+    def unchanged(self) -> int:
+        return self.outcome.unchanged
+
+    @property
+    def failed(self) -> int:
+        return self.outcome.failed
+
+    def as_record(self, live: bool) -> dict:
+        return {
+            "record": "run_summary",
+            "timestamp": utc_timestamp(),
+            "live": live,
+            "checked": self.checked,
+            "pushed": self.pushed,
+            "changed": self.changed,
+            "unchanged": self.unchanged,
+            "failures": [failure.as_record() for failure in self.outcome.failures],
+            "skipped": [skip.as_record() for skip in self.skipped],
+        }
+
+
+def sync_summary_lines(summary: SyncSummary) -> list[str]:
+    """The run's closing lines for a person to read.
+
+    Rendered from the same SyncSummary that log_run_summary() writes, and the
+    only place either sync path formats those numbers, so what a person is
+    told and what a program reads cannot drift apart - the reason this takes
+    a summary rather than the counts it prints."""
+    lines = [
+        f"{summary.changed} item(s) updated successfully, {summary.unchanged} unchanged, "
+        f"{summary.failed} error(s)"
+    ]
+    if summary.skipped:
+        lines.append(
+            f"{_pluralize(len(summary.skipped), 'row')} skipped (not safely targetable)"
+        )
+    return lines
+
+
+def log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) -> None:
+    """The last line of a run's log: what the run did, in one record, without
+    replaying the per-row lines above it.
+
+    Appended like every other record rather than rewritten in place, so a run
+    killed partway still leaves every intact row record behind it - the log
+    stays readable by _read_log_results() whether or not this line was ever
+    written."""
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(summary.as_record(live)) + "\n")
+
+
+def try_log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) -> None:
+    """log_run_summary(), but a write failure is reported rather than raised.
+
+    The summary is a record OF the run, not a step IN it, and it is written
+    last - by the time it fails, permanent metadata has already changed. A
+    run reported as failed invites a rerun, so the one thing this must never
+    do is turn a sync that reached Internet Archive into a crash. Same
+    treatment log_run_header() already gets, and for the same reason."""
+    try:
+        log_run_summary(log_path, summary, live)
+    except Exception as exc:
+        print(
+            f"could not write the run-summary record to {log_path}: {exc}. The run itself "
+            "completed; this affects only the log's own audit trail.",
+            file=sys.stderr,
+        )
+
+
 def plan_sync_targets(
     rows: list[dict[str, str]], column_map: ColumnMap, live: bool, project_id: str
 ) -> tuple[list[SyncTarget], list[RowValidation]]:
@@ -3720,32 +3887,39 @@ def plan_sync_targets(
     return targets, problems
 
 
-def run_sheet_sync(targets: list[SyncTarget], log_path: Path, live: bool) -> dict[str, int]:
+def run_sheet_sync(targets: list[SyncTarget], log_path: Path, live: bool) -> PushOutcome:
     """Its own loop rather than run_rows(): that helper keys everything off
     `row["identifier"]`, and on the Sheet path that column holds the DONOR's
     archival reference, not this tool's identifier. Reusing it would have
     meant writing the tool's identifier into a column that means something
-    else."""
-    counts = {"success": 0, "unchanged": 0, "failure": 0}
+    else.
+
+    Collects each failure as it counts it, rather than counting now and
+    recovering the errors from the log afterwards. The caller needs both, and
+    a log line that failed to write would otherwise quietly shorten the
+    summary's failure list while leaving its count intact."""
+    succeeded = 0
+    unchanged = 0
+    failures: list[RowFailure] = []
     total = len(targets)
     for position, target in enumerate(targets, start=1):
         print(f"[{position}/{total}] updating metadata for {target.uploaded_as}")
         try:
             update_metadata_row(target.metadata, target.uploaded_as)
         except MetadataUnchanged:
-            counts["unchanged"] += 1
+            unchanged += 1
             log_result(log_path, target.identifier, "", "unchanged", live, uploaded_as=target.uploaded_as)
         except Exception as exc:
-            counts["failure"] += 1
+            failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
             print(f"    - {format_row_error(exc)}")
             log_result(
                 log_path, target.identifier, "", "failure", live,
                 error=str(exc), uploaded_as=target.uploaded_as,
             )
         else:
-            counts["success"] += 1
+            succeeded += 1
             log_result(log_path, target.identifier, "", "success", live, uploaded_as=target.uploaded_as)
-    return counts
+    return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
 
 
 def check_uploaded_as(
@@ -3872,16 +4046,17 @@ def sync_from_sheet(args) -> int:
             file=sys.stderr,
         )
 
-    counts = run_sheet_sync(targets, log_path, live)
-
-    print(
-        f"{counts['success']} item(s) updated successfully, {counts['unchanged']} unchanged, "
-        f"{counts['failure']} error(s)"
+    summary = SyncSummary(
+        checked=len(rows),
+        outcome=run_sheet_sync(targets, log_path, live),
+        skipped=tuple(skipped_rows(problems)),
     )
-    if problems:
-        print(f"{_pluralize(len(problems), 'row')} skipped (not safely targetable)")
+    try_log_run_summary(log_path, summary, live)
+
+    for line in sync_summary_lines(summary):
+        print(line)
     print(f"log written to {log_path}")
-    return 1 if (counts["failure"] or problems) else 0
+    return 1 if (summary.failed or summary.skipped) else 0
 
 
 def sync_from_csv(args) -> int:
@@ -3938,7 +4113,7 @@ def sync_from_csv(args) -> int:
     for identifier in skip_identifiers:
         log_result(log_path, identifier, "", "success", live, error="carried over from resumed log")
 
-    counts = run_rows(
+    outcome = run_rows(
         to_sync,
         log_path,
         live,
@@ -3950,9 +4125,17 @@ def sync_from_csv(args) -> int:
         targets=targets,
     )
 
-    print(f"{counts['success']} item(s) updated successfully, {counts['unchanged']} unchanged, {counts['failure']} error(s)")
+    # `checked` counts every row the CSV offered, including the ones
+    # --resume-from held back: they were read and judged, and a summary that
+    # counted only the sent ones would report a resumed run as a smaller job
+    # than the one it actually finished.
+    summary = SyncSummary(checked=len(rows), outcome=outcome)
+    try_log_run_summary(log_path, summary, live)
+
+    for line in sync_summary_lines(summary):
+        print(line)
     print(f"log written to {log_path}")
-    return 1 if counts["failure"] else 0
+    return 1 if summary.failed else 0
 
 
 RECONCILE_FLUSH_EVERY = 25

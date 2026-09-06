@@ -424,6 +424,23 @@ than sending corrections to identifiers that have never existed. See
 [`DECISIONS.md`](DECISIONS.md), "`sync-metadata` reads its targets from the
 upload log".
 
+### Checking a sync run you did not watch
+
+Every real sync run ends with a one-line summary at the bottom of its log,
+so you do not have to read the row-by-row lines above it:
+
+```bash
+tail -1 logs/sync-metadata-20260906T173949Z.jsonl
+```
+
+It gives `checked` / `pushed` / `changed` / `unchanged`, plus a `failures`
+list naming each item Internet Archive refused and why, and a separate
+`skipped` list naming the rows the run declined to send at all. Those two
+lists answer different questions: a failure means the item was contacted,
+a skip means it was never touched. The same numbers are what the run
+printed on screen — they come from one place and cannot disagree. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
+
 ## Pacing and batch limits
 
 IA's limits are **500 items per upload run** and **5,000 per day**.

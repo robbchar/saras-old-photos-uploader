@@ -463,10 +463,53 @@ had, and which were excluded as `(LCPS Internal)`); `required_for_upload`,
 that run. All of these can change between runs even though none of them
 changes per row within one, which is why they are captured once here
 rather than left to be reconstructed later from a Sheet that has since
-moved on. `load_prior_successes()` explicitly skips this record by its
-`record` field (not merely by lacking a `status` key, which would also
-happen to work but for the wrong reason) so it is never mistaken for a
-row result.
+moved on.
+
+### The `run_summary` record
+Every real `sync-metadata` run — Sheet path and `--csv` alike — ends with
+one more record as the log's **last** line: `{record: "run_summary",
+timestamp, live, checked, pushed, changed, unchanged, failures, skipped}`.
+It exists so a scheduled, unattended run produces something a program can
+read without parsing console output or replaying every row line above it,
+and so #26 has something to mirror into the Sheet.
+
+The counts mean:
+
+| field | meaning |
+| --- | --- |
+| `checked` | rows the run evaluated — every row it read. `checked − pushed − len(skipped)` is the rows not marked uploaded. |
+| `pushed` | rows actually sent to Internet Archive. Always `changed + unchanged + len(failures)`. |
+| `changed` | sends IA accepted as a change. |
+| `unchanged` | IA's *no changes to `_meta.xml`* — the idempotence signal a full re-sync is run to see, kept as its own count rather than folded into `changed`. |
+| `failures` | `{identifier, error}` per row IA refused. |
+| `skipped` | `{identifier, error}` per row the run declined to send at all. |
+
+`failures` and `skipped` are separate lists on purpose: a failure means the
+item was contacted and the edit refused; a skip means nothing was sent.
+Months later that is the difference between "this item may not be in the
+state I intended" and "this item was not touched", which one flat list
+destroys.
+
+No count is stored beside the list it counts — `failed` and `pushed` are
+derived properties of `SyncSummary` — and `sync_summary_lines()` renders
+the console's closing lines from that same object, so the number a person
+reads and the number a program reads cannot drift apart.
+
+The summary is written by `try_log_run_summary()`, which reports a write
+failure on stderr instead of raising. It is a record *of* the run, not a
+step *in* it, and by the time it is written permanent metadata has already
+changed — reporting a successful sync as failed would invite a rerun.
+
+`load_prior_successes()` skips **any** line carrying a `record` field, so
+neither run-level record is mistaken for a row result. Skipping on the
+presence of `record` rather than on each type's name means a record type
+added later cannot arrive there as damage; skipping explicitly rather than
+by a missing `status` or `identifier` key leaves both schemas free to grow
+a field of that name later without silently turning this into a bug. That
+mattered immediately: a summary carries no `identifier`, and a record
+naming no identifier is exactly what `_read_log_results()` counts as a
+damaged line — left unhandled, the summary would have made `--resume-from`
+announce every log as truncated.
 
 `load_prior_successes()` also **skips any line it cannot read** rather than
 raising, and reports the count on stderr. `log_result()` appends per row
