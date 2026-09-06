@@ -453,9 +453,22 @@ and unverified against a real response (`DECISIONS.md`, "Rate-limit
 detection matches a status code..."), so treat `--limit` as the dependable
 control and the detector as a bonus, not the other way around.
 
-Neither flag exists on the `--csv` path (`run_rows()` has no per-chunk Sheet
-write, and no ready/not-ready distinction, for either to mean anything
-there): with ~10,000 photos on that path, split the CSV into day-sized files
+`upload --batch "<value>"` scopes a run to one batch — the rows whose
+`batch_column` (named in the registry; `theme` for this project) holds that
+value. It is how you upload a collection theme by theme rather than
+front-to-back, and it narrows the scope before anything is counted, so
+`--batch "Logging" --limit 100` uploads 100 of the Logging rows. Preview it
+first with `validate --batch "<value>"`, which reports exactly the rows the
+upload would take. A misspelled value is refused with the values actually
+present in that column listed, so it never runs as a silent empty upload; the
+batch is recorded in the `run_header` log line, which is the only field that
+explains why a run uploaded 40 of 3,000 ready rows.
+
+None of `--limit`, `--chunk-size` or `--batch` exists on the `--csv` path
+(`run_rows()` has no per-chunk Sheet write and no ready/not-ready
+distinction, for the first two to mean anything there; a CSV's rows are
+already the ones you chose, and the batch column is named in the registry):
+with ~10,000 photos on that path, split the CSV into day-sized files
 yourself, or run it in sittings and rely on `--resume-from`. The 5,000/day
 refusal does apply there — it counts rows left after `--resume-from`
 filtering, so rows a previous run already uploaded do not count against

@@ -92,6 +92,7 @@ Internet Archive's limits, how a run paces itself against them, and what each
 run writes down about itself.
 
 - [`--limit` counts planned targets, not Sheet rows; `--chunk-size` overrides `CHUNK_SIZE`](decisions/QUOTA-AND-RUNS.md#--limit-counts-planned-targets-not-sheet-rows---chunk-size-overrides-chunk_size)
+- [A run is scoped to a batch by value; the column is registry configuration](decisions/QUOTA-AND-RUNS.md#a-run-is-scoped-to-a-batch-by-value-the-column-is-registry-configuration)
 - [A run may not exceed Internet Archive's daily item cap](decisions/QUOTA-AND-RUNS.md#a-run-may-not-exceed-internet-archives-daily-item-cap)
 - [Rate-limit detection uses a parsed status code, never message text](decisions/QUOTA-AND-RUNS.md#rate-limit-detection-uses-a-parsed-status-code-never-message-text)
 - [Retry covers transport failures, never refusals](decisions/QUOTA-AND-RUNS.md#retry-covers-transport-failures-never-refusals)
