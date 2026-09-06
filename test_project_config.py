@@ -277,3 +277,49 @@ def test_photo_extensions_may_not_be_empty():
     """An empty list would silently exclude every file on the drive."""
     with pytest.raises(ConfigError, match="at least one"):
         load_project_config(_registry(photo_extensions=[]), "p")
+
+
+def test_batch_column_defaults_to_none_when_absent():
+    """Optional with NO default column name. A project that never scopes its
+    runs by theme has no such column, and guessing one would make --batch
+    silently match nothing rather than refuse."""
+    config = load_project_config(_registry(), "p")
+    assert config.batch_column is None
+
+
+def test_batch_column_is_loaded_and_stripped():
+    config = load_project_config(_registry(batch_column="  theme  "), "p")
+    assert config.batch_column == "theme"
+
+
+def test_batch_column_must_be_a_string():
+    with pytest.raises(ConfigError, match="batch_column"):
+        load_project_config(_registry(batch_column=["theme"]), "p")
+
+
+def test_a_present_but_blank_batch_column_is_rejected():
+    """Present-and-empty is a half-finished edit, not "no batch column" -
+    absent already means that. Left alone it would make every --batch run
+    read a column named '' and match nothing."""
+    with pytest.raises(ConfigError) as exc:
+        load_project_config(_registry(batch_column="   "), "p")
+    assert str(exc.value) == (
+        "project 'p': batch_column must be a non-empty normalized column name, "
+        "got '   '. Remove the key entirely if this project's runs are never "
+        "scoped to a batch."
+    )
+
+
+def test_batch_column_raw_header_text_is_rejected_with_the_normalization_rule():
+    """Same rule required_for_upload and file_template follow: the registry
+    names the normalized column, not the Sheet's header text."""
+    with pytest.raises(ConfigError) as exc:
+        load_project_config(_registry(batch_column="Theme / Subject"), "p")
+    assert str(exc.value) == (
+        "project 'p': batch_column 'Theme / Subject' is raw header text, not a "
+        "normalized column name - use 'theme_subject'. This is the same rule "
+        "file_template follows: the Sheet's headers are normalized (lowercased, "
+        "punctuation dropped, spaces to underscores) before anything matches "
+        "against them, so the registry must name the normalized form. Your Sheet "
+        "is fine; the registry entry is not."
+    )

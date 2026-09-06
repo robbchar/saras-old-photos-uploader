@@ -169,6 +169,7 @@ def _sheet_config(**overrides) -> ProjectConfig:
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -1589,6 +1590,7 @@ def test_build_sheet_client_reads_the_real_sheet_id_when_live(monkeypatch):
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
 
     client = build_sheet_client(config, live=True)
@@ -1613,6 +1615,7 @@ def test_build_sheet_client_reads_the_test_sheet_id_when_not_live(monkeypatch):
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
 
     client = build_sheet_client(config, live=False)
@@ -1650,6 +1653,7 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
 
     build_sheet_client(config, live=True)
