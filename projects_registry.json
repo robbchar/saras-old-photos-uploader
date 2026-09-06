@@ -10,6 +10,7 @@
       "sheet_tab": "Test Sheet",
       "files_dir": "./data",
       "file_template": "{folder_on_lacie_drive}/{file_name}",
+      "batch_column": "theme",
       "required_for_upload": ["title", "theme"]
     }
   }

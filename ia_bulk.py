@@ -857,6 +857,7 @@ def log_run_header(
     dry_run: bool,
     limit: int | None = None,
     chunk_size: int = CHUNK_SIZE,
+    batch: str | None = None,
 ) -> None:
     """The first line written to a Sheet-path run's log. `head -1 <log>` then
     answers "what did this run send, under what field names, and what did it
@@ -882,6 +883,13 @@ def log_run_header(
     tests that call this directly without passing them still get a header
     that says so explicitly, rather than omitting the fields.
 
+    `batch` is there for the same reason and is the strongest case of the
+    three: a scoped run uploads a fraction of the ready rows and looks, in
+    every other field of this record, exactly like a run that found little to
+    do. `batch_column` is written beside it even on an unscoped run, since
+    the value alone means nothing without the column it was matched against -
+    and that column can change in the registry between runs.
+
     Deliberately excludes anything that isn't safe to keep around in a log
     file indefinitely: no credentials, no tokens, no filesystem paths outside
     the project. `sheet_id` is the one Google identifier here, and it already
@@ -901,6 +909,8 @@ def log_run_header(
         "required_for_upload": list(config.required_for_upload),
         "limit": limit,
         "chunk_size": chunk_size,
+        "batch": batch,
+        "batch_column": config.batch_column,
     }
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
@@ -2033,6 +2043,17 @@ def check_required_for_upload(config: ProjectConfig, column_map: ColumnMap) -> l
 MAX_LISTED_BATCH_VALUES = 20
 
 
+# --batch is a Sheet-and-registry concept: the column it matches against is
+# named in the registry, and a CSV is a small hand-prepared file whose rows
+# are already the ones the operator chose. Silently ignoring an explicit flag
+# on the wrong path is its own trap - the same reasoning --limit's refusal is
+# written under.
+BATCH_IS_SHEET_ONLY = (
+    "--batch scopes a run to a value of the column named by the registry's batch_column, "
+    "so it applies to the Sheet path only. Drop --csv to run against the Sheet."
+)
+
+
 class BatchScopeError(Exception):
     """--batch cannot be honored as typed.
 
@@ -2057,6 +2078,58 @@ def fold_batch_value(value: str) -> str:
     return value.strip().casefold()
 
 
+def batch_column_for(config: ProjectConfig, batch_value: str, registry_path: str) -> str:
+    """The half of --batch's validation that needs no Sheet: the value is not
+    empty, and this project says which column holds a row's batch.
+
+    Split out so a command can refuse a mistyped flag BEFORE reading the
+    Sheet, resolving several thousand filenames against the drive and
+    validating every row - the same fail-fast reasoning --limit and
+    --chunk-size are read under."""
+    value = batch_value.strip()
+    if not value:
+        raise BatchScopeError(
+            '--batch needs the value to scope the run to, e.g. --batch "Logging". An '
+            "empty value does not mean 'every row' - drop the flag entirely for that."
+        )
+
+    if config.batch_column is None:
+        raise BatchScopeError(
+            f"project '{config.project_id}' has no 'batch_column' in {registry_path}, so "
+            "--batch has nothing to match against. Which column holds a row's batch is a "
+            "per-project fact, so it lives in the registry rather than on the command "
+            'line: add "batch_column": "<normalized column name>" to the project '
+            "block. Refusing rather than running unfiltered - a --batch that uploaded "
+            "every row would look exactly like a successful batch run."
+        )
+
+    return config.batch_column
+
+
+def resolve_batch_scope(
+    args,
+    config: ProjectConfig,
+    column_map: ColumnMap,
+    rows: list[dict[str, str]],
+) -> set[int] | None:
+    """The row numbers --batch narrows this run to, or None when the flag was
+    not passed. The single definition of scope `validate` and `upload` share -
+    the two commands previewing and performing different sets of rows would
+    make the preview worthless."""
+    batch_value = getattr(args, "batch", None)
+    if batch_value is None:
+        return None
+    return batch_row_numbers(rows, config, column_map, batch_value, args.registry)
+
+
+def in_batch_scope(results: list[RowValidation], scope: set[int] | None) -> list[RowValidation]:
+    """Row results this run is reporting on. Everything outside the batch is
+    another run's business, including its uncatalogued rows."""
+    if scope is None:
+        return results
+    return [result for result in results if result.row_number in scope]
+
+
 def batch_row_numbers(
     rows: list[dict[str, str]],
     config: ProjectConfig,
@@ -2078,23 +2151,8 @@ def batch_row_numbers(
 
     Raises BatchScopeError for the four ways this cannot be honored; see that
     class for why none of them is a fallback."""
+    column = batch_column_for(config, batch_value, registry_path)
     value = batch_value.strip()
-    if not value:
-        raise BatchScopeError(
-            "--batch needs the value to scope the run to, e.g. --batch \"Logging\". An "
-            "empty value does not mean 'every row' - drop the flag entirely for that."
-        )
-
-    column = config.batch_column
-    if column is None:
-        raise BatchScopeError(
-            f"project '{config.project_id}' has no 'batch_column' in {registry_path}, so "
-            "--batch has nothing to match against. Which column holds a row's batch is a "
-            "per-project fact, so it lives in the registry rather than on the command "
-            "line: add \"batch_column\": \"<normalized column name>\" to the project "
-            "block. Refusing rather than running unfiltered - a --batch that uploaded "
-            "every row would look exactly like a successful batch run."
-        )
 
     known = sorted(set(column_map.field_names.values()))
     if column not in known:
@@ -2328,6 +2386,9 @@ def cmd_validate(args) -> int:
     # falsy.
     csv_path = getattr(args, "csv", None)
     if csv_path is not None:
+        if getattr(args, "batch", None) is not None:
+            print(BATCH_IS_SHEET_ONLY, file=sys.stderr)
+            return 1
         data = read_csv(csv_path)
         registry = load_registry(args.registry)
         if refuse_unregistered_project(registry, args.project):
@@ -2342,6 +2403,16 @@ def cmd_validate(args) -> int:
     config = load_project_config(registry, args.project)
     live = bool(args.live)
 
+    # Before any Sheet I/O, for the same reason `upload` reads --limit early:
+    # a mistyped flag should not cost a full read and a full validation pass
+    # first. The rest of --batch's checks need the Sheet and run below.
+    try:
+        if getattr(args, "batch", None) is not None:
+            batch_column_for(config, args.batch, args.registry)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
     print(sheet_banner(config, live))
     print()
 
@@ -2352,6 +2423,26 @@ def cmd_validate(args) -> int:
         return 1
 
     column_map, rows = sheet.column_map, sheet.rows
+
+    # `validate` previews what `upload` would do, so it must narrow to the
+    # same rows through the same function. Rows and results are filtered as
+    # PAIRS: format_lifecycle_summary requires one result per row in the same
+    # order and checks the lengths, and the row numbers on the results are
+    # still the Sheet's own, so a report still names the row an operator has
+    # to go and edit.
+    try:
+        scope = resolve_batch_scope(args, config, column_map, rows)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if scope is not None:
+        in_scope = [
+            (row, result)
+            for row, result in zip(rows, row_results)
+            if result.row_number in scope
+        ]
+        rows = [row for row, _ in in_scope]
+        row_results = [result for _, result in in_scope]
 
     results = header_results + row_results
     print(format_report(results))
@@ -2837,6 +2928,7 @@ def plan_upload_targets(
     live: bool,
     fingerprints: dict[int, str],
     stamp: str,
+    scope: set[int] | None = None,
 ) -> list[UploadTarget]:
     """Decides what this run will upload and under which identifier.
 
@@ -2851,7 +2943,17 @@ def plan_upload_targets(
 
     `stamp` is computed once by the caller (run_stamp(), called once per
     upload_from_sheet() invocation) so every target this run plans - across
-    every chunk SheetUploadRun.execute() later processes - shares one stamp."""
+    every chunk SheetUploadRun.execute() later processes - shares one stamp.
+
+    `scope` is --batch's row numbers, or None for an unscoped run. It narrows
+    which rows become targets but deliberately NOT which rows `existing`
+    scans: a number spent by any row in the Sheet is spent, whatever batch
+    that row belongs to, and a scoped run that only looked at its own rows
+    would mint another batch's numbers a second time. Filtering here rather
+    than slicing the returned list is what keeps a batch's numbers
+    contiguous - next_identifiers() takes max+1 and never refills, so a
+    number minted for an out-of-scope row and then discarded would leave a
+    permanent gap."""
     if len(rows) != len(row_results):
         raise ValueError(
             f"plan_upload_targets: got {len(rows)} row(s) but {len(row_results)} row_results - "
@@ -2872,6 +2974,8 @@ def plan_upload_targets(
         # scope agree with what `validate`'s lifecycle summary calls "ready to
         # upload"; the two commands must not define that phrase differently.
         if not result.is_valid or result.readiness is Readiness.NOT_READY:
+            continue
+        if scope is not None and offset + 2 not in scope:
             continue
         state = classify_row(row)
         if state is RowState.DONE:
@@ -3365,6 +3469,10 @@ def upload_from_csv(args, csv_path: str) -> int:
         )
         return 1
 
+    if getattr(args, "batch", None) is not None:
+        print(BATCH_IS_SHEET_ONLY, file=sys.stderr)
+        return 1
+
     files_dir = getattr(args, "files_dir", None) or "."
     collection = TEST_COLLECTION
     if args.live:
@@ -3532,6 +3640,17 @@ def upload_from_sheet(args) -> int:
         )
         return 1
 
+    # Read before any Sheet I/O for the same reason --limit and --chunk-size
+    # are: a mistyped flag must not cost a full read, a full file-resolution
+    # pass over the drive and a full validation first. The rest of --batch's
+    # checks need the Sheet's own columns and run after it is read.
+    try:
+        if getattr(args, "batch", None) is not None:
+            batch_column_for(config, args.batch, args.registry)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
     try:
         sheet = read_sheet(args, registry, config, live, "upload")
     except SheetSetupFailed:
@@ -3575,12 +3694,22 @@ def upload_from_sheet(args) -> int:
     # per-field breakdown of the backlog - repeating it here would make
     # `upload` loud about the ~2,900 uncatalogued rows on every single run,
     # which is the exact noise this split exists to stop.
+    # --batch narrows the scope BEFORE anything counts it: an uncatalogued or
+    # broken row in another batch is not this run's business to report, and
+    # `validate --batch` shows exactly this same set through this same call.
+    try:
+        scope = resolve_batch_scope(args, config, column_map, rows)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    reported = in_batch_scope(row_results, scope)
+
     blocked = [
         result
-        for result in row_results
+        for result in reported
         if not result.is_valid and result.readiness is Readiness.READY
     ]
-    not_ready = [result for result in row_results if result.readiness is Readiness.NOT_READY]
+    not_ready = [result for result in reported if result.readiness is Readiness.NOT_READY]
     not_ready_broken = [result for result in not_ready if not result.is_valid]
 
     if blocked:
@@ -3608,7 +3737,13 @@ def upload_from_sheet(args) -> int:
     if blocked or not_ready:
         print()
 
-    targets = plan_upload_targets(rows, row_results, config, live, source_fingerprints, run_stamp())
+    # `rows` and `row_results` stay whole here, with `scope` passed alongside:
+    # plan_upload_targets reads every row for identifiers already spent, and
+    # everything downstream of the Sheet read is positional, so a compacted
+    # list would both renumber rows and re-mint another batch's numbers.
+    targets = plan_upload_targets(
+        rows, row_results, config, live, source_fingerprints, run_stamp(), scope=scope
+    )
 
     # Task 12: --limit counts PLANNED targets (valid AND ready AND not
     # already done), not Sheet rows scanned - plan_upload_targets has
@@ -3661,7 +3796,16 @@ def upload_from_sheet(args) -> int:
 
     log_path = open_log(args.log_dir, "upload")
     try:
-        log_run_header(log_path, config, column_map, live, dry_run, limit=limit, chunk_size=chunk_size)
+        log_run_header(
+            log_path,
+            config,
+            column_map,
+            live,
+            dry_run,
+            limit=limit,
+            chunk_size=chunk_size,
+            batch=getattr(args, "batch", None),
+        )
     except Exception as exc:
         # This record is a receipt for later, not part of the upload itself -
         # a run about to create permanent Internet Archive items must not be
@@ -4534,6 +4678,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read the project's real Sheet instead of its test Sheet (ignored with --csv)",
     )
+    validate_parser.add_argument(
+        "--batch",
+        default=None,
+        help=(
+            "Report only the rows whose registry-configured batch_column holds this value "
+            "(Sheet path only). Previews exactly the scope `upload --batch` would run, "
+            "through the same code. Matching ignores case and surrounding whitespace."
+        ),
+    )
 
     upload_parser = subparsers.add_parser(
         "upload", help="Upload items from a project's Sheet, or from an offline CSV"
@@ -4583,6 +4736,18 @@ def build_parser() -> argparse.ArgumentParser:
             "--limit 100 uploads 100 of the 150 ready rows, not the first 100 rows read. "
             "Combines with --chunk-size as 'this many total, batched this way': --limit 10 "
             "--chunk-size 3 uploads 10 items in chunks of 3, not 10 chunks of 3."
+        ),
+    )
+    upload_parser.add_argument(
+        "--batch",
+        default=None,
+        help=(
+            "Upload only the rows whose registry-configured batch_column holds this value "
+            "(Sheet path only) - the way a run is scoped to one theme. Only the value goes "
+            "here: which column holds it is a per-project fact and lives in the registry's "
+            "batch_column. Matching ignores case and surrounding whitespace. Narrows the "
+            "scope before anything is counted, so --limit means 'this many OF THE BATCH'. "
+            "A value no row carries is refused, never run as an empty upload."
         ),
     )
     upload_parser.add_argument(

@@ -323,3 +323,14 @@ def test_batch_column_raw_header_text_is_rejected_with_the_normalization_rule():
         "against them, so the registry must name the normalized form. Your Sheet "
         "is fine; the registry entry is not."
     )
+
+
+def test_the_shipped_registry_batches_this_project_by_theme():
+    """The Sheet column an operator scopes a run to with --batch. Asserted
+    against the shipped file because a rename there silently turns every
+    --batch run into a refusal."""
+    registry = json.loads(Path("projects_registry.json").read_text(encoding="utf-8"))
+
+    config = load_project_config(registry, "sarasoldphotos")
+
+    assert config.batch_column == "theme"

@@ -10022,3 +10022,346 @@ def test_the_listed_values_are_capped_so_a_wide_column_stays_readable():
     assert "Theme 01" in message
     assert "Theme 30" not in message
     assert "10 more" in message
+
+
+def test_plan_upload_targets_mints_only_for_rows_in_scope():
+    """A scoped run must not mint a number for a row it is not going to
+    upload: next_identifiers() takes max+1 and never refills, so a minted-
+    then-discarded number would leave a permanent gap in the sequence."""
+    from ia_bulk import plan_upload_targets
+
+    rows = [
+        {"ia_identifier": "", "ia_uploaded": "", "title": "One", "theme": "Logging"},
+        {"ia_identifier": "", "ia_uploaded": "", "title": "Two", "theme": "Fishing"},
+        {"ia_identifier": "", "ia_uploaded": "", "title": "Three", "theme": "Logging"},
+    ]
+    results = [RowValidation(row_number=n, identifier="") for n in (2, 3, 4)]
+
+    targets = plan_upload_targets(
+        rows, results, _sheet_config(), live=False, fingerprints={}, stamp=FIXED_STAMP,
+        scope={2, 4},
+    )
+
+    assert [(target.row_number, target.identifier) for target in targets] == [
+        (2, "lcps-astoriaphotos-00001"),
+        (4, "lcps-astoriaphotos-00002"),
+    ]
+
+
+def test_plan_upload_targets_still_reads_every_row_for_numbers_already_spent():
+    """The hazard scoping introduces: an out-of-scope row holding
+    lcps-astoriaphotos-00007 has spent that number permanently, and a batch
+    that only looked at its own rows would mint it a second time."""
+    from ia_bulk import plan_upload_targets
+
+    rows = [
+        {"ia_identifier": "lcps-astoriaphotos-00007", "ia_uploaded": "yes",
+         "title": "Other batch", "theme": "Fishing"},
+        {"ia_identifier": "", "ia_uploaded": "", "title": "Mine", "theme": "Logging"},
+    ]
+    results = [RowValidation(row_number=n, identifier="") for n in (2, 3)]
+
+    targets = plan_upload_targets(
+        rows, results, _sheet_config(), live=False, fingerprints={}, stamp=FIXED_STAMP,
+        scope={3},
+    )
+
+    assert [target.identifier for target in targets] == ["lcps-astoriaphotos-00008"]
+
+
+BATCH_SHEET_HEADER = SHEET_HEADER + ["Theme"]
+
+
+def _batch_grid():
+    return [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Fishing"],
+        ["Third photo", "photo3.jpg", "", "", "", "", "logging"],
+    ]
+
+
+def _batch_registry(tmp_path, **overrides):
+    return make_sheet_registry(files_dir=str(tmp_path), batch_column="theme", **overrides)
+
+
+def test_cmd_upload_batch_uploads_only_the_rows_in_that_batch(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.uploads == [
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001",
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",
+    ]
+
+
+def test_cmd_upload_batch_composes_with_limit_as_that_many_of_the_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """--limit already means "this many of the rows actually in scope", and
+    --batch narrows what in-scope means - it must not become "this many rows
+    read, then filtered"."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Fishing"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Logging"],
+        ["Third photo", "photo3.jpg", "", "", "", "", "Logging"],
+    ]
+    captured = []
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+        captured=captured,
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, batch="Logging", limit=1)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    # The Fishing row is first in the Sheet, so an unscoped --limit 1 would
+    # upload it - the one thing this must not do.
+    assert [entry["row"]["title"] for entry in captured] == ["Second photo"]
+
+
+def test_cmd_upload_refuses_a_batch_the_project_has_no_column_for(
+    tmp_path, monkeypatch, capsys
+):
+    """Never a silent unfiltered run: without this the flag would be ignored
+    and all three rows would upload."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=make_sheet_registry(files_dir=str(tmp_path)),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "batch_column" in err
+    assert recorder.uploads == []
+
+
+def test_cmd_upload_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch="Loging"))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "matches no row" in err
+    assert recorder.uploads == []
+
+
+def test_cmd_upload_counts_only_the_batch_as_not_yet_catalogued(
+    tmp_path, monkeypatch, capsys
+):
+    """The scope is narrowed before anything counts: an uncatalogued row in
+    another batch is not this run's business to report."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["", "photo2.jpg", "", "", "", "", "Fishing"],
+        ["", "photo3.jpg", "", "", "", "", "Logging"],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    out = capsys.readouterr().out
+
+    assert "1 row not yet catalogued" in out
+
+
+def test_cmd_upload_rejects_batch_on_the_csv_path(tmp_path, capsys):
+    """--batch is a Sheet-and-registry concept. Silently ignoring an explicit
+    flag on the wrong path is the trap --limit's own refusal exists to stop."""
+    from ia_bulk import cmd_upload
+
+    csv_path = tmp_path / "items.csv"
+    write_csv(csv_path, ["identifier", "file", "mediatype"], [])
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, csv=str(csv_path), batch="Logging")
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "--batch" in err
+
+
+def test_cmd_validate_batch_reports_only_the_rows_in_that_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """validate previews exactly what upload would do, through the same
+    scoping code - the two commands must not define the scope differently."""
+    from ia_bulk import cmd_validate
+
+    for name in ("photo1.jpg", "photo2.jpg", "photo3.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(_batch_grid())
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_batch_registry(tmp_path)), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(
+            csv=None, project="astoriaphotos", registry=str(registry_path),
+            live=False, batch="Logging",
+        )
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "2/2 rows passed" in out
+    assert "2 rows ready to upload" in out
+
+
+def test_cmd_validate_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_validate
+
+    for name in ("photo1.jpg", "photo2.jpg", "photo3.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(_batch_grid())
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_batch_registry(tmp_path)), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(
+            csv=None, project="astoriaphotos", registry=str(registry_path),
+            live=False, batch="Loging",
+        )
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "matches no row" in err
+
+
+def test_cmd_validate_rejects_batch_on_the_csv_path(tmp_path, capsys):
+    from ia_bulk import cmd_validate
+
+    csv_path = tmp_path / "items.csv"
+    write_csv(csv_path, ["identifier", "file", "mediatype"], [])
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(
+            csv=str(csv_path), project="astoriaphotos", registry=str(registry_path),
+            files_dir=".", live=False, batch="Logging",
+        )
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "--batch" in err
+
+
+def test_build_parser_accepts_batch_on_both_upload_and_validate():
+    parser = build_parser()
+
+    validate_args = parser.parse_args(
+        ["validate", "--project", "p", "--batch", "Logging"]
+    )
+    upload_args = parser.parse_args(["upload", "--project", "p", "--batch", "Logging"])
+
+    assert validate_args.batch == "Logging"
+    assert upload_args.batch == "Logging"
+
+
+def test_build_parser_leaves_batch_unset_by_default():
+    parser = build_parser()
+
+    assert parser.parse_args(["validate", "--project", "p"]).batch is None
+    assert parser.parse_args(["upload", "--project", "p"]).batch is None
+
+
+def test_the_run_header_records_the_batch_a_scoped_run_ran(tmp_path, monkeypatch, capsys):
+    """Reconstructability, the same reason --limit and --chunk-size are in
+    here: months later, "why did this run upload 40 of 3,000 rows" cannot be
+    answered from the rest of the record if the batch it was scoped to is
+    missing."""
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    capsys.readouterr()
+
+    log_file = next((tmp_path / "logs").glob("upload-*.jsonl"))
+    header = json.loads(log_file.read_text(encoding="utf-8").splitlines()[0])
+
+    assert header["batch"] == "Logging"
+    assert header["batch_column"] == "theme"
+
+
+def test_the_run_header_of_an_unscoped_run_says_so_rather_than_omitting_it(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    log_file = next((tmp_path / "logs").glob("upload-*.jsonl"))
+    header = json.loads(log_file.read_text(encoding="utf-8").splitlines()[0])
+
+    assert header["batch"] is None
+    assert header["batch_column"] == "theme"
