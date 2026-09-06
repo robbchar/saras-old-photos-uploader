@@ -2027,6 +2027,123 @@ def check_required_for_upload(config: ProjectConfig, column_map: ColumnMap) -> l
     ]
 
 
+# How many distinct values a "that batch matches nothing" message lists before
+# it summarizes the rest. A theme column with hundreds of values would
+# otherwise bury the message it is attached to.
+MAX_LISTED_BATCH_VALUES = 20
+
+
+class BatchScopeError(Exception):
+    """--batch cannot be honored as typed.
+
+    Every one of these is a refusal rather than a fallback, and they all guard
+    the same failure: a --batch run that quietly matches every row, or quietly
+    matches none. Both read as success. "Nothing to upload" in particular is
+    indistinguishable from "this batch is already finished", so a typo'd value
+    would look like a completed run.
+
+    Carries the operator-facing message; the commands print it to stderr and
+    exit non-zero."""
+
+
+def fold_batch_value(value: str) -> str:
+    """The matching rule: surrounding whitespace dropped, case folded.
+
+    These cells are typed by hand into a Sheet, so 'Logging ', 'logging' and
+    'LOGGING' are one batch. The cost is that two themes differing only in
+    case can never be scoped apart, which is the right trade here: on a Sheet
+    filled in by several people over months, a case difference is far more
+    likely to be a typo than a distinction."""
+    return value.strip().casefold()
+
+
+def batch_row_numbers(
+    rows: list[dict[str, str]],
+    config: ProjectConfig,
+    column_map: ColumnMap,
+    batch_value: str,
+    registry_path: str,
+) -> set[int]:
+    """The Sheet rows in scope for --batch, as row numbers (header is row 1).
+
+    Row NUMBERS, not a filtered list of rows, and that is the whole point.
+    Everything downstream of the Sheet read is positional - validate_rows and
+    plan_upload_targets both number rows `offset + 2`, and several functions
+    index back with `rows[row_number - 2]` - so compacting `rows` would
+    silently renumber every row after the first gap. Worse, plan_upload_targets
+    scans EVERY row for identifiers already spent; handed only one batch's
+    rows it would re-mint numbers another batch is already holding, and
+    identifiers are permanent. So the full list travels the whole way through
+    and callers narrow what they report and upload using this set.
+
+    Raises BatchScopeError for the four ways this cannot be honored; see that
+    class for why none of them is a fallback."""
+    value = batch_value.strip()
+    if not value:
+        raise BatchScopeError(
+            "--batch needs the value to scope the run to, e.g. --batch \"Logging\". An "
+            "empty value does not mean 'every row' - drop the flag entirely for that."
+        )
+
+    column = config.batch_column
+    if column is None:
+        raise BatchScopeError(
+            f"project '{config.project_id}' has no 'batch_column' in {registry_path}, so "
+            "--batch has nothing to match against. Which column holds a row's batch is a "
+            "per-project fact, so it lives in the registry rather than on the command "
+            "line: add \"batch_column\": \"<normalized column name>\" to the project "
+            "block. Refusing rather than running unfiltered - a --batch that uploaded "
+            "every row would look exactly like a successful batch run."
+        )
+
+    known = sorted(set(column_map.field_names.values()))
+    if column not in known:
+        # The same failure check_required_for_upload guards, reached a
+        # different way: left alone this reads every row's batch as blank,
+        # matches nothing, and reports the batch as already finished.
+        raise BatchScopeError(
+            f"project '{config.project_id}': batch_column names {column!r}, which is not "
+            f"a column in this Sheet. Known columns: {', '.join(known)}"
+        )
+
+    wanted = fold_batch_value(value)
+    scope: set[int] = set()
+    # First-seen spelling per folded value, so the listing below de-duplicates
+    # exactly the way matching does - 'Logging' and 'logging' are one entry,
+    # not two, because they are one batch.
+    present: dict[str, str] = {}
+    for offset, row in enumerate(rows):
+        cell = (row.get(column) or "").strip()
+        if not cell:
+            # A row nobody has catalogued yet has no batch, and must not join
+            # whichever one happens to be running.
+            continue
+        folded = fold_batch_value(cell)
+        present.setdefault(folded, cell)
+        if folded == wanted:
+            scope.add(offset + 2)
+
+    if not scope:
+        if not present:
+            raise BatchScopeError(
+                f"--batch {value!r} matches no row: the '{column}' column is empty in "
+                "every row of this Sheet, so no row has been assigned a batch yet."
+            )
+        ordered = [present[key] for key in sorted(present)]
+        shown = ordered[:MAX_LISTED_BATCH_VALUES]
+        listing = ", ".join(repr(entry) for entry in shown)
+        if len(ordered) > len(shown):
+            listing += f", and {len(ordered) - len(shown)} more"
+        raise BatchScopeError(
+            f"--batch {value!r} matches no row in the '{column}' column. Values present: "
+            f"{listing}. Check the spelling against the Sheet - an unmatched --batch would "
+            "otherwise report 'nothing to upload', which is what a finished batch looks "
+            "like."
+        )
+
+    return scope
+
+
 class SheetSetupFailed(Exception):
     """A Sheet-path command could not get far enough to start its own work.
 

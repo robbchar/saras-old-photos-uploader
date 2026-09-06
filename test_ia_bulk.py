@@ -46,6 +46,8 @@ from ia_bulk import (
     CHUNK_SIZE,
     is_rate_limit_error,
     UploadFailed,
+    batch_row_numbers,
+    BatchScopeError,
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS
 
@@ -9864,3 +9866,159 @@ def test_cmd_append_rows_refuses_when_a_template_column_is_missing(tmp_path, mon
     assert appended == []
     assert "file_name" in capsys.readouterr().err
     assert exit_code == 1
+
+
+# --- --batch: scoping a run to one value of a registry-configured column ---
+
+
+def _batch_rows(*themes):
+    """Rows carrying only what batch scoping reads. Row numbers run from 2:
+    the header is row 1, exactly as validate_rows and plan_upload_targets
+    number them."""
+    return [{"identifier": "", "title": f"row {n}", "theme": theme}
+            for n, theme in enumerate(themes, start=2)]
+
+
+def _batch_column_map():
+    return build_column_map(["Identifier", "Title", "Theme"])
+
+
+def test_batch_scope_selects_only_rows_whose_configured_column_matches():
+    scope = batch_row_numbers(
+        _batch_rows("Logging", "Fishing", "Logging"),
+        _sheet_config(batch_column="theme"),
+        _batch_column_map(),
+        "Logging",
+        "projects_registry.json",
+    )
+
+    assert scope == {2, 4}
+
+
+def test_batch_scope_folds_case_and_surrounding_whitespace():
+    """The cells are hand-typed in a Sheet, so 'Logging ' and 'logging' are
+    one batch, not three."""
+    scope = batch_row_numbers(
+        _batch_rows("  logging ", "LOGGING", "Fishing"),
+        _sheet_config(batch_column="theme"),
+        _batch_column_map(),
+        " Logging",
+        "projects_registry.json",
+    )
+
+    assert scope == {2, 3}
+
+
+def test_batch_scope_never_matches_a_blank_cell():
+    """An uncatalogued row has no theme yet. It must not join whatever batch
+    happens to be running."""
+    scope = batch_row_numbers(
+        _batch_rows("Logging", "", "   "),
+        _sheet_config(batch_column="theme"),
+        _batch_column_map(),
+        "Logging",
+        "projects_registry.json",
+    )
+
+    assert scope == {2}
+
+
+def test_batch_on_a_project_with_no_batch_column_is_refused():
+    """Never a silent unfiltered run: the whole point of --batch is to narrow
+    the scope, so a --batch that uploaded everything is the worst outcome."""
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging"),
+            _sheet_config(batch_column=None),
+            _batch_column_map(),
+            "Logging",
+            "some/registry.json",
+        )
+
+    message = str(exc.value)
+    assert "batch_column" in message
+    assert "some/registry.json" in message
+    assert "astoriaphotos" in message
+
+
+def test_a_batch_column_the_sheet_does_not_have_is_refused_by_name():
+    """Same failure mode check_required_for_upload guards: left alone this
+    reads every row's batch as blank, matches nothing, and looks like 'that
+    batch is already uploaded'."""
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging"),
+            _sheet_config(batch_column="subject"),
+            _batch_column_map(),
+            "Logging",
+            "projects_registry.json",
+        )
+
+    message = str(exc.value)
+    assert "'subject'" in message
+    assert "not a column in this Sheet" in message
+    assert "theme" in message  # the known columns, so the fix is visible
+
+
+def test_a_batch_value_matching_no_row_is_refused_and_lists_what_is_there():
+    """A typo'd --batch would otherwise read as 'nothing to upload - every
+    valid row is already marked uploaded'."""
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging", "Fishing", "logging"),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "Loging",
+            "projects_registry.json",
+        )
+
+    message = str(exc.value)
+    assert "'Loging'" in message
+    assert "Fishing" in message
+    assert "Logging" in message
+    # De-duplicated the same way matching folds: 'logging' is not a fourth value
+    assert message.count("ogging") == 1
+
+
+def test_a_batch_column_that_is_blank_in_every_row_says_so():
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("", "  "),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "Logging",
+            "projects_registry.json",
+        )
+
+    assert "empty in every row" in str(exc.value)
+
+
+def test_an_empty_batch_value_is_refused_rather_than_meaning_every_row():
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging"),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "   ",
+            "projects_registry.json",
+        )
+
+    assert "--batch" in str(exc.value)
+
+
+def test_the_listed_values_are_capped_so_a_wide_column_stays_readable():
+    themes = [f"Theme {n:02d}" for n in range(1, 31)]
+
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows(*themes),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "nope",
+            "projects_registry.json",
+        )
+
+    message = str(exc.value)
+    assert "Theme 01" in message
+    assert "Theme 30" not in message
+    assert "10 more" in message
