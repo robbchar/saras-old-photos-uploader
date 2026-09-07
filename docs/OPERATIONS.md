@@ -444,8 +444,14 @@ printed on screen — they come from one place and cannot disagree. See
 To read the newest one without looking up its timestamp:
 
 ```bash
-tail -1 "$(ls -t logs/sync-metadata-*.jsonl | head -1)" | python -m json.tool
+tail -n 1 "$(printf '%s\n' logs/sync-metadata-*.jsonl | sort | tail -n 1)" | python -m json.tool
 ```
+
+Sorting the names *is* sorting by time — log filenames are UTC timestamps
+precisely so a listing comes out in the order the runs happened (see
+`open_log()`). Deliberately no `ls` here: a shell where `ls` is aliased to
+a long listing feeds the whole `-rw-r--r-- ...` line into the command
+substitution, and `tail` then reports `option used in invalid context`.
 
 ### Seeing the summary work, on purpose
 
