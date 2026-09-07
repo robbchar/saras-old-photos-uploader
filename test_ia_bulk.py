@@ -16,7 +16,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
-from column_map import build_column_map
+from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
     read_csv,
     load_registry,
@@ -8114,6 +8114,82 @@ def _synced_grid(rows=None):
         "", "",
     ]]
     return [SYNC_SHEET_HEADER] + (default if rows is None else rows)
+
+
+def test_plan_sync_targets_hashes_what_the_row_would_send(tmp_path):
+    """Computed at READ time and carried on the target. Re-deriving it at
+    write time would stamp a mid-run human edit as already-synced, and that
+    edit would be lost permanently with nothing to notice it."""
+    from ia_bulk import plan_sync_targets
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, problems = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert problems == []
+    assert targets[0].content_hash == sync_hash(metadata_to_send(targets[0].metadata))
+
+
+def test_plan_sync_targets_reads_the_stored_hash_off_the_row():
+    from ia_bulk import plan_sync_targets
+
+    grid = _synced_grid([[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "deadbeef", "2026-09-01T00:00:00Z",
+    ]])
+    column_map, rows = grid_to_rows(grid)
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].stored_hash == "deadbeef"
+
+
+def test_plan_sync_targets_treats_a_blank_hash_cell_as_no_stored_hash():
+    """A never-synced row, and a row whose hash cell an operator cleared to
+    force a re-sync, are the same case and must both push."""
+    from ia_bulk import plan_sync_targets
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].stored_hash == ""
+    assert targets[0].content_hash != ""
+
+
+def test_plan_sync_targets_fingerprints_the_row_for_the_moved_row_guard():
+    """The fingerprint is the file_template candidate from the RAW cells -
+    the same value sheet_row_fingerprints() produces - so it can be compared
+    against a fresh read of the Sheet, which has raw cells in it."""
+    from ia_bulk import plan_sync_targets, sheet_row_fingerprints
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].source_fingerprint == sheet_row_fingerprints(rows, "{file}")[2]
+    assert targets[0].source_fingerprint != ""
+
+
+def test_sync_target_is_never_newly_minted():
+    """split_moved_targets reads this attribute. A sync target addresses a
+    row that uploaded long ago, so it is never a number this run minted -
+    and the guard is always called on the post-reserve leg."""
+    from ia_bulk import plan_sync_targets
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].newly_minted is False
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):

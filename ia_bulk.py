@@ -29,6 +29,7 @@ import google_auth
 from column_map import (
     ColumnMap,
     FileResolutionError,
+    IA_SYNC_HASH_COLUMN,
     TemplateError,
     candidate_path,
     check_column_map,
@@ -3955,13 +3956,28 @@ def upload_from_sheet(args) -> int:
 
 @dataclass(frozen=True)
 class SyncTarget:
-    """One already-uploaded row whose Sheet metadata this run will push to
+    """One already-uploaded row whose Sheet metadata this run may push to
     Internet Archive."""
 
     row_number: int
     identifier: str        # the real, permanent one, from ia_identifier
     uploaded_as: str       # the item to actually send to, from ia_url
     metadata: dict[str, str]
+    # What this row would send, hashed, as of the run's initial read; and
+    # what `ia_sync_hash` held at that same moment. The row pushes when they
+    # differ. Both captured at READ time: re-deriving content_hash at write
+    # time would stamp a human edit made mid-run as already-synced, losing it
+    # permanently. See docs/DECISIONS.md, "A row pushes only when its content
+    # changed".
+    content_hash: str = ""
+    stored_hash: str = ""
+    # This row's file_template candidate from the RAW cells, re-checked
+    # against a fresh read before the stamp write - see split_moved_targets().
+    source_fingerprint: str = ""
+    # split_moved_targets() reads this. A sync target addresses a row that
+    # uploaded under an earlier run, so it is never a number this run minted;
+    # the guard is always called with reserved_already=True.
+    newly_minted: bool = False
 
 
 @dataclass(frozen=True)
@@ -4126,7 +4142,11 @@ def try_log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) 
 
 
 def plan_sync_targets(
-    rows: list[dict[str, str]], column_map: ColumnMap, live: bool, project_id: str
+    rows: list[dict[str, str]],
+    column_map: ColumnMap,
+    live: bool,
+    project_id: str,
+    file_template: str,
 ) -> tuple[list[SyncTarget], list[RowValidation]]:
     """Decides which rows this run will correct, and what it will send.
 
@@ -4142,12 +4162,14 @@ def plan_sync_targets(
     on an item that may not exist is a different problem, and `upload` already
     retries those under their existing identifier.
 
-    Every DONE row is sent, not only rows that look changed. Internet Archive
-    answers "no changes to _meta.xml" for an item that already matches, which
-    update_metadata_row turns into MetadataUnchanged and the runner counts as
-    `unchanged` rather than an error - so a full sync is idempotent by
-    construction and needs no per-row change detection, no extra tool-owned
-    column, and no second place for the Sheet and the item to drift apart.
+    A row is sent only when its content changed. `content_hash` is what this
+    row would send, hashed; `stored_hash` is what it last successfully sent,
+    read out of `ia_sync_hash`. split_unchanged() compares them. This
+    reverses the original decision that every DONE row is sent every run -
+    that was correct for a hand-run command over a few hundred rows and does
+    not survive ~4,000 rows on an hourly schedule, where it is ~4,000
+    pointless writes an hour and a log in which a real edit is invisible. See
+    docs/DECISIONS.md, "A row pushes only when its content changed".
 
     Blank cells are dropped by update_metadata_row, so a cleared cell means
     "leave this field alone" and REMOVE_TAG deletes - identical to the --csv
@@ -4158,6 +4180,9 @@ def plan_sync_targets(
     problem rather than a silent skip: the operator edited it expecting the
     edit to reach the site."""
     fields = sheet_metadata_fields(column_map)
+    # Raw cells: sync never calls resolve_sheet_files(), so row['file'] has
+    # not been rewritten and these compare correctly against a fresh read.
+    fingerprints = sheet_row_fingerprints(rows, file_template)
     targets: list[SyncTarget] = []
     problems: list[RowValidation] = []
 
@@ -4231,12 +4256,16 @@ def plan_sync_targets(
             )
             continue
 
+        metadata = {key: value for key, value in row.items() if key in fields}
         targets.append(
             SyncTarget(
                 row_number=row_number,
                 identifier=identifier,
                 uploaded_as=uploaded_as,
-                metadata={key: value for key, value in row.items() if key in fields},
+                metadata=metadata,
+                content_hash=sync_hash(metadata_to_send(metadata)),
+                stored_hash=(row.get(IA_SYNC_HASH_COLUMN) or "").strip(),
+                source_fingerprint=fingerprints.get(row_number, ""),
             )
         )
 
@@ -4395,7 +4424,9 @@ def sync_from_sheet(args) -> int:
         )
         return 1
 
-    targets, problems = plan_sync_targets(rows, column_map, live, config.project_id)
+    targets, problems = plan_sync_targets(
+        rows, column_map, live, config.project_id, config.file_template
+    )
 
     if problems:
         print("\n".join(_format_result_lines(problems)))
