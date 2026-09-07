@@ -8168,10 +8168,14 @@ def test_sync_from_sheet_never_sends_tool_owned_or_pipeline_owned_columns(
     Internet Archive will not change it after upload."""
     from ia_bulk import cmd_sync_metadata
 
-    header = SHEET_HEADER + ["Notes (LCPS Internal)", "Mediatype", "Identifier"]
+    header = SHEET_HEADER + [
+        "ia_sync_hash", "ia_last_synced",
+        "Notes (LCPS Internal)", "Mediatype", "Identifier",
+    ]
     grid = [header] + [[
         "Stone Customshouse", "photo1.jpg",
         "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "", "",
         "donor phone number", "texts", "CD 1 01 53 58 1 Central SS",
     ]]
     sent = []
@@ -8184,6 +8188,7 @@ def test_sync_from_sheet_never_sends_tool_owned_or_pipeline_owned_columns(
     for excluded in (
         "notes_lcps_internal",
         "ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib",
+        "ia_sync_hash", "ia_last_synced",
         "mediatype",
         "identifier",
         "file",
