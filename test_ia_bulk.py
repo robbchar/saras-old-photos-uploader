@@ -8097,14 +8097,23 @@ SYNC_STAMP = "20260823t161331"
 SYNC_URL = f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
 
 
+# The sync path needs two more columns than the upload path: sync-metadata
+# records what it last pushed so it can send only the rows that changed.
+# G=ia_sync_hash, H=ia_last_synced.
+SYNC_SHEET_HEADER = SHEET_HEADER + ["ia_sync_hash", "ia_last_synced"]
+
+
 def _synced_grid(rows=None):
     """A Sheet whose rows are already uploaded, as upload's confirm write
-    leaves it: ia_identifier, ia_uploaded and ia_url all populated."""
+    leaves it: ia_identifier, ia_uploaded and ia_url all populated, and the
+    two sync-state cells still blank - so every row reads as changed and
+    pushes, which is what the pre-hash-gating tests all assume."""
     default = [[
         "Stone Customshouse", "photo1.jpg",
         "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "", "",
     ]]
-    return [SHEET_HEADER] + (default if rows is None else rows)
+    return [SYNC_SHEET_HEADER] + (default if rows is None else rows)
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
@@ -8123,18 +8132,26 @@ def _sync_sheet_args(tmp_path, registry_path, **overrides):
     return args
 
 
-def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent):
+def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
+    """RecordingSheetClient, not FakeSheetClient: sync-metadata now WRITES to
+    the Sheet (the hash stamp), and it re-reads before each write for the
+    moved-row guard, so the fake has to apply writes to its own grid the way
+    a real Sheet would.
+
+    Returns (registry_path, client) - a test that only cares about what was
+    sent can ignore the second element."""
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    client = FakeSheetClient(grid)
+    if client is None:
+        client = RecordingSheetClient(grid, SheetUploadRecorder())
     monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
     monkeypatch.setattr(
         "ia_bulk.update_metadata_row",
         lambda metadata, target: sent.append((target, metadata)),
     )
-    return registry_path
+    return registry_path, client
 
 
 def test_sync_from_sheet_sends_the_sheets_own_metadata_to_the_recorded_item(
@@ -8147,7 +8164,7 @@ def test_sync_from_sheet_sends_the_sheets_own_metadata_to_the_recorded_item(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8179,7 +8196,7 @@ def test_sync_from_sheet_never_sends_tool_owned_or_pipeline_owned_columns(
         "donor phone number", "texts", "CD 1 01 53 58 1 Central SS",
     ]]
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -8208,7 +8225,7 @@ def test_sync_from_sheet_skips_rows_that_are_not_uploaded_yet(tmp_path, monkeypa
         ["Reserved only", "photo3.jpg", "lcps-astoriaphotos-00002", "", "", ""],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -8228,7 +8245,7 @@ def test_sync_from_sheet_reports_an_uploaded_row_with_no_usable_url(
          "2026-08-23T16:13:31Z", "", "photo1.jpg"],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8246,7 +8263,7 @@ def test_sync_from_sheet_refuses_to_send_a_live_correction_to_a_test_item(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
     out = capsys.readouterr().out
@@ -8266,7 +8283,7 @@ def test_sync_from_sheet_refuses_to_send_a_test_correction_to_a_real_item(
          "https://archive.org/details/lcps-astoriaphotos-00001", "photo1.jpg"],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8291,7 +8308,7 @@ def test_sync_from_sheet_refuses_an_item_belonging_to_another_project(
          "photo1.jpg"],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8349,7 +8366,7 @@ def test_sync_from_sheet_dry_run_shows_what_would_change_not_just_field_names(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
     monkeypatch.setattr(
         "ia_bulk.fetch_current_metadata",
         lambda identifier: {"title": "Stone Customshuose"},
@@ -8375,7 +8392,7 @@ def test_sync_from_sheet_dry_run_reports_an_item_that_already_matches(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
     monkeypatch.setattr(
         "ia_bulk.fetch_current_metadata",
         lambda identifier: {"title": "Stone Customshouse"},
@@ -8396,7 +8413,7 @@ def test_sync_from_sheet_dry_run_survives_an_item_it_cannot_read(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
     monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: None)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
@@ -8464,7 +8481,7 @@ def test_sync_from_sheet_rejects_csv_only_log_flags(tmp_path, monkeypatch, capsy
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
 
     for flag in ("resume_from", "from_log"):
         exit_code = cmd_sync_metadata(
@@ -8733,7 +8750,7 @@ def test_sync_from_sheet_sends_a_live_correction_to_the_real_item(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
     out = capsys.readouterr().out
@@ -8801,7 +8818,7 @@ def test_sync_from_sheet_live_records_the_mode_in_its_log(tmp_path, monkeypatch)
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
 
@@ -8877,7 +8894,7 @@ def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypa
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -8922,7 +8939,7 @@ def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypa
     the reader back to the per-row lines this record exists to replace."""
     from ia_bulk import cmd_sync_metadata
 
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
 
     def refuse_the_second(metadata, target):
         if target.endswith("00002"):
@@ -8957,7 +8974,7 @@ def test_a_row_that_was_never_sent_is_skipped_not_failed(tmp_path, monkeypatch):
         ["Flavel House", "photo2.jpg", "lcps-astoriaphotos-00002",
          "2026-08-23T16:13:31Z", "", "photo2.jpg"],
     ])
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -9059,7 +9076,7 @@ def test_the_summary_and_the_console_cannot_disagree_about_a_mixed_run(
         ["Liberty Theatre", "photo4.jpg", "lcps-astoriaphotos-00004",
          "2026-08-23T16:13:31Z", "", "photo4.jpg"],
     ])
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
 
     def one_of_each(metadata, target):
         if target.endswith("00002"):
@@ -9098,7 +9115,7 @@ def test_dry_run_writes_no_summary_because_it_writes_no_log(tmp_path, monkeypatc
     happened, in the same directory a real run's summaries are read from."""
     from ia_bulk import cmd_sync_metadata
 
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
 
@@ -9114,7 +9131,7 @@ def test_an_unwritable_summary_does_not_fail_a_run_that_reached_the_archive(
     rerun of work that succeeded."""
     from ia_bulk import cmd_sync_metadata
 
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
 
     def full_disk(log_path, summary, live):
         raise OSError(28, "No space left on device")
