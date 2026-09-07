@@ -4634,15 +4634,15 @@ def cmd_append_rows(args) -> int:
         )
         return 1
     columns: dict[str, int] = {}
-    for field in fields:
+    for field_name in fields:
         try:
-            columns[field] = next(
+            columns[field_name] = next(
                 index for index, header in enumerate(sheet.column_map.headers)
-                if sheet.column_map.field_names[header] == field
+                if sheet.column_map.field_names[header] == field_name
             )
         except StopIteration:
             print(
-                f"the Sheet has no '{field}' column, which file_template names - "
+                f"the Sheet has no '{field_name}' column, which file_template names - "
                 f"fix 'file_template' in {args.registry} or add the column.",
                 file=sys.stderr,
             )
