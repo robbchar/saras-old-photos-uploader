@@ -8154,6 +8154,101 @@ def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
     return registry_path, client
 
 
+def test_sync_from_sheet_refuses_a_sheet_without_the_sync_state_columns(
+    tmp_path, monkeypatch, capsys
+):
+    """Without somewhere to record what it pushed, this command would send
+    every row on every run and nothing would fail to say so. On an hourly
+    schedule that is silent, permanent noise - the exact failure hash gating
+    exists to remove, so it must not be the fallback when a column is
+    missing."""
+    from ia_bulk import cmd_sync_metadata
+
+    grid = [SHEET_HEADER] + [[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+    ]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_sync_hash" in err
+    assert "ia_last_synced" in err
+
+
+def test_sync_from_sheet_refuses_missing_sync_columns_in_live_mode_too(
+    tmp_path, monkeypatch, capsys
+):
+    """A rehearsal that gates where the real run would not is not a
+    rehearsal. Same reasoning as the four write-back columns being required
+    in every mode."""
+    from ia_bulk import cmd_sync_metadata
+
+    live_url = "https://archive.org/details/lcps-astoriaphotos-00001"
+    grid = [SHEET_HEADER] + [[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", live_url, "photo1.jpg",
+    ]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_sync_hash" in capsys.readouterr().err
+
+
+def test_sync_from_sheet_refuses_a_file_template_naming_a_column_the_sheet_lacks(
+    tmp_path, monkeypatch, capsys
+):
+    """sync-metadata did not care about file_template until the moved-row
+    guard arrived - the guard's fingerprint is built from those columns.
+    sheet_row_fingerprints() fingerprints a row it cannot resolve as "",
+    which never matches, so a broken template would report EVERY row as
+    moved, stamp nothing, and re-push everything forever without ever
+    failing. Refused up front instead.
+
+    A header check only: no disk access, so a correction still does not
+    depend on the photo drive being attached."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), file_template="{no_such_column}")),
+        encoding="utf-8",
+    )
+    sent = []
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr(
+        "ia_bulk.update_metadata_row",
+        lambda metadata, target: sent.append((target, metadata)),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert "no_such_column" in err
+
+
+def test_sync_from_sheet_still_runs_with_a_valid_file_template(tmp_path, monkeypatch):
+    """The refusal above must not fire on the ordinary case."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert len(sent) == 1
+
+
 def test_sync_from_sheet_sends_the_sheets_own_metadata_to_the_recorded_item(
     tmp_path, monkeypatch, capsys
 ):

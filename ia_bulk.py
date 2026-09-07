@@ -43,6 +43,12 @@ from identifiers import RowState, classify_row, next_identifiers, parse_identifi
 from project_config import ProjectConfig, load_project_config, unregistered_project_error
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
+from sync_state import (
+    MissingSyncColumns,
+    SyncColumns,
+    locate_sync_columns,
+    sync_hash,
+)
 
 REQUIRED_UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
 # Deliberately excludes "identifier" only - do not "fix" this back to
@@ -4361,6 +4367,30 @@ def sync_from_sheet(args) -> int:
         print(
             "the Sheet's header row has problems that affect every row - refusing to send "
             "metadata until they are fixed",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Both checks are before anything is sent, and both apply in test mode as
+    # well as live: a rehearsal that passes where the real run refuses is a
+    # false negative on the one run an operator trusts.
+    try:
+        # Called for its exception, not its value - Task 10 binds the result
+        # when SheetSyncRun needs the column indexes.
+        locate_sync_columns(column_map)
+    except MissingSyncColumns as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    # The moved-row guard fingerprints a row by its file_template columns.
+    # A template naming a column the Sheet lacks fingerprints EVERY row as
+    # "", which never matches - so nothing would ever be stamped and every
+    # row would re-push forever, silently. Header check only; no disk access.
+    try:
+        check_file_template(config.file_template, column_map)
+    except TemplateError as exc:
+        print(
+            f"project '{config.project_id}': {exc} - fix 'file_template' in {args.registry}",
             file=sys.stderr,
         )
         return 1
