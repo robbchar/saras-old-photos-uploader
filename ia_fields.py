@@ -93,3 +93,24 @@ def suggest_standard_fields(field_names: Iterable[str]) -> list[Suggestion]:
             )
         )
     return suggestions
+
+
+def metadata_to_send(row: dict) -> dict[str, str]:
+    """Exactly the metadata dict a row sends to Internet Archive.
+
+    One definition, shared by the sender (update_metadata_row) and by the
+    change-detection hash (sync_state.sync_hash), so the two cannot disagree
+    about what a row means. A hash over anything other than what is actually
+    sent either re-pushes a row forever or silently swallows an edit.
+
+    Blank cells are dropped entirely rather than sent as empty strings: a
+    blank must mean "leave this field alone", not "clear it", or an
+    accidental clear or a bad paste would strip metadata from a permanent
+    public item with no undo. REMOVE_TAG is the deliberate, visible delete.
+
+    `identifier` names the item being addressed, not a field to set on it."""
+    return {
+        key: (value or "").strip()
+        for key, value in row.items()
+        if key != "identifier" and (value or "").strip()
+    }

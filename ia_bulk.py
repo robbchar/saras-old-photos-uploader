@@ -38,7 +38,7 @@ from column_map import (
     resolve_file,
     template_fields,
 )
-from ia_fields import PIPELINE_OWNED_FIELDS, suggest_standard_fields
+from ia_fields import PIPELINE_OWNED_FIELDS, metadata_to_send, suggest_standard_fields
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
 from project_config import ProjectConfig, load_project_config, unregistered_project_error
 from reconcile import AmbiguousMatch, Proposal, propose_match
@@ -1566,11 +1566,7 @@ def update_metadata_row(row: dict, target_identifier: str) -> None:
     value REMOVE_TAG in that cell; the internetarchive library (and the
     official `ia` CLI's `--modify field:REMOVE_TAG`) treats that string as
     a delete sentinel and issues a metadata "remove" op for the field."""
-    metadata = {
-        key: (value or "").strip()
-        for key, value in row.items()
-        if key != "identifier" and (value or "").strip()
-    }
+    metadata = metadata_to_send(row)
 
     def send() -> None:
         """The retried unit, matching upload_row()'s. Repeating a metadata
