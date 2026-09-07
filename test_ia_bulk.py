@@ -3878,7 +3878,13 @@ def test_cmd_sync_metadata_writes_success_log_with_test_prefixed_target_when_not
     assert exit_code == 0
     log_files = list(log_dir.glob("sync-metadata-*.jsonl"))
     assert len(log_files) == 1
-    entry = json.loads(log_files[0].read_text(encoding="utf-8").strip())
+    rows = [
+        json.loads(line)
+        for line in log_files[0].read_text(encoding="utf-8").strip().splitlines()
+        if "record" not in json.loads(line)
+    ]
+    assert len(rows) == 1
+    entry = rows[0]
     assert entry["status"] == "success"
     # The UPLOAD run's stamp, not this run's. Recomputing would give
     # FIXED_STAMP and name an item that has never existed - which is exactly
@@ -3936,7 +3942,9 @@ def test_cmd_sync_metadata_treats_no_changes_as_unchanged_not_failure(tmp_path, 
         json.loads(line)
         for line in list(log_dir.glob("sync-metadata-*.jsonl"))[0].read_text(encoding="utf-8").strip().splitlines()
     ]
-    statuses = {entry["identifier"]: entry["status"] for entry in entries}
+    statuses = {
+        entry["identifier"]: entry["status"] for entry in entries if "record" not in entry
+    }
     assert statuses["lcps-astoriaphotos-00001"] == "unchanged"
     assert statuses["lcps-astoriaphotos-00002"] == "success"
 
@@ -8798,7 +8806,9 @@ def test_sync_from_sheet_live_records_the_mode_in_its_log(tmp_path, monkeypatch)
         for line in log_file.read_text(encoding="utf-8").strip().splitlines()
     ]
     header = [e for e in entries if e.get("record") == "run_header"]
-    rows = [e for e in entries if e.get("record") != "run_header"]
+    # "record" marks a run-level line (header, closing summary); a row result
+    # carries no such key.
+    rows = [e for e in entries if "record" not in e]
 
     assert header and header[0]["live"] is True
     assert [e["status"] for e in rows] == ["success"]
@@ -8831,6 +8841,287 @@ def test_sync_from_sheet_live_reports_a_failure_without_claiming_success(
     assert "    - Access Denied - This item has been taken offline" in out
     assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in out
     assert exit_code == 1
+
+
+# Issue #25: the machine-consumable run summary
+
+
+def _sync_log_entries(tmp_path):
+    log_file = next((tmp_path / "logs").glob("sync-metadata-*.jsonl"))
+    return [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+
+def _two_synced_rows():
+    """Two already-uploaded rows, each naming its own test item."""
+    return _synced_grid([
+        ["Stone Customshouse", "photo1.jpg", "lcps-astoriaphotos-00001",
+         "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg"],
+        ["Flavel House", "photo2.jpg", "lcps-astoriaphotos-00002",
+         "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg"],
+    ])
+
+
+def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypatch):
+    """A scheduled, unattended run has to be reviewable without a human
+    reading console output or replaying every per-row record."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    summary = _sync_log_entries(tmp_path)[-1]
+
+    assert summary["record"] == "run_summary"
+    assert summary["checked"] == 2
+    assert summary["pushed"] == 2
+    assert summary["changed"] == 2
+    assert summary["unchanged"] == 0
+    assert summary["failures"] == []
+    assert summary["skipped"] == []
+
+
+def test_a_run_summary_is_not_mistaken_for_a_damaged_log_line(tmp_path, capsys):
+    """The summary carries no `identifier`, and a record naming no identifier
+    is exactly what _read_log_results() counts as damage. Left unhandled, the
+    line this feature adds to every log would make --resume-from announce the
+    log as truncated and mistrust its own recovery data."""
+    from ia_bulk import load_prior_successes
+
+    log_path = tmp_path / "sync-metadata-20260906T000000Z.jsonl"
+    log_path.write_text(
+        json.dumps({"identifier": "lcps-astoriaphotos-00001", "status": "success",
+                    "live": False, "file": "", "error": None}) + chr(10)
+        + json.dumps({"record": "run_summary", "live": False, "checked": 1,
+                      "pushed": 1, "changed": 1, "unchanged": 0,
+                      "failures": [], "skipped": []}) + chr(10),
+        encoding="utf-8",
+    )
+
+    successes = load_prior_successes(log_path, live=False)
+    err = capsys.readouterr().err
+
+    assert successes == {"lcps-astoriaphotos-00001"}
+    assert "damaged" not in err
+
+
+def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypatch):
+    """The failure list is what makes the summary actionable rather than
+    merely countable - a run reporting "1 error(s)" and nothing else sends
+    the reader back to the per-row lines this record exists to replace."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
+
+    def refuse_the_second(metadata, target):
+        if target.endswith("00002"):
+            raise RuntimeError("Access Denied - This item has been taken offline")
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", refuse_the_second)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    summary = _sync_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == [{
+        "identifier": "lcps-astoriaphotos-00002",
+        "error": "Access Denied - This item has been taken offline",
+    }]
+    assert summary["changed"] == 1
+    assert summary["pushed"] == 2
+
+
+def test_a_row_that_was_never_sent_is_skipped_not_failed(tmp_path, monkeypatch):
+    """The distinction the summary exists to preserve. A failure means the
+    item was contacted and refused the edit; a skip means nothing was sent at
+    all. Flattening the two would leave a reader months from now unable to
+    tell "this item may not be in the state I intended" from "this item was
+    never touched"."""
+    from ia_bulk import cmd_sync_metadata
+
+    grid = _synced_grid([
+        ["Stone Customshouse", "photo1.jpg", "lcps-astoriaphotos-00001",
+         "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg"],
+        # Marked uploaded, but nothing says which item it became.
+        ["Flavel House", "photo2.jpg", "lcps-astoriaphotos-00002",
+         "2026-08-23T16:13:31Z", "", "photo2.jpg"],
+    ])
+    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    summary = _sync_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == []
+    assert [entry["identifier"] for entry in summary["skipped"]] == [
+        "lcps-astoriaphotos-00002"
+    ]
+    assert "ia_url" in summary["skipped"][0]["error"]
+    assert summary["pushed"] == 1
+    assert summary["checked"] == 2
+    assert exit_code == 1
+
+
+def _csv_sync_args(tmp_path, csv_path, registry_path, upload_log):
+    return Namespace(
+        project="astoriaphotos",
+        csv=str(csv_path),
+        registry=str(registry_path),
+        live=False,
+        log_dir=str(tmp_path / "logs"),
+        resume_from=None,
+        from_log=str(upload_log),
+    )
+
+
+def test_the_csv_path_ends_with_the_same_summary_record(tmp_path, monkeypatch, capsys):
+    """The offline fallback is the path most likely to be run unattended, and
+    a summary only the Sheet path writes would make "read the summary" advice
+    that silently does not apply half the time."""
+    from ia_bulk import cmd_sync_metadata, MetadataUnchanged
+
+    csv_path = tmp_path / "updates.csv"
+    write_csv(
+        csv_path,
+        ["identifier", "title"],
+        [
+            {"identifier": "lcps-astoriaphotos-00001", "title": "Already correct"},
+            {"identifier": "lcps-astoriaphotos-00002", "title": "New title"},
+        ],
+    )
+    registry_path = tmp_path / "projects_registry.json"
+    registry_path.write_text(
+        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
+        encoding="utf-8",
+    )
+
+    def unchanged_for_the_first(row, target_identifier):
+        if row["identifier"].strip() == "lcps-astoriaphotos-00001":
+            raise MetadataUnchanged(target_identifier)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", unchanged_for_the_first)
+    upload_log = write_upload_log(
+        tmp_path / "upload.jsonl",
+        ["lcps-astoriaphotos-00001", "lcps-astoriaphotos-00002"],
+    )
+
+    cmd_sync_metadata(_csv_sync_args(tmp_path, csv_path, registry_path, upload_log))
+    out = capsys.readouterr().out
+
+    summary = _sync_log_entries(tmp_path)[-1]
+
+    assert summary["record"] == "run_summary"
+    assert summary["checked"] == 2
+    assert summary["pushed"] == 2
+    assert summary["changed"] == 1
+    assert summary["unchanged"] == 1
+    assert summary["failures"] == []
+    assert summary["skipped"] == []
+    assert (
+        f"{summary['changed']} item(s) updated successfully, "
+        f"{summary['unchanged']} unchanged, {len(summary['failures'])} error(s)"
+    ) in out
+
+
+def test_the_summary_and_the_console_cannot_disagree_about_a_mixed_run(
+    tmp_path, monkeypatch, capsys
+):
+    """The acceptance criterion, exercised where drift would actually show:
+    one run producing all four outcomes at once. Both the record and the
+    lines printed come from one SyncSummary, so this pins that they still do
+    - and that `pushed` stays the sum of the three send results rather than a
+    fourth number kept alongside them."""
+    from ia_bulk import cmd_sync_metadata, MetadataUnchanged
+
+    grid = _synced_grid([
+        ["Stone Customshouse", "photo1.jpg", "lcps-astoriaphotos-00001",
+         "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg"],
+        ["Flavel House", "photo2.jpg", "lcps-astoriaphotos-00002",
+         "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg"],
+        ["Astoria Column", "photo3.jpg", "lcps-astoriaphotos-00003",
+         "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00003",
+         "photo3.jpg"],
+        # Marked uploaded, but nothing records which item it became.
+        ["Liberty Theatre", "photo4.jpg", "lcps-astoriaphotos-00004",
+         "2026-08-23T16:13:31Z", "", "photo4.jpg"],
+    ])
+    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+
+    def one_of_each(metadata, target):
+        if target.endswith("00002"):
+            raise MetadataUnchanged(target)
+        if target.endswith("00003"):
+            raise RuntimeError("Access Denied - This item has been taken offline")
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", one_of_each)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    summary = _sync_log_entries(tmp_path)[-1]
+
+    assert summary["checked"] == 4
+    assert summary["changed"] == 1
+    assert summary["unchanged"] == 1
+    assert len(summary["failures"]) == 1
+    assert len(summary["skipped"]) == 1
+    # pushed counts the rows sent, and only those: the skipped row is not one.
+    assert summary["pushed"] == 3
+    assert summary["pushed"] == (
+        summary["changed"] + summary["unchanged"] + len(summary["failures"])
+    )
+    assert (
+        f"{summary['changed']} item(s) updated successfully, "
+        f"{summary['unchanged']} unchanged, {len(summary['failures'])} error(s)"
+    ) in out
+    assert f"{len(summary['skipped'])} row skipped (not safely targetable)" in out
+    assert exit_code == 1
+
+
+def test_dry_run_writes_no_summary_because_it_writes_no_log(tmp_path, monkeypatch, capsys):
+    """A rehearsal sends nothing, so it has no run to summarize. Writing one
+    anyway would leave logs whose summaries describe work that never
+    happened, in the same directory a real run's summaries are read from."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+
+    assert list((tmp_path / "logs").glob("sync-metadata-*.jsonl")) == []
+
+
+def test_an_unwritable_summary_does_not_fail_a_run_that_reached_the_archive(
+    tmp_path, monkeypatch, capsys
+):
+    """The summary is a record of the run, not part of it. A full disk at the
+    last line must not turn a clean sync into a reported failure - the run
+    already changed permanent metadata, and reporting it as failed invites a
+    rerun of work that succeeded."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+
+    def full_disk(log_path, summary, live):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("ia_bulk.log_run_summary", full_disk)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "1 item(s) updated successfully" in captured.out
+    assert "No space left on device" in captured.err
 
 
 # Task 5: The prompt tests

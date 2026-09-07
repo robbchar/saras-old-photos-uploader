@@ -438,6 +438,79 @@ than sending corrections to identifiers that have never existed. See
 [`DECISIONS.md`](DECISIONS.md), "`sync-metadata` reads its targets from the
 upload log".
 
+### Checking a sync run you did not watch
+
+Every real sync run ends with a one-line summary at the bottom of its log,
+so you do not have to read the row-by-row lines above it:
+
+```bash
+tail -1 logs/sync-metadata-20260906T173949Z.jsonl
+```
+
+It gives `checked` / `pushed` / `changed` / `unchanged`, plus a `failures`
+list naming each item Internet Archive refused and why, and a separate
+`skipped` list naming the rows the run declined to send at all. Those two
+lists answer different questions: a failure means the item was contacted,
+a skip means it was never touched. The same numbers are what the run
+printed on screen — they come from one place and cannot disagree. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
+
+To read the newest one without looking up its timestamp:
+
+```bash
+tail -n 1 "$(printf '%s\n' logs/sync-metadata-*.jsonl | sort | tail -n 1)" | python -m json.tool
+```
+
+Sorting the names *is* sorting by time — log filenames are UTC timestamps
+precisely so a listing comes out in the order the runs happened (see
+`open_log()`). Deliberately no `ls` here: a shell where `ls` is aliased to
+a long listing feeds the whole `-rw-r--r-- ...` line into the command
+substitution, and `tail` then reports `option used in invalid context`.
+
+### Seeing the summary work, on purpose
+
+**Do not clear `ia_identifier` to set this up.** Clearing
+`ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib` is how an
+already-rehearsed row is made uploadable again, and it does the opposite
+of what is wanted here: a blank `ia_identifier` makes the row
+`UNASSIGNED` (`classify_row()` in `identifiers.py`), `sync-metadata` only
+targets `DONE` rows, and a run with no targets prints `nothing to sync -
+no row is marked uploaded yet` and returns **before** it opens a log — so
+there is no summary to read. `sync-metadata` corrects items that already
+exist; it needs rows that *are* marked uploaded.
+
+Run it against the test Sheet as it stands. Rows already carry `zztest-`
+URLs from earlier rehearsals, and the command targets whatever `ia_url`
+names, so rows uploaded under different stamps are each handled
+correctly:
+
+```bash
+python ia_bulk.py sync-metadata --project sarasoldphotos
+```
+
+That alone gives a summary where `pushed` equals `unchanged` — Internet
+Archive answers *no changes to `_meta.xml`* for every row that already
+matches. To get more than one outcome into a single record, stage the
+Sheet first:
+
+| to see | do this first |
+| --- | --- |
+| `changed` | edit a Title or description cell on one `DONE` row |
+| `skipped` | clear **only** `ia_url` on one `DONE` row, leaving `ia_identifier` and `ia_uploaded` set |
+
+The `skipped` setup is the "marked uploaded but its `ia_url` cell is
+blank" case, and it is cheap to undo: restore the URL from that row's
+upload log, or clear `ia_uploaded` to have `upload` do the row again.
+
+Two limits on what a manual pass can show:
+
+- **`--dry-run` writes no log at all**, so this has to be a real
+  test-mode run.
+- **`failures` cannot easily be staged by hand** — it needs Internet
+  Archive to genuinely refuse a send. Expect `failures: []` on a
+  rehearsal, and read that as normal rather than as a gap. That leg is
+  covered by the test suite instead.
+
 ## Pacing and batch limits
 
 IA's limits are **500 items per upload run** and **5,000 per day**.
