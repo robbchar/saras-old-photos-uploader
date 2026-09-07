@@ -8192,6 +8192,64 @@ def test_sync_target_is_never_newly_minted():
     assert targets[0].newly_minted is False
 
 
+def _sync_target(row_number=2, content_hash="new", stored_hash=""):
+    from ia_bulk import SyncTarget
+
+    return SyncTarget(
+        row_number=row_number,
+        identifier=f"lcps-astoriaphotos-{row_number:05d}",
+        uploaded_as=f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-{row_number:05d}",
+        metadata={"title": "Pier 39"},
+        content_hash=content_hash,
+        stored_hash=stored_hash,
+    )
+
+
+def test_split_unchanged_pushes_a_row_whose_content_changed():
+    from ia_bulk import split_unchanged
+
+    to_push, already = split_unchanged([_sync_target(content_hash="b", stored_hash="a")])
+
+    assert len(to_push) == 1
+    assert already == []
+
+
+def test_split_unchanged_holds_back_a_row_that_already_matches():
+    from ia_bulk import split_unchanged
+
+    to_push, already = split_unchanged([_sync_target(content_hash="a", stored_hash="a")])
+
+    assert to_push == []
+    assert len(already) == 1
+
+
+def test_split_unchanged_pushes_a_row_that_has_never_synced():
+    """A blank stored hash. Also the state an operator creates deliberately
+    by clearing the cell to force a re-sync."""
+    from ia_bulk import split_unchanged
+
+    to_push, already = split_unchanged([_sync_target(content_hash="a", stored_hash="")])
+
+    assert len(to_push) == 1
+    assert already == []
+
+
+def test_split_unchanged_preserves_order():
+    """Rows are reported to a human by row number; reordering them would make
+    the output disagree with the Sheet on screen next to it."""
+    from ia_bulk import split_unchanged
+
+    targets = [
+        _sync_target(row_number=2, content_hash="a", stored_hash=""),
+        _sync_target(row_number=3, content_hash="b", stored_hash="b"),
+        _sync_target(row_number=4, content_hash="c", stored_hash=""),
+    ]
+    to_push, already = split_unchanged(targets)
+
+    assert [t.row_number for t in to_push] == [2, 4]
+    assert [t.row_number for t in already] == [3]
+
+
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
     args = Namespace(
         csv=None,

@@ -4272,6 +4272,25 @@ def plan_sync_targets(
     return targets, problems
 
 
+def split_unchanged(targets: list[SyncTarget]) -> tuple[list[SyncTarget], list[SyncTarget]]:
+    """Returns (to_push, already_synced).
+
+    Its own function rather than a filter inside plan_sync_targets, so the
+    gate can be tested on its own and so the dry run can report both halves
+    without re-deriving anything.
+
+    A blank stored hash pushes. That covers a row that has never synced and a
+    row whose `ia_sync_hash` cell an operator cleared on purpose - the
+    documented lever for forcing a re-sync, and deliberately the same code
+    path, since an operator clearing a cell should get exactly what a fresh
+    row gets."""
+    to_push: list[SyncTarget] = []
+    already_synced: list[SyncTarget] = []
+    for target in targets:
+        (already_synced if target.content_hash == target.stored_hash else to_push).append(target)
+    return to_push, already_synced
+
+
 def run_sheet_sync(targets: list[SyncTarget], log_path: Path, live: bool) -> PushOutcome:
     """Its own loop rather than run_rows(): that helper keys everything off
     `row["identifier"]`, and on the Sheet path that column holds the DONOR's
