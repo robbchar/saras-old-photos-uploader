@@ -50,3 +50,45 @@ def test_sync_hash_of_no_fields_is_a_real_hash_not_an_empty_string():
     """A row whose every metadata cell is blank still gets a hash, so it
     stamps and stops re-pushing like any other row."""
     assert len(sync_hash({})) == 64
+
+
+from column_map import build_column_map
+from sync_state import MissingSyncColumns, SyncColumns, locate_sync_columns
+
+
+def test_locate_sync_columns_finds_both_columns_by_index():
+    column_map = build_column_map(["Title", "ia_sync_hash", "ia_last_synced"])
+    assert locate_sync_columns(column_map) == SyncColumns(ia_sync_hash=1, ia_last_synced=2)
+
+
+def test_locate_sync_columns_takes_the_first_of_a_duplicated_column():
+    """check_column_map already reports duplicate headers as a defect that
+    stops the run. Picking the first here is only so this function has one
+    definite answer rather than depending on dict iteration order."""
+    column_map = build_column_map(["ia_sync_hash", "ia_last_synced", "ia_sync_hash"])
+    assert locate_sync_columns(column_map).ia_sync_hash == 0
+
+
+def test_locate_sync_columns_names_every_missing_column_at_once():
+    """One pass, not one run per missing column - an operator adding columns
+    to a Sheet should be told everything to add before they go and do it."""
+    column_map = build_column_map(["Title", "file"])
+    with pytest.raises(MissingSyncColumns) as excinfo:
+        locate_sync_columns(column_map)
+    message = str(excinfo.value)
+    assert "ia_sync_hash" in message
+    assert "ia_last_synced" in message
+
+
+def test_locate_sync_columns_message_says_what_to_do():
+    """The reader is a volunteer with a spreadsheet open, not a developer."""
+    column_map = build_column_map(["Title"])
+    with pytest.raises(MissingSyncColumns) as excinfo:
+        locate_sync_columns(column_map)
+    assert "add them as header cells" in str(excinfo.value)
+
+
+def test_sync_columns_renders_a1_references():
+    columns = SyncColumns(ia_sync_hash=6, ia_last_synced=7)
+    assert columns.cell(columns.ia_sync_hash, 4) == "G4"
+    assert columns.cell(columns.ia_last_synced, 4) == "H4"
