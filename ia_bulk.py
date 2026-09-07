@@ -974,6 +974,11 @@ def log_run_header(
     the value alone means nothing without the column it was matched against -
     and that column can change in the registry between runs.
 
+    `collection` and `sheet_id` both name what the run actually used, not
+    what the registry configures - a test run targets TEST_COLLECTION and the
+    test Sheet, and a receipt that named the real ones would describe a run
+    that never happened.
+
     Deliberately excludes anything that isn't safe to keep around in a log
     file indefinitely: no credentials, no tokens, no filesystem paths outside
     the project. `sheet_id` is the one Google identifier here, and it already
@@ -985,7 +990,15 @@ def log_run_header(
         "live": live,
         "dry_run": dry_run,
         "sheet_id": config.sheet_id_for(live),
-        "collection": config.ia_collection,
+        # The collection this run actually targeted, not the one configured
+        # for it: in test mode every item goes to TEST_COLLECTION, and a
+        # header naming the real, permanent collection for a run whose items
+        # went somewhere else states the wrong thing about where they are. It
+        # was inferable from `live` beside it - but only by a reader who
+        # already knows that rule, and this record exists precisely so a
+        # reader months later does not have to. Branches on `live` for the
+        # same reason sheet_id_for() does, right above.
+        "collection": config.ia_collection if live else TEST_COLLECTION,
         "files_dir": config.files_dir,
         "file_template": config.file_template,
         "columns": dict(column_map.field_names),

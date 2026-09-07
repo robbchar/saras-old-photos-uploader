@@ -2937,7 +2937,9 @@ def test_run_header_is_the_first_line_of_the_log(tmp_path):
     assert header["live"] is False
     assert header["dry_run"] is False
     assert header["sheet_id"] == "TEST_SHEET_ID"
-    assert header["collection"] == "lcpsociety"
+    # The collection this run TARGETED - a test run's items go to
+    # test_collection, not to the registry's own ia_collection.
+    assert header["collection"] == "test_collection"
     assert header["files_dir"] == "."
     assert header["file_template"] == "{file}"
     assert header["columns"] == {
@@ -4363,7 +4365,9 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     assert header["live"] is False
     assert header["dry_run"] is False
     assert header["sheet_id"] == "TEST_SHEET_ID"
-    assert header["collection"] == "lcpsociety"
+    # The collection this run TARGETED - a test run's items go to
+    # test_collection, not to the registry's own ia_collection.
+    assert header["collection"] == "test_collection"
     assert header["required_for_upload"] == ["title"]
     assert header["columns"]["Title"] == "title"
     # Task 12: neither --limit nor --chunk-size was passed, so the header
@@ -10555,3 +10559,35 @@ def test_cmd_validate_prints_the_missing_field_detail_once_not_as_a_second_block
     assert sum(1 for line in lines if "missing file" in line) == 1
     parent = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
     assert lines[parent + 1] == "    1 missing file: row 3"
+
+
+def test_the_run_header_records_the_collection_the_run_actually_targeted(tmp_path):
+    """The header used to record the registry's ia_collection whatever mode
+    the run was in, so a test run's receipt named the real, permanent
+    collection while its items went to test_collection. Inferable from the
+    `live` field beside it, but only if the reader already knows the rule -
+    and this record exists so a reader months later does not have to."""
+    from ia_bulk import log_run_header, TEST_COLLECTION
+
+    log_path = tmp_path / "upload.jsonl"
+    column_map = build_column_map(["Title"])
+    config = _sheet_config(required_for_upload=("title",))
+
+    log_run_header(log_path, config, column_map, live=False, dry_run=False)
+
+    header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert header["collection"] == TEST_COLLECTION
+    assert header["collection"] != config.ia_collection
+
+
+def test_a_live_run_header_records_the_registrys_own_collection(tmp_path):
+    from ia_bulk import log_run_header
+
+    log_path = tmp_path / "upload.jsonl"
+    column_map = build_column_map(["Title"])
+    config = _sheet_config(required_for_upload=("title",))
+
+    log_run_header(log_path, config, column_map, live=True, dry_run=False)
+
+    header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert header["collection"] == "lcpsociety"
