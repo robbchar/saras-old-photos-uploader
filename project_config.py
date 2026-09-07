@@ -46,6 +46,12 @@ class ProjectConfig:
     file_template: str
     required_for_upload: tuple[str, ...]
     photo_extensions: tuple[str, ...]
+    # The normalized column a run's --batch value is matched against, or None
+    # for a project whose runs are never scoped that way. No default: guessing
+    # a column name would make --batch match nothing on a Sheet that has no
+    # such column, and matching nothing is exactly the silent unfiltered-or-
+    # empty run --batch's guards exist to refuse.
+    batch_column: str | None
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
@@ -181,6 +187,36 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
             "." + entry.strip().lstrip(".").lower() for entry in raw_extensions
         )
 
+    raw_batch_column = block.get("batch_column")
+    if raw_batch_column is None:
+        batch_column = None
+    else:
+        if not isinstance(raw_batch_column, str):
+            raise ConfigError(
+                f"project '{project_id}': batch_column must be a string, got "
+                f"{type(raw_batch_column).__name__!r}"
+            )
+        batch_column = raw_batch_column.strip()
+        if not batch_column:
+            # Present-and-empty is a half-finished edit, not "no batch column":
+            # absent already means that. Left alone it would make every --batch
+            # run read a column named '' and match nothing.
+            raise ConfigError(
+                f"project '{project_id}': batch_column must be a non-empty "
+                f"normalized column name, got {raw_batch_column!r}. Remove the key "
+                "entirely if this project's runs are never scoped to a batch."
+            )
+        normalized = normalize_header(batch_column)
+        if normalized != batch_column:
+            raise ConfigError(
+                f"project '{project_id}': batch_column {batch_column!r} is raw header "
+                f"text, not a normalized column name - use {normalized!r}. This is the "
+                "same rule file_template follows: the Sheet's headers are normalized "
+                "(lowercased, punctuation dropped, spaces to underscores) before "
+                "anything matches against them, so the registry must name the "
+                "normalized form. Your Sheet is fine; the registry entry is not."
+            )
+
     if block["sheet_id"].strip() == block["test_sheet_id"].strip():
         raise ConfigError(
             f"project '{project_id}': sheet_id and test_sheet_id must differ, "
@@ -199,4 +235,5 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
         file_template=block["file_template"].strip(),
         required_for_upload=tuple(required_for_upload),
         photo_extensions=photo_extensions,
+        batch_column=batch_column,
     )

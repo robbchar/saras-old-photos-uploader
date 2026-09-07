@@ -53,11 +53,19 @@ configuration lives in the registry, not the command line".
       "sheet_tab": "TestSheet",
       "files_dir": "./data",
       "file_template": "{folder_on_lacie_drive}/{file_name}",
+      "batch_column": "theme",
       "required_for_upload": ["title", "theme"]
     }
   }
 }
 ```
+
+`batch_column` is optional and names the normalized column `--batch` matches
+against — the column that says which theme, donation or sitting a row belongs
+to. It has no default: a project without one simply cannot be scoped by
+batch, and `--batch` on such a project is refused rather than quietly
+uploading everything. See [`docs/DECISIONS.md`](docs/DECISIONS.md), "A run is
+scoped to a batch by value; the column is registry configuration".
 
 `required_for_upload` names the normalized columns (not raw Sheet header
 text) a human must fill in before a row is ready to upload — a blank one
@@ -87,9 +95,17 @@ unchanged from before this integration and still needs `--files-dir`.
 # read the project's Sheet
 python ia_bulk.py validate --project sarasoldphotos
 
+# report on one batch only, the same scope `upload --batch` would run
+python ia_bulk.py validate --project sarasoldphotos --batch "Logging"
+
 # validate an offline CSV instead
 python ia_bulk.py validate --project sarasoldphotos --csv items.csv --files-dir ./photos
 ```
+
+`--batch` narrows the report to the rows whose registry-configured
+`batch_column` holds that value, through the same code `upload --batch` uses —
+so the preview is the run. Sheet path only. See `upload` below for the flag in
+full.
 
 For the Google Cloud setup this requires (OAuth consent screen, the
 `@lcpsociety.org` account requirement, the one-time browser consent) see
@@ -150,9 +166,21 @@ python ia_bulk.py upload --project sarasoldphotos --write-identifier
 # see what it would do without doing any of it
 python ia_bulk.py upload --project sarasoldphotos --dry-run
 
+# upload one theme only, 100 of them
+python ia_bulk.py upload --project sarasoldphotos --batch "Logging" --limit 100
+
 # upload from an offline CSV instead
 python ia_bulk.py upload --csv items.csv --project sarasoldphotos --files-dir ./photos
 ```
+
+`--batch` scopes the run to the rows whose `batch_column` (from the registry)
+holds that value; only the value goes on the command line. Matching ignores
+case and surrounding whitespace, and a blank cell never matches. The scope is
+applied before anything is counted, so `--limit` means "this many **of the
+batch**", and the not-yet-catalogued count covers the batch alone. A value no
+row carries is refused with the values actually present listed, rather than
+run as an empty upload — `validate --batch "…"` previews the same scope
+through the same code. Sheet path only.
 
 | Mode | Reads | Uploads as | Writes back |
 |---|---|---|---|

@@ -48,6 +48,75 @@ anything. Both are recorded in the `run_header` log record (see
 or used a non-default `--chunk-size`, stays reconstructable from its own log
 alone.
 
+## A run is scoped to a batch by value; the column is registry configuration
+
+*Decided 2026-09-06.*
+
+`upload --batch "Logging"` uploads only the rows whose batch column holds
+that value, and `validate --batch "Logging"` previews exactly that set. Which
+column holds a row's batch is a per-project fact, so it is `batch_column` in
+`projects_registry.json` and never a second command-line flag — the same call
+made for `--files-dir` and `--collection` (see "Technical configuration lives
+in the registry, not the command line"). The command line carries only the
+value, which is the part that changes from run to run.
+
+The scope is applied **before anything counts the rows**, so it composes with
+`--limit` the way `--limit` already composes with `--chunk-size`: `--batch
+"Logging" --limit 100` uploads 100 of the Logging rows, not 100 rows read and
+then filtered. For the same reason `upload`'s "N rows not yet catalogued"
+line counts only the batch — another batch's uncatalogued rows are not this
+run's business to report.
+
+**The scope travels as row numbers, never as a filtered list of rows.**
+Everything downstream of the Sheet read is positional: `validate_rows` and
+`plan_upload_targets` both number rows `offset + 2`, and several functions
+index back with `rows[row_number - 2]`, so a compacted list would silently
+renumber every row after the first gap. The sharper hazard is minting.
+`plan_upload_targets` deliberately scans **every** row for identifiers
+already spent; handed only one batch's rows it would mint numbers another
+batch is already holding, and identifiers are permanent. So the full row list
+travels the whole way through and the scope narrows only what is planned and
+what is reported.
+
+Scope is passed *into* `plan_upload_targets` rather than used to filter its
+output, which is the one place this differs from `--limit`. `--limit` slices
+a prefix, and a target it drops costs nothing because minting is pure
+arithmetic and the number is re-minted next run. A target dropped from the
+*middle* is different: `next_identifiers()` takes `max+1` and never refills,
+so minting for an out-of-scope row and discarding it would leave a permanent
+gap in the sequence. Minting only for rows in scope keeps a batch's numbers
+contiguous. Numbering across batches still interleaves, which is fine —
+identifiers carry no meaning, and uniqueness per project is what matters.
+
+**Matching folds case and strips surrounding whitespace.** These cells are
+typed by hand into a Sheet by several people over months, so `Logging `,
+`logging` and `LOGGING` are one batch. The cost is that two themes differing
+only in case can never be scoped apart; on a Sheet like this one, a case
+difference is far more likely to be a typo than a distinction. A blank cell
+never matches: a row nobody has catalogued yet has no batch, and must not
+join whichever one happens to be running.
+
+**Four refusals, no fallbacks.** An empty `--batch` value; a project with no
+`batch_column`; a `batch_column` naming a column the Sheet does not have; and
+a value no row carries. Every one of them is a hard error naming the fix,
+because the two failure modes they guard both read as success — an ignored
+flag uploads *everything* while looking like a batch run, and an unmatched
+value reports "nothing to upload", which is indistinguishable from a batch
+that is already finished. The unmatched-value message lists the values
+actually present in the column (capped, so a wide column stays readable) so a
+typo is visible without going back to the Sheet. The first two need no Sheet
+at all and are checked before it is read, so a mistyped flag does not cost a
+full read, a full file-resolution pass over the drive and a full validation
+first.
+
+`--batch` is Sheet-path only, rejected on `--csv` alongside `--limit` and
+`--chunk-size`: a CSV is a small hand-prepared file whose rows are already
+the ones the operator chose, and the column to match against is named in the
+registry. The batch and the `batch_column` it was matched against are both
+recorded in the `run_header` log line. That matters more here than for
+`--limit`: a scoped run uploads a fraction of the ready rows and looks, in
+every other field of that record, exactly like a run that found little to do.
+
 ## A run may not exceed Internet Archive's daily item cap
 
 *Decided 2026-08-23.*

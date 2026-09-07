@@ -194,7 +194,8 @@ headers at startup, so a typo (`"titel"` for `"title"`) fails loudly instead
 of quietly marking every row not-ready forever.
 
 `validate`'s report marks a not-ready row inline, and rolls the rest up into
-a per-field breakdown instead of listing thousands of identical rows:
+per-field detail under the count it belongs to, instead of listing thousands
+of identical rows:
 
 ```
 [FAIL] row 7
@@ -206,13 +207,17 @@ a per-field breakdown instead of listing thousands of identical rows:
 
 ...
 
-2,847 rows not yet catalogued
-    2,100 missing title
-    1,900 missing file_name
-    1,900 missing folder_on_lacie_drive
-      940 missing theme
-    (a row missing more than one field appears in more than one count
-     above, so these do not sum to 2,847)
+25 rows ready to upload (no identifier yet)
+2,847 rows not yet assigned an identifier and not yet catalogued (missing
+required fields) - waiting on data entry, not blocked by an error
+    2,100 missing title: rows 190-2289
+    1,900 missing file_name: rows 190-2089
+    1,900 missing folder_on_lacie_drive: rows 190-2089
+    940 missing theme: rows 190-1129
+    (a row missing more than one field appears in more than one count above,
+    so these do not sum to 2,847)
+6 already uploaded
+0 reserved but unconfirmed - will retry under existing identifier
 ```
 
 Row 7 is genuinely broken (a filename that doesn't resolve) and is itemized
@@ -220,17 +225,26 @@ regardless of readiness. Row 41 carries the `(not yet catalogued)` marker
 *and* an error — readiness and validity are different questions about the
 same row, not alternatives, so both can be true at once. The great majority
 of not-ready rows carry no error at all and are never itemized individually,
-only counted in the breakdown above — a flat "N not yet catalogued" total
-can't tell you whether the backlog is mostly missing filenames (automatable)
-or mostly missing titles (it isn't); the per-field counts can.
+appearing only in the per-field detail above — a flat "N not yet catalogued"
+total can't tell you whether the backlog is mostly missing filenames
+(automatable) or mostly missing titles (it isn't); the per-field counts can.
 
-Both halves of `file_template` appear in that breakdown. This project's is
+Each of those lines ends with the rows behind its count, compressed into
+ranges (`rows 190-2289`). That matters because a not-ready row prints as
+`[PASS]` — a blank cell is not an error — so it is indistinguishable at a
+glance from the thousands of rows that are simply fine, and this is the only
+place it can be picked out. The detail sits under the lifecycle line that
+counts it rather than in a block of its own; if some rows went not-ready
+*after* uploading (a required column cleared by hand), that group gets its own
+detail under its own line, because it needs different work.
+
+Both halves of `file_template` appear in that detail. This project's is
 `{folder_on_lacie_drive}/{file_name}`, so a row nobody has touched leaves two
 blank cells and is counted once under each — which is why those two counts
 track each other. The lines are ordered by count, highest first, ties broken
 alphabetically.
 
-`upload` deliberately does **not** repeat this breakdown on every run — see
+`upload` deliberately does **not** repeat this detail on every run — see
 [`docs/DECISIONS.md`](DECISIONS.md), "A blank cell is not an error". It
 itemizes only the rows it would otherwise have uploaded (ready, but failing
 validation) and gives the uncatalogued backlog one contained line instead:
@@ -453,9 +467,22 @@ and unverified against a real response (`DECISIONS.md`, "Rate-limit
 detection matches a status code..."), so treat `--limit` as the dependable
 control and the detector as a bonus, not the other way around.
 
-Neither flag exists on the `--csv` path (`run_rows()` has no per-chunk Sheet
-write, and no ready/not-ready distinction, for either to mean anything
-there): with ~10,000 photos on that path, split the CSV into day-sized files
+`upload --batch "<value>"` scopes a run to one batch — the rows whose
+`batch_column` (named in the registry; `theme` for this project) holds that
+value. It is how you upload a collection theme by theme rather than
+front-to-back, and it narrows the scope before anything is counted, so
+`--batch "Logging" --limit 100` uploads 100 of the Logging rows. Preview it
+first with `validate --batch "<value>"`, which reports exactly the rows the
+upload would take. A misspelled value is refused with the values actually
+present in that column listed, so it never runs as a silent empty upload; the
+batch is recorded in the `run_header` log line, which is the only field that
+explains why a run uploaded 40 of 3,000 ready rows.
+
+None of `--limit`, `--chunk-size` or `--batch` exists on the `--csv` path
+(`run_rows()` has no per-chunk Sheet write and no ready/not-ready
+distinction, for the first two to mean anything there; a CSV's rows are
+already the ones you chose, and the batch column is named in the registry):
+with ~10,000 photos on that path, split the CSV into day-sized files
 yourself, or run it in sittings and rely on `--resume-from`. The 5,000/day
 refusal does apply there — it counts rows left after `--resume-from`
 filtering, so rows a previous run already uploaded do not count against

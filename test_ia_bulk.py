@@ -39,13 +39,16 @@ from ia_bulk import (
     build_sheet_client,
     format_field_receipt,
     format_lifecycle_summary,
-    format_readiness_breakdown,
+    format_missing_field_lines,
+    format_row_numbers,
     _format_result_lines,
     _pluralize,
     main,
     CHUNK_SIZE,
     is_rate_limit_error,
     UploadFailed,
+    batch_row_numbers,
+    BatchScopeError,
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS
 
@@ -169,6 +172,7 @@ def _sheet_config(**overrides) -> ProjectConfig:
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -1589,6 +1593,7 @@ def test_build_sheet_client_reads_the_real_sheet_id_when_live(monkeypatch):
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
 
     client = build_sheet_client(config, live=True)
@@ -1613,6 +1618,7 @@ def test_build_sheet_client_reads_the_test_sheet_id_when_not_live(monkeypatch):
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
 
     client = build_sheet_client(config, live=False)
@@ -1650,6 +1656,7 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
         file_template="{file}",
         required_for_upload=("title",),
         photo_extensions=DEFAULT_PHOTO_EXTENSIONS,
+        batch_column=None,
     )
 
     build_sheet_client(config, live=True)
@@ -2930,7 +2937,9 @@ def test_run_header_is_the_first_line_of_the_log(tmp_path):
     assert header["live"] is False
     assert header["dry_run"] is False
     assert header["sheet_id"] == "TEST_SHEET_ID"
-    assert header["collection"] == "lcpsociety"
+    # The collection this run TARGETED - a test run's items go to
+    # test_collection, not to the registry's own ia_collection.
+    assert header["collection"] == "test_collection"
     assert header["files_dir"] == "."
     assert header["file_template"] == "{file}"
     assert header["columns"] == {
@@ -4356,7 +4365,9 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     assert header["live"] is False
     assert header["dry_run"] is False
     assert header["sheet_id"] == "TEST_SHEET_ID"
-    assert header["collection"] == "lcpsociety"
+    # The collection this run TARGETED - a test run's items go to
+    # test_collection, not to the registry's own ia_collection.
+    assert header["collection"] == "test_collection"
     assert header["required_for_upload"] == ["title"]
     assert header["columns"]["Title"] == "title"
     # Task 12: neither --limit nor --chunk-size was passed, so the header
@@ -7289,10 +7300,7 @@ def test_a_field_named_by_both_sources_is_listed_once_not_twice(tmp_path):
     rows = [_sheet_row(title="A Title", name="")]
     _, results = _validate(rows, required_for_upload=("title", "file_name"), tmp_path=tmp_path)
     assert results[0].missing_fields == ["file_name"]
-    assert format_readiness_breakdown(results).splitlines() == [
-        "1 row not yet catalogued",
-        "    1 missing file_name",
-    ]
+    assert format_missing_field_lines(results) == ["    1 missing file_name: row 2"]
 
 
 # --- Task 8: `validate` reporting - not-ready marker + per-field breakdown ---
@@ -7325,16 +7333,15 @@ def test_breakdown_counts_a_row_missing_two_fields_in_both():
         RowValidation(2, "", missing_fields=["title", "theme"]),
         RowValidation(3, "", missing_fields=["title"]),
     ]
-    breakdown = format_readiness_breakdown(results)
-    lines = breakdown.splitlines()
-    # Was `assert "2 rows not yet catalogued" in breakdown` (substring of
-    # the whole blob) - rewritten to exact-line membership.
-    assert "2 rows not yet catalogued" in lines
+    lines = format_missing_field_lines(results)
+    # The "N rows not yet catalogued" header this used to assert is now the
+    # lifecycle line these lines sit under - see
+    # test_the_missing_fields_are_listed_under_the_line_that_counts_them.
     # Was `assert "2 missing title" in breakdown` - the real line carries
     # 4 leading spaces, which a substring check would not have pinned.
-    assert "    2 missing title" in lines
+    assert "    2 missing title: rows 2-3" in lines
     # Was `assert "1 missing theme" in breakdown` - same reasoning.
-    assert "    1 missing theme" in lines
+    assert "    1 missing theme: row 2" in lines
 
 
 def test_breakdown_says_the_counts_overlap():
@@ -7342,7 +7349,7 @@ def test_breakdown_says_the_counts_overlap():
     # Was `assert "more than one count" in format_readiness_breakdown(results)`
     # (substring) - rewritten to the exact overlap-parenthetical line,
     # including its leading spaces and the row-count it interpolates.
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert (
         "    (a row missing more than one field appears in more than one "
         "count above, so these do not sum to 1)"
@@ -7355,12 +7362,12 @@ def test_breakdown_field_list_follows_the_data_not_a_hardcoded_pair():
     # format_readiness_breakdown(results)` (substring) - rewritten to exact
     # line membership, proving the field name is read from missing_fields
     # itself rather than a hardcoded title/theme pair.
-    lines = format_readiness_breakdown(results).splitlines()
-    assert "    1 missing photographer_studio" in lines
+    lines = format_missing_field_lines(results)
+    assert "    1 missing photographer_studio: row 2" in lines
 
 
 def test_breakdown_is_empty_when_every_row_is_ready():
-    assert format_readiness_breakdown([RowValidation(2, "")]) == ""
+    assert format_missing_field_lines([RowValidation(2, "")]) == []
 
 
 def test_breakdown_omits_the_overlap_parenthetical_when_every_row_misses_exactly_one_field():
@@ -7377,11 +7384,10 @@ def test_breakdown_omits_the_overlap_parenthetical_when_every_row_misses_exactly
         RowValidation(2, "", missing_fields=["title"]),
         RowValidation(3, "", missing_fields=["file_name"]),
     ]
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert lines == [
-        "2 rows not yet catalogued",
-        "    1 missing file_name",
-        "    1 missing title",
+        "    1 missing file_name: row 3",
+        "    1 missing title: row 2",
     ]
 
 
@@ -7399,26 +7405,32 @@ def test_breakdown_orders_by_count_then_breaks_ties_alphabetically():
         RowValidation(2, "", missing_fields=["title", "theme"]),
         RowValidation(3, "", missing_fields=["title", "file_name"]),
     ]
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert lines == [
-        "2 rows not yet catalogued",
-        "    2 missing title",
-        "    1 missing file_name",
-        "    1 missing theme",
+        "    2 missing title: rows 2-3",
+        "    1 missing file_name: row 3",
+        "    1 missing theme: row 2",
         "    (a row missing more than one field appears in more than one "
         "count above, so these do not sum to 2)",
     ]
 
 
-def test_breakdown_uses_the_singular_header_for_one_not_ready_row():
+def test_the_not_ready_lifecycle_line_uses_the_singular_for_one_row():
     """No existing fixture produces exactly one not-ready row - every one
-    of them uses two or three - so the singular branch of the "N row(s)
-    not yet catalogued" header (from _pluralize) has never been rendered
-    by a test. Pins it explicitly."""
-    lines = format_readiness_breakdown(
-        [RowValidation(2, "", missing_fields=["title"])]
-    ).splitlines()
-    assert lines == ["1 row not yet catalogued", "    1 missing title"]
+    of them uses two or three - so the singular branch of _pluralize on this
+    line has never been rendered by a test. Pins it explicitly. It used to
+    live on the standalone breakdown's own header; that header is gone, and
+    this lifecycle line is what replaced it."""
+    rows = [{"ia_identifier": "", "ia_uploaded": ""}]
+    results = [RowValidation(2, "", missing_fields=["title"])]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    assert lines[1] == (
+        "1 row not yet assigned an identifier and not yet catalogued (missing "
+        "required fields) - waiting on data entry, not blocked by an error"
+    )
+    assert lines[2] == "    1 missing title: row 2"
 
 
 # --- Task 9: `upload` reporting and exit code ---
@@ -9860,3 +9872,722 @@ def test_cmd_append_rows_refuses_when_a_template_column_is_missing(tmp_path, mon
     assert appended == []
     assert "file_name" in capsys.readouterr().err
     assert exit_code == 1
+
+
+# --- --batch: scoping a run to one value of a registry-configured column ---
+
+
+def _batch_rows(*themes):
+    """Rows carrying only what batch scoping reads. Row numbers run from 2:
+    the header is row 1, exactly as validate_rows and plan_upload_targets
+    number them."""
+    return [{"identifier": "", "title": f"row {n}", "theme": theme}
+            for n, theme in enumerate(themes, start=2)]
+
+
+def _batch_column_map():
+    return build_column_map(["Identifier", "Title", "Theme"])
+
+
+def test_batch_scope_selects_only_rows_whose_configured_column_matches():
+    scope = batch_row_numbers(
+        _batch_rows("Logging", "Fishing", "Logging"),
+        _sheet_config(batch_column="theme"),
+        _batch_column_map(),
+        "Logging",
+        "projects_registry.json",
+    )
+
+    assert scope == {2, 4}
+
+
+def test_batch_scope_folds_case_and_surrounding_whitespace():
+    """The cells are hand-typed in a Sheet, so 'Logging ' and 'logging' are
+    one batch, not three."""
+    scope = batch_row_numbers(
+        _batch_rows("  logging ", "LOGGING", "Fishing"),
+        _sheet_config(batch_column="theme"),
+        _batch_column_map(),
+        " Logging",
+        "projects_registry.json",
+    )
+
+    assert scope == {2, 3}
+
+
+def test_batch_scope_never_matches_a_blank_cell():
+    """An uncatalogued row has no theme yet. It must not join whatever batch
+    happens to be running."""
+    scope = batch_row_numbers(
+        _batch_rows("Logging", "", "   "),
+        _sheet_config(batch_column="theme"),
+        _batch_column_map(),
+        "Logging",
+        "projects_registry.json",
+    )
+
+    assert scope == {2}
+
+
+def test_batch_on_a_project_with_no_batch_column_is_refused():
+    """Never a silent unfiltered run: the whole point of --batch is to narrow
+    the scope, so a --batch that uploaded everything is the worst outcome."""
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging"),
+            _sheet_config(batch_column=None),
+            _batch_column_map(),
+            "Logging",
+            "some/registry.json",
+        )
+
+    message = str(exc.value)
+    assert "batch_column" in message
+    assert "some/registry.json" in message
+    assert "astoriaphotos" in message
+
+
+def test_a_batch_column_the_sheet_does_not_have_is_refused_by_name():
+    """Same failure mode check_required_for_upload guards: left alone this
+    reads every row's batch as blank, matches nothing, and looks like 'that
+    batch is already uploaded'."""
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging"),
+            _sheet_config(batch_column="subject"),
+            _batch_column_map(),
+            "Logging",
+            "projects_registry.json",
+        )
+
+    message = str(exc.value)
+    assert "'subject'" in message
+    assert "not a column in this Sheet" in message
+    assert "theme" in message  # the known columns, so the fix is visible
+
+
+def test_a_batch_value_matching_no_row_is_refused_and_lists_what_is_there():
+    """A typo'd --batch would otherwise read as 'nothing to upload - every
+    valid row is already marked uploaded'."""
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging", "Fishing", "logging"),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "Loging",
+            "projects_registry.json",
+        )
+
+    message = str(exc.value)
+    assert "'Loging'" in message
+    assert "Fishing" in message
+    assert "Logging" in message
+    # De-duplicated the same way matching folds: 'logging' is not a fourth value
+    assert message.count("ogging") == 1
+
+
+def test_a_batch_column_that_is_blank_in_every_row_says_so():
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("", "  "),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "Logging",
+            "projects_registry.json",
+        )
+
+    assert "empty in every row" in str(exc.value)
+
+
+def test_an_empty_batch_value_is_refused_rather_than_meaning_every_row():
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows("Logging"),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "   ",
+            "projects_registry.json",
+        )
+
+    assert "--batch" in str(exc.value)
+
+
+def test_the_listed_values_are_capped_so_a_wide_column_stays_readable():
+    themes = [f"Theme {n:02d}" for n in range(1, 31)]
+
+    with pytest.raises(BatchScopeError) as exc:
+        batch_row_numbers(
+            _batch_rows(*themes),
+            _sheet_config(batch_column="theme"),
+            _batch_column_map(),
+            "nope",
+            "projects_registry.json",
+        )
+
+    message = str(exc.value)
+    assert "Theme 01" in message
+    assert "Theme 30" not in message
+    assert "10 more" in message
+
+
+def test_plan_upload_targets_mints_only_for_rows_in_scope():
+    """A scoped run must not mint a number for a row it is not going to
+    upload: next_identifiers() takes max+1 and never refills, so a minted-
+    then-discarded number would leave a permanent gap in the sequence."""
+    from ia_bulk import plan_upload_targets
+
+    rows = [
+        {"ia_identifier": "", "ia_uploaded": "", "title": "One", "theme": "Logging"},
+        {"ia_identifier": "", "ia_uploaded": "", "title": "Two", "theme": "Fishing"},
+        {"ia_identifier": "", "ia_uploaded": "", "title": "Three", "theme": "Logging"},
+    ]
+    results = [RowValidation(row_number=n, identifier="") for n in (2, 3, 4)]
+
+    targets = plan_upload_targets(
+        rows, results, _sheet_config(), live=False, fingerprints={}, stamp=FIXED_STAMP,
+        scope={2, 4},
+    )
+
+    assert [(target.row_number, target.identifier) for target in targets] == [
+        (2, "lcps-astoriaphotos-00001"),
+        (4, "lcps-astoriaphotos-00002"),
+    ]
+
+
+def test_plan_upload_targets_still_reads_every_row_for_numbers_already_spent():
+    """The hazard scoping introduces: an out-of-scope row holding
+    lcps-astoriaphotos-00007 has spent that number permanently, and a batch
+    that only looked at its own rows would mint it a second time."""
+    from ia_bulk import plan_upload_targets
+
+    rows = [
+        {"ia_identifier": "lcps-astoriaphotos-00007", "ia_uploaded": "yes",
+         "title": "Other batch", "theme": "Fishing"},
+        {"ia_identifier": "", "ia_uploaded": "", "title": "Mine", "theme": "Logging"},
+    ]
+    results = [RowValidation(row_number=n, identifier="") for n in (2, 3)]
+
+    targets = plan_upload_targets(
+        rows, results, _sheet_config(), live=False, fingerprints={}, stamp=FIXED_STAMP,
+        scope={3},
+    )
+
+    assert [target.identifier for target in targets] == ["lcps-astoriaphotos-00008"]
+
+
+BATCH_SHEET_HEADER = SHEET_HEADER + ["Theme"]
+
+
+def _batch_grid():
+    return [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Fishing"],
+        ["Third photo", "photo3.jpg", "", "", "", "", "logging"],
+    ]
+
+
+def _batch_registry(tmp_path, **overrides):
+    return make_sheet_registry(files_dir=str(tmp_path), batch_column="theme", **overrides)
+
+
+def test_cmd_upload_batch_uploads_only_the_rows_in_that_batch(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.uploads == [
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001",
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",
+    ]
+
+
+def test_cmd_upload_batch_composes_with_limit_as_that_many_of_the_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """--limit already means "this many of the rows actually in scope", and
+    --batch narrows what in-scope means - it must not become "this many rows
+    read, then filtered"."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Fishing"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Logging"],
+        ["Third photo", "photo3.jpg", "", "", "", "", "Logging"],
+    ]
+    captured = []
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+        captured=captured,
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, batch="Logging", limit=1)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    # The Fishing row is first in the Sheet, so an unscoped --limit 1 would
+    # upload it - the one thing this must not do.
+    assert [entry["row"]["title"] for entry in captured] == ["Second photo"]
+
+
+def test_cmd_upload_refuses_a_batch_the_project_has_no_column_for(
+    tmp_path, monkeypatch, capsys
+):
+    """Never a silent unfiltered run: without this the flag would be ignored
+    and all three rows would upload."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=make_sheet_registry(files_dir=str(tmp_path)),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "batch_column" in err
+    assert recorder.uploads == []
+
+
+def test_cmd_upload_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch="Loging"))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "matches no row" in err
+    assert recorder.uploads == []
+
+
+def test_cmd_upload_counts_only_the_batch_as_not_yet_catalogued(
+    tmp_path, monkeypatch, capsys
+):
+    """The scope is narrowed before anything counts: an uncatalogued row in
+    another batch is not this run's business to report."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["", "photo2.jpg", "", "", "", "", "Fishing"],
+        ["", "photo3.jpg", "", "", "", "", "Logging"],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    out = capsys.readouterr().out
+
+    assert "1 row not yet catalogued" in out
+
+
+def test_cmd_upload_rejects_batch_on_the_csv_path(tmp_path, capsys):
+    """--batch is a Sheet-and-registry concept. Silently ignoring an explicit
+    flag on the wrong path is the trap --limit's own refusal exists to stop."""
+    from ia_bulk import cmd_upload
+
+    csv_path = tmp_path / "items.csv"
+    write_csv(csv_path, ["identifier", "file", "mediatype"], [])
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, csv=str(csv_path), batch="Logging")
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "--batch" in err
+
+
+def test_cmd_validate_batch_reports_only_the_rows_in_that_batch(
+    tmp_path, monkeypatch, capsys
+):
+    """validate previews exactly what upload would do, through the same
+    scoping code - the two commands must not define the scope differently."""
+    from ia_bulk import cmd_validate
+
+    for name in ("photo1.jpg", "photo2.jpg", "photo3.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(_batch_grid())
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_batch_registry(tmp_path)), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(
+            csv=None, project="astoriaphotos", registry=str(registry_path),
+            live=False, batch="Logging",
+        )
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "2/2 rows passed" in out
+    assert "2 rows ready to upload" in out
+
+
+def test_cmd_validate_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_validate
+
+    for name in ("photo1.jpg", "photo2.jpg", "photo3.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(_batch_grid())
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_batch_registry(tmp_path)), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(
+            csv=None, project="astoriaphotos", registry=str(registry_path),
+            live=False, batch="Loging",
+        )
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "matches no row" in err
+
+
+def test_cmd_validate_rejects_batch_on_the_csv_path(tmp_path, capsys):
+    from ia_bulk import cmd_validate
+
+    csv_path = tmp_path / "items.csv"
+    write_csv(csv_path, ["identifier", "file", "mediatype"], [])
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(
+            csv=str(csv_path), project="astoriaphotos", registry=str(registry_path),
+            files_dir=".", live=False, batch="Logging",
+        )
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "--batch" in err
+
+
+def test_build_parser_accepts_batch_on_both_upload_and_validate():
+    parser = build_parser()
+
+    validate_args = parser.parse_args(
+        ["validate", "--project", "p", "--batch", "Logging"]
+    )
+    upload_args = parser.parse_args(["upload", "--project", "p", "--batch", "Logging"])
+
+    assert validate_args.batch == "Logging"
+    assert upload_args.batch == "Logging"
+
+
+def test_build_parser_leaves_batch_unset_by_default():
+    parser = build_parser()
+
+    assert parser.parse_args(["validate", "--project", "p"]).batch is None
+    assert parser.parse_args(["upload", "--project", "p"]).batch is None
+
+
+def test_the_run_header_records_the_batch_a_scoped_run_ran(tmp_path, monkeypatch, capsys):
+    """Reconstructability, the same reason --limit and --chunk-size are in
+    here: months later, "why did this run upload 40 of 3,000 rows" cannot be
+    answered from the rest of the record if the batch it was scoped to is
+    missing."""
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, batch="Logging"))
+    capsys.readouterr()
+
+    log_file = next((tmp_path / "logs").glob("upload-*.jsonl"))
+    header = json.loads(log_file.read_text(encoding="utf-8").splitlines()[0])
+
+    assert header["batch"] == "Logging"
+    assert header["batch_column"] == "theme"
+
+
+def test_the_run_header_of_an_unscoped_run_says_so_rather_than_omitting_it(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _batch_grid(),
+        files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    log_file = next((tmp_path / "logs").glob("upload-*.jsonl"))
+    header = json.loads(log_file.read_text(encoding="utf-8").splitlines()[0])
+
+    assert header["batch"] is None
+    assert header["batch_column"] == "theme"
+
+
+# --- naming the rows behind a count ---
+
+
+def test_row_numbers_names_a_single_row_in_the_singular():
+    assert format_row_numbers([189]) == "row 189"
+
+
+def test_row_numbers_collapses_a_contiguous_block_to_one_range():
+    """The whole reason this is ranges rather than a capped list: the
+    uncatalogued backlog is one long block of appended skeleton rows, and
+    printing 2,847 numbers - or the first ten and a truncation - tells an
+    operator less than '190-3036' does."""
+    assert format_row_numbers(range(190, 3037)) == "rows 190-3036"
+
+
+def test_row_numbers_separates_disjoint_blocks():
+    assert format_row_numbers([12, 13, 14, 40, 42, 43]) == "rows 12-14, 40, 42-43"
+
+
+def test_row_numbers_sorts_and_deduplicates_before_grouping():
+    """Callers collect these while walking results, not in sorted order, and
+    two sources can name the same row."""
+    assert format_row_numbers([40, 12, 13, 12]) == "rows 12-13, 40"
+
+
+def test_row_numbers_caps_the_ranges_it_prints_and_says_how_many_it_dropped():
+    """Compression handles the common shape; this handles the pathological
+    one - hundreds of scattered single rows, where every range is one row
+    long and no compression is possible."""
+    scattered = list(range(2, 42, 2))  # 20 rows, no two adjacent
+
+    assert format_row_numbers(scattered, max_ranges=8) == (
+        "rows 2, 4, 6, 8, 10, 12, 14, 16, and 12 more ranges"
+    )
+
+
+def test_row_numbers_of_nothing_is_empty():
+    assert format_row_numbers([]) == ""
+
+
+def test_a_two_row_block_still_reads_as_a_range():
+    assert format_row_numbers([12, 13]) == "rows 12-13"
+
+
+def test_missing_field_lines_name_the_row_behind_a_count_of_one():
+    """The bucket an operator cannot pick out of the report above: a
+    not-ready row prints as [PASS], indistinguishable at a glance from the
+    thousands of rows that are simply fine."""
+    results = [RowValidation(189, "", missing_fields=["file_name"])]
+
+    assert format_missing_field_lines(results) == ["    1 missing file_name: row 189"]
+
+
+def test_missing_field_lines_name_the_rows_per_field_not_per_bucket():
+    """A row missing two fields is named under both, which is what makes the
+    lines actionable - 'go fix title on these, file_name on those'."""
+    results = [
+        RowValidation(2, "", missing_fields=["title", "theme"]),
+        RowValidation(3, "", missing_fields=["title"]),
+    ]
+
+    lines = format_missing_field_lines(results)
+
+    assert "    2 missing title: rows 2-3" in lines
+    assert "    1 missing theme: row 2" in lines
+
+
+# --- the missing-field detail sits under the count it belongs to ---
+
+
+def _unassigned(**cells):
+    return {"ia_identifier": "", "ia_uploaded": "", **cells}
+
+
+def _uploaded(**cells):
+    return {"ia_identifier": "lcps-astoriaphotos-00001", "ia_uploaded": "2026-09-06", **cells}
+
+
+def _line_index(lines, fragment):
+    return next(index for index, line in enumerate(lines) if fragment in line)
+
+
+def test_the_missing_fields_are_listed_under_the_line_that_counts_them():
+    """They used to print as a second block below the whole summary, whose
+    header re-stated a count the summary had already given - see the decision
+    record. The detail belongs to its count, not to the report."""
+    rows = [_unassigned()]
+    results = [RowValidation(189, "", missing_fields=["file_name"])]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    parent = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    assert lines[parent + 1] == "    1 missing file_name: row 189"
+
+
+def test_not_ready_rows_in_different_lifecycle_states_keep_their_details_apart():
+    """The reason the detail attaches per line rather than moving wholesale
+    under one of them: an uncatalogued row and a row whose title was cleared
+    AFTER it uploaded need different work, and merging them into one
+    "2 missing title" would hide that."""
+    rows = [_unassigned(), _uploaded()]
+    results = [
+        RowValidation(2, "", missing_fields=["title"]),
+        RowValidation(40, "", missing_fields=["title"]),
+    ]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    unassigned = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    uploaded = _line_index(lines, "already uploaded but missing required fields")
+    assert lines[unassigned + 1] == "    1 missing title: row 2"
+    assert lines[uploaded + 1] == "    1 missing title: row 40"
+
+
+def test_the_overlap_note_belongs_to_its_own_block_and_names_that_blocks_total():
+    """Two not-ready rows here, but only one of them is in the block the note
+    prints under - a note reading "do not sum to 3" would be counting rows
+    from a different bucket."""
+    rows = [_unassigned(), _unassigned(), _uploaded()]
+    results = [
+        RowValidation(2, "", missing_fields=["title", "theme"]),
+        RowValidation(3, "", missing_fields=["title"]),
+        RowValidation(40, "", missing_fields=["title"]),
+    ]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    unassigned = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    assert lines[unassigned + 1] == "    2 missing title: rows 2-3"
+    assert lines[unassigned + 2] == "    1 missing theme: row 2"
+    assert lines[unassigned + 3] == (
+        "    (a row missing more than one field appears in more than one "
+        "count above, so these do not sum to 2)"
+    )
+    # The already-uploaded block's one row misses exactly one field, so its
+    # counts genuinely do sum - the note must not appear there.
+    uploaded = _line_index(lines, "already uploaded but missing required fields")
+    assert lines[uploaded + 1] == "    1 missing title: row 40"
+    assert "count above" not in lines[uploaded + 1]
+
+
+def test_a_ready_line_gets_no_detail_lines_under_it():
+    rows = [_unassigned(), _unassigned()]
+    results = [RowValidation(2, ""), RowValidation(3, "", missing_fields=["title"])]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    ready = _line_index(lines, "ready to upload")
+    assert not lines[ready + 1].startswith("    ")
+
+
+def test_missing_field_lines_of_rows_that_are_all_ready_is_empty():
+    assert format_missing_field_lines([RowValidation(2, "")]) == []
+
+
+def test_cmd_validate_prints_the_missing_field_detail_once_not_as_a_second_block(
+    tmp_path, monkeypatch, capsys
+):
+    """End-to-end: the standalone breakdown block and its re-stated header are
+    gone, and the detail appears exactly once, under its count."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    # Row 3 is catalogued except for its file cell, so exactly one field is
+    # missing - which keeps the "printed once" assertion below unambiguous.
+    grid = [
+        ["Title", "file"],
+        ["First photo", "photo1.jpg"],
+        ["Second photo", ""],
+    ]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+
+    cmd_validate(
+        Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    )
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+
+    assert "1 row not yet catalogued" not in lines
+    assert sum(1 for line in lines if "missing file" in line) == 1
+    parent = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    assert lines[parent + 1] == "    1 missing file: row 3"
+
+
+def test_the_run_header_records_the_collection_the_run_actually_targeted(tmp_path):
+    """The header used to record the registry's ia_collection whatever mode
+    the run was in, so a test run's receipt named the real, permanent
+    collection while its items went to test_collection. Inferable from the
+    `live` field beside it, but only if the reader already knows the rule -
+    and this record exists so a reader months later does not have to."""
+    from ia_bulk import log_run_header, TEST_COLLECTION
+
+    log_path = tmp_path / "upload.jsonl"
+    column_map = build_column_map(["Title"])
+    config = _sheet_config(required_for_upload=("title",))
+
+    log_run_header(log_path, config, column_map, live=False, dry_run=False)
+
+    header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert header["collection"] == TEST_COLLECTION
+    assert header["collection"] != config.ia_collection
+
+
+def test_a_live_run_header_records_the_registrys_own_collection(tmp_path):
+    from ia_bulk import log_run_header
+
+    log_path = tmp_path / "upload.jsonl"
+    column_map = build_column_map(["Title"])
+    config = _sheet_config(required_for_upload=("title",))
+
+    log_run_header(log_path, config, column_map, live=True, dry_run=False)
+
+    header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+    assert header["collection"] == "lcpsociety"

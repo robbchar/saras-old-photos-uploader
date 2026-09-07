@@ -688,6 +688,10 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
         for bucket in ("ready", "invalid", "not_ready")
     }
 
+    # The results themselves, not merely a tally: each not-ready line renders
+    # its own missing-field detail from its own rows (see
+    # format_missing_field_lines), so the bucket has to keep them.
+    buckets: dict[tuple[RowState, str], list[RowValidation]] = {key: [] for key in counts}
     for row, result in zip(rows, row_results):
         state = classify_row(row)
         if result.readiness is Readiness.NOT_READY:
@@ -696,6 +700,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             bucket = "ready"
         else:
             bucket = "invalid"
+        buckets[(state, bucket)].append(result)
         counts[(state, bucket)] += 1
 
     lines = [
@@ -708,6 +713,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "assigned an identifier and not yet catalogued (missing required fields) - "
             "waiting on data entry, not blocked by an error"
         )
+        lines.extend(format_missing_field_lines(buckets[(RowState.UNASSIGNED, "not_ready")]))
     if counts[(RowState.UNASSIGNED, "invalid")]:
         lines.append(
             f"{_pluralize(counts[(RowState.UNASSIGNED, 'invalid')], 'row')} not yet "
@@ -722,6 +728,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "but missing required fields - a required column was cleared after upload; "
             "needs a human to look, not an automatic retry"
         )
+        lines.extend(format_missing_field_lines(buckets[(RowState.DONE, "not_ready")]))
     if counts[(RowState.DONE, "invalid")]:
         lines.append(
             f"{_pluralize(counts[(RowState.DONE, 'invalid')], 'row')} already uploaded but "
@@ -739,6 +746,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "not yet catalogued (missing required fields) - waiting on data entry before "
             "it can retry"
         )
+        lines.extend(format_missing_field_lines(buckets[(RowState.RESERVED, "not_ready")]))
     if counts[(RowState.RESERVED, "invalid")]:
         lines.append(
             f"{_pluralize(counts[(RowState.RESERVED, 'invalid')], 'row')} reserved but "
@@ -776,14 +784,83 @@ def _format_result_lines(results: list[RowValidation]) -> list[str]:
     return lines
 
 
-def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
-    """Counts not-ready rows by which field is missing.
+# How many separate row ranges a listing prints before it summarizes the rest.
+# Compression already handles the shape this Sheet actually has - the
+# uncatalogued backlog is one long contiguous block of appended skeleton rows -
+# so this cap only bites on the pathological case: hundreds of scattered single
+# rows, where no two are adjacent and nothing can be collapsed.
+MAX_LISTED_ROW_RANGES = 8
 
-    This is the measurement that sizes a planned follow-up tool: a script
-    that fills filenames in from disk. If most not-ready rows are missing
-    only a filename, that script closes most of the gap; if most are
-    missing a title, it barely helps. A single flat "N not yet catalogued"
-    total cannot answer that question - this can.
+
+def format_row_numbers(numbers, max_ranges: int = MAX_LISTED_ROW_RANGES) -> str:
+    """"row 189", or "rows 12-14, 40, 42-43" - the rows behind a count.
+
+    Ranges rather than a capped list of numbers. On the real Sheet a
+    per-field count runs to thousands, and those rows are overwhelmingly one
+    contiguous block; "rows 190-3036" is both shorter than ten numbers and a
+    truncation, and tells the operator strictly more. A flat list would have
+    to be cut off long before it said anything useful.
+
+    Input is sorted and de-duplicated here rather than at the call sites:
+    callers collect row numbers while walking results in whatever order those
+    come in, and missing_fields' two sources can name the same row twice."""
+    ordered = sorted(set(numbers))
+    if not ordered:
+        return ""
+
+    ranges: list[tuple[int, int]] = []
+    for number in ordered:
+        if ranges and number == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], number)
+        else:
+            ranges.append((number, number))
+
+    shown = ranges[:max_ranges]
+    # No thousands separators on the numbers themselves, unlike every count
+    # in this report: a row number is something the operator types into
+    # Sheets' own go-to-row box, which shows 3036, not 3,036 - and a comma
+    # inside a range collides with the comma separating the ranges
+    # ("rows 12-3,036, 4,001").
+    listing = ", ".join(
+        f"{start}" if start == end else f"{start}-{end}" for start, end in shown
+    )
+    dropped = len(ranges) - len(shown)
+    if dropped:
+        # "ranges", not "rows": the number of rows behind them is not what was
+        # dropped, and saying "rows" would read as a row count that disagrees
+        # with the count this listing is attached to.
+        listing += f", and {dropped:,} more range{'' if dropped == 1 else 's'}"
+
+    label = "row" if len(ordered) == 1 else "rows"
+    return f"{label} {listing}"
+
+
+def format_missing_field_lines(
+    row_results: list[RowValidation], indent: str = "    "
+) -> list[str]:
+    """The per-field detail under one not-ready count: which field is missing,
+    from how many rows, and which rows.
+
+    Takes a SUBSET of a run's results - the not-ready rows of one lifecycle
+    state - and is called once per such state by format_lifecycle_summary,
+    rather than once for the whole report. It used to render a standalone
+    block below the summary, headed by its own "N rows not yet catalogued"
+    total. That header was the sum across the three lifecycle states that can
+    hold a not-ready row, but on the ordinary Sheet only one of them is
+    non-zero, so it read as a verbatim repeat of the line just above it. See
+    docs/decisions/READINESS.md, "The missing-field detail belongs to the
+    count above it".
+
+    Splitting per state is not merely tidier: an uncatalogued row and a row
+    whose title was cleared AFTER it uploaded need different work, and one
+    merged "2 missing title" would hide that.
+
+    This is also the measurement that sizes a planned follow-up tool - a
+    script that fills filenames in from disk. If most not-ready rows are
+    missing only a filename, that script closes most of the gap; if most are
+    missing a title, it barely helps. Since the split, that reading is per
+    state rather than one global total, which in practice is the same number:
+    the other two states are almost always empty.
 
     The field names come from whatever is actually in each result's
     missing_fields, not a hardcoded list - so this stays correct when a
@@ -794,25 +871,32 @@ def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
     counts - so the closing parenthetical noting that is load-bearing, not
     decoration: adjacent numbers are read as a partition (as if they summed
     to the total above them) unless something says otherwise, and here they
-    don't sum to it."""
+    don't sum to it. It names this block's own total, never the run's."""
     not_ready = [result for result in row_results if result.missing_fields]
     if not not_ready:
-        return ""
+        return []
 
-    counts: dict[str, int] = {}
+    # Rows per field, not merely a count per field: a not-ready row prints as
+    # [PASS] in the report above (a blank cell is not an error), so it is
+    # indistinguishable at a glance from the thousands of rows that are simply
+    # fine. This is the only place that bucket can be picked out at all.
+    rows_by_field: dict[str, list[int]] = {}
     for result in not_ready:
         for name in result.missing_fields:
-            counts[name] = counts.get(name, 0) + 1
+            rows_by_field.setdefault(name, []).append(result.row_number)
 
-    lines = [f"{_pluralize(len(not_ready), 'row')} not yet catalogued"]
-    for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
-        lines.append(f"    {count:,} missing {name}")
+    lines = [
+        f"{indent}{len(numbers):,} missing {name}: {format_row_numbers(numbers)}"
+        for name, numbers in sorted(
+            rows_by_field.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+    ]
     if any(len(result.missing_fields) > 1 for result in not_ready):
         lines.append(
-            "    (a row missing more than one field appears in more than one count "
+            f"{indent}(a row missing more than one field appears in more than one count "
             f"above, so these do not sum to {len(not_ready):,})"
         )
-    return "\n".join(lines)
+    return lines
 
 
 def format_report(results: list[RowValidation]) -> str:
@@ -857,6 +941,7 @@ def log_run_header(
     dry_run: bool,
     limit: int | None = None,
     chunk_size: int = CHUNK_SIZE,
+    batch: str | None = None,
 ) -> None:
     """The first line written to a Sheet-path run's log. `head -1 <log>` then
     answers "what did this run send, under what field names, and what did it
@@ -882,6 +967,18 @@ def log_run_header(
     tests that call this directly without passing them still get a header
     that says so explicitly, rather than omitting the fields.
 
+    `batch` is there for the same reason and is the strongest case of the
+    three: a scoped run uploads a fraction of the ready rows and looks, in
+    every other field of this record, exactly like a run that found little to
+    do. `batch_column` is written beside it even on an unscoped run, since
+    the value alone means nothing without the column it was matched against -
+    and that column can change in the registry between runs.
+
+    `collection` and `sheet_id` both name what the run actually used, not
+    what the registry configures - a test run targets TEST_COLLECTION and the
+    test Sheet, and a receipt that named the real ones would describe a run
+    that never happened.
+
     Deliberately excludes anything that isn't safe to keep around in a log
     file indefinitely: no credentials, no tokens, no filesystem paths outside
     the project. `sheet_id` is the one Google identifier here, and it already
@@ -893,7 +990,15 @@ def log_run_header(
         "live": live,
         "dry_run": dry_run,
         "sheet_id": config.sheet_id_for(live),
-        "collection": config.ia_collection,
+        # The collection this run actually targeted, not the one configured
+        # for it: in test mode every item goes to TEST_COLLECTION, and a
+        # header naming the real, permanent collection for a run whose items
+        # went somewhere else states the wrong thing about where they are. It
+        # was inferable from `live` beside it - but only by a reader who
+        # already knows that rule, and this record exists precisely so a
+        # reader months later does not have to. Branches on `live` for the
+        # same reason sheet_id_for() does, right above.
+        "collection": config.ia_collection if live else TEST_COLLECTION,
         "files_dir": config.files_dir,
         "file_template": config.file_template,
         "columns": dict(column_map.field_names),
@@ -901,6 +1006,8 @@ def log_run_header(
         "required_for_upload": list(config.required_for_upload),
         "limit": limit,
         "chunk_size": chunk_size,
+        "batch": batch,
+        "batch_column": config.batch_column,
     }
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
@@ -2027,6 +2134,171 @@ def check_required_for_upload(config: ProjectConfig, column_map: ColumnMap) -> l
     ]
 
 
+# How many distinct values a "that batch matches nothing" message lists before
+# it summarizes the rest. A theme column with hundreds of values would
+# otherwise bury the message it is attached to.
+MAX_LISTED_BATCH_VALUES = 20
+
+
+# --batch is a Sheet-and-registry concept: the column it matches against is
+# named in the registry, and a CSV is a small hand-prepared file whose rows
+# are already the ones the operator chose. Silently ignoring an explicit flag
+# on the wrong path is its own trap - the same reasoning --limit's refusal is
+# written under.
+BATCH_IS_SHEET_ONLY = (
+    "--batch scopes a run to a value of the column named by the registry's batch_column, "
+    "so it applies to the Sheet path only. Drop --csv to run against the Sheet."
+)
+
+
+class BatchScopeError(Exception):
+    """--batch cannot be honored as typed.
+
+    Every one of these is a refusal rather than a fallback, and they all guard
+    the same failure: a --batch run that quietly matches every row, or quietly
+    matches none. Both read as success. "Nothing to upload" in particular is
+    indistinguishable from "this batch is already finished", so a typo'd value
+    would look like a completed run.
+
+    Carries the operator-facing message; the commands print it to stderr and
+    exit non-zero."""
+
+
+def fold_batch_value(value: str) -> str:
+    """The matching rule: surrounding whitespace dropped, case folded.
+
+    These cells are typed by hand into a Sheet, so 'Logging ', 'logging' and
+    'LOGGING' are one batch. The cost is that two themes differing only in
+    case can never be scoped apart, which is the right trade here: on a Sheet
+    filled in by several people over months, a case difference is far more
+    likely to be a typo than a distinction."""
+    return value.strip().casefold()
+
+
+def batch_column_for(config: ProjectConfig, batch_value: str, registry_path: str) -> str:
+    """The half of --batch's validation that needs no Sheet: the value is not
+    empty, and this project says which column holds a row's batch.
+
+    Split out so a command can refuse a mistyped flag BEFORE reading the
+    Sheet, resolving several thousand filenames against the drive and
+    validating every row - the same fail-fast reasoning --limit and
+    --chunk-size are read under."""
+    value = batch_value.strip()
+    if not value:
+        raise BatchScopeError(
+            '--batch needs the value to scope the run to, e.g. --batch "Logging". An '
+            "empty value does not mean 'every row' - drop the flag entirely for that."
+        )
+
+    if config.batch_column is None:
+        raise BatchScopeError(
+            f"project '{config.project_id}' has no 'batch_column' in {registry_path}, so "
+            "--batch has nothing to match against. Which column holds a row's batch is a "
+            "per-project fact, so it lives in the registry rather than on the command "
+            'line: add "batch_column": "<normalized column name>" to the project '
+            "block. Refusing rather than running unfiltered - a --batch that uploaded "
+            "every row would look exactly like a successful batch run."
+        )
+
+    return config.batch_column
+
+
+def resolve_batch_scope(
+    args,
+    config: ProjectConfig,
+    column_map: ColumnMap,
+    rows: list[dict[str, str]],
+) -> set[int] | None:
+    """The row numbers --batch narrows this run to, or None when the flag was
+    not passed. The single definition of scope `validate` and `upload` share -
+    the two commands previewing and performing different sets of rows would
+    make the preview worthless."""
+    batch_value = getattr(args, "batch", None)
+    if batch_value is None:
+        return None
+    return batch_row_numbers(rows, config, column_map, batch_value, args.registry)
+
+
+def in_batch_scope(results: list[RowValidation], scope: set[int] | None) -> list[RowValidation]:
+    """Row results this run is reporting on. Everything outside the batch is
+    another run's business, including its uncatalogued rows."""
+    if scope is None:
+        return results
+    return [result for result in results if result.row_number in scope]
+
+
+def batch_row_numbers(
+    rows: list[dict[str, str]],
+    config: ProjectConfig,
+    column_map: ColumnMap,
+    batch_value: str,
+    registry_path: str,
+) -> set[int]:
+    """The Sheet rows in scope for --batch, as row numbers (header is row 1).
+
+    Row NUMBERS, not a filtered list of rows, and that is the whole point.
+    Everything downstream of the Sheet read is positional - validate_rows and
+    plan_upload_targets both number rows `offset + 2`, and several functions
+    index back with `rows[row_number - 2]` - so compacting `rows` would
+    silently renumber every row after the first gap. Worse, plan_upload_targets
+    scans EVERY row for identifiers already spent; handed only one batch's
+    rows it would re-mint numbers another batch is already holding, and
+    identifiers are permanent. So the full list travels the whole way through
+    and callers narrow what they report and upload using this set.
+
+    Raises BatchScopeError for the four ways this cannot be honored; see that
+    class for why none of them is a fallback."""
+    column = batch_column_for(config, batch_value, registry_path)
+    value = batch_value.strip()
+
+    known = sorted(set(column_map.field_names.values()))
+    if column not in known:
+        # The same failure check_required_for_upload guards, reached a
+        # different way: left alone this reads every row's batch as blank,
+        # matches nothing, and reports the batch as already finished.
+        raise BatchScopeError(
+            f"project '{config.project_id}': batch_column names {column!r}, which is not "
+            f"a column in this Sheet. Known columns: {', '.join(known)}"
+        )
+
+    wanted = fold_batch_value(value)
+    scope: set[int] = set()
+    # First-seen spelling per folded value, so the listing below de-duplicates
+    # exactly the way matching does - 'Logging' and 'logging' are one entry,
+    # not two, because they are one batch.
+    present: dict[str, str] = {}
+    for offset, row in enumerate(rows):
+        cell = (row.get(column) or "").strip()
+        if not cell:
+            # A row nobody has catalogued yet has no batch, and must not join
+            # whichever one happens to be running.
+            continue
+        folded = fold_batch_value(cell)
+        present.setdefault(folded, cell)
+        if folded == wanted:
+            scope.add(offset + 2)
+
+    if not scope:
+        if not present:
+            raise BatchScopeError(
+                f"--batch {value!r} matches no row: the '{column}' column is empty in "
+                "every row of this Sheet, so no row has been assigned a batch yet."
+            )
+        ordered = [present[key] for key in sorted(present)]
+        shown = ordered[:MAX_LISTED_BATCH_VALUES]
+        listing = ", ".join(repr(entry) for entry in shown)
+        if len(ordered) > len(shown):
+            listing += f", and {len(ordered) - len(shown)} more"
+        raise BatchScopeError(
+            f"--batch {value!r} matches no row in the '{column}' column. Values present: "
+            f"{listing}. Check the spelling against the Sheet - an unmatched --batch would "
+            "otherwise report 'nothing to upload', which is what a finished batch looks "
+            "like."
+        )
+
+    return scope
+
+
 class SheetSetupFailed(Exception):
     """A Sheet-path command could not get far enough to start its own work.
 
@@ -2211,6 +2483,9 @@ def cmd_validate(args) -> int:
     # falsy.
     csv_path = getattr(args, "csv", None)
     if csv_path is not None:
+        if getattr(args, "batch", None) is not None:
+            print(BATCH_IS_SHEET_ONLY, file=sys.stderr)
+            return 1
         data = read_csv(csv_path)
         registry = load_registry(args.registry)
         if refuse_unregistered_project(registry, args.project):
@@ -2225,6 +2500,16 @@ def cmd_validate(args) -> int:
     config = load_project_config(registry, args.project)
     live = bool(args.live)
 
+    # Before any Sheet I/O, for the same reason `upload` reads --limit early:
+    # a mistyped flag should not cost a full read and a full validation pass
+    # first. The rest of --batch's checks need the Sheet and run below.
+    try:
+        if getattr(args, "batch", None) is not None:
+            batch_column_for(config, args.batch, args.registry)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
     print(sheet_banner(config, live))
     print()
 
@@ -2236,16 +2521,32 @@ def cmd_validate(args) -> int:
 
     column_map, rows = sheet.column_map, sheet.rows
 
+    # `validate` previews what `upload` would do, so it must narrow to the
+    # same rows through the same function. Rows and results are filtered as
+    # PAIRS: format_lifecycle_summary requires one result per row in the same
+    # order and checks the lengths, and the row numbers on the results are
+    # still the Sheet's own, so a report still names the row an operator has
+    # to go and edit.
+    try:
+        scope = resolve_batch_scope(args, config, column_map, rows)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if scope is not None:
+        in_scope = [
+            (row, result)
+            for row, result in zip(rows, row_results)
+            if result.row_number in scope
+        ]
+        rows = [row for row, _ in in_scope]
+        row_results = [result for _, result in in_scope]
+
     results = header_results + row_results
     print(format_report(results))
     print()
     print(format_field_receipt(column_map))
     print()
     print(format_lifecycle_summary(rows, row_results))
-    breakdown = format_readiness_breakdown(row_results)
-    if breakdown:
-        print()
-        print(breakdown)
     print()
     print("suggestions (advisory - nothing is changed automatically):")
     suggestions = suggest_standard_fields(column_map.uploadable_fields())
@@ -2720,6 +3021,7 @@ def plan_upload_targets(
     live: bool,
     fingerprints: dict[int, str],
     stamp: str,
+    scope: set[int] | None = None,
 ) -> list[UploadTarget]:
     """Decides what this run will upload and under which identifier.
 
@@ -2734,7 +3036,17 @@ def plan_upload_targets(
 
     `stamp` is computed once by the caller (run_stamp(), called once per
     upload_from_sheet() invocation) so every target this run plans - across
-    every chunk SheetUploadRun.execute() later processes - shares one stamp."""
+    every chunk SheetUploadRun.execute() later processes - shares one stamp.
+
+    `scope` is --batch's row numbers, or None for an unscoped run. It narrows
+    which rows become targets but deliberately NOT which rows `existing`
+    scans: a number spent by any row in the Sheet is spent, whatever batch
+    that row belongs to, and a scoped run that only looked at its own rows
+    would mint another batch's numbers a second time. Filtering here rather
+    than slicing the returned list is what keeps a batch's numbers
+    contiguous - next_identifiers() takes max+1 and never refills, so a
+    number minted for an out-of-scope row and then discarded would leave a
+    permanent gap."""
     if len(rows) != len(row_results):
         raise ValueError(
             f"plan_upload_targets: got {len(rows)} row(s) but {len(row_results)} row_results - "
@@ -2755,6 +3067,8 @@ def plan_upload_targets(
         # scope agree with what `validate`'s lifecycle summary calls "ready to
         # upload"; the two commands must not define that phrase differently.
         if not result.is_valid or result.readiness is Readiness.NOT_READY:
+            continue
+        if scope is not None and offset + 2 not in scope:
             continue
         state = classify_row(row)
         if state is RowState.DONE:
@@ -3248,6 +3562,10 @@ def upload_from_csv(args, csv_path: str) -> int:
         )
         return 1
 
+    if getattr(args, "batch", None) is not None:
+        print(BATCH_IS_SHEET_ONLY, file=sys.stderr)
+        return 1
+
     files_dir = getattr(args, "files_dir", None) or "."
     collection = TEST_COLLECTION
     if args.live:
@@ -3415,6 +3733,17 @@ def upload_from_sheet(args) -> int:
         )
         return 1
 
+    # Read before any Sheet I/O for the same reason --limit and --chunk-size
+    # are: a mistyped flag must not cost a full read, a full file-resolution
+    # pass over the drive and a full validation first. The rest of --batch's
+    # checks need the Sheet's own columns and run after it is read.
+    try:
+        if getattr(args, "batch", None) is not None:
+            batch_column_for(config, args.batch, args.registry)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
     try:
         sheet = read_sheet(args, registry, config, live, "upload")
     except SheetSetupFailed:
@@ -3458,12 +3787,22 @@ def upload_from_sheet(args) -> int:
     # per-field breakdown of the backlog - repeating it here would make
     # `upload` loud about the ~2,900 uncatalogued rows on every single run,
     # which is the exact noise this split exists to stop.
+    # --batch narrows the scope BEFORE anything counts it: an uncatalogued or
+    # broken row in another batch is not this run's business to report, and
+    # `validate --batch` shows exactly this same set through this same call.
+    try:
+        scope = resolve_batch_scope(args, config, column_map, rows)
+    except BatchScopeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    reported = in_batch_scope(row_results, scope)
+
     blocked = [
         result
-        for result in row_results
+        for result in reported
         if not result.is_valid and result.readiness is Readiness.READY
     ]
-    not_ready = [result for result in row_results if result.readiness is Readiness.NOT_READY]
+    not_ready = [result for result in reported if result.readiness is Readiness.NOT_READY]
     not_ready_broken = [result for result in not_ready if not result.is_valid]
 
     if blocked:
@@ -3491,7 +3830,13 @@ def upload_from_sheet(args) -> int:
     if blocked or not_ready:
         print()
 
-    targets = plan_upload_targets(rows, row_results, config, live, source_fingerprints, run_stamp())
+    # `rows` and `row_results` stay whole here, with `scope` passed alongside:
+    # plan_upload_targets reads every row for identifiers already spent, and
+    # everything downstream of the Sheet read is positional, so a compacted
+    # list would both renumber rows and re-mint another batch's numbers.
+    targets = plan_upload_targets(
+        rows, row_results, config, live, source_fingerprints, run_stamp(), scope=scope
+    )
 
     # Task 12: --limit counts PLANNED targets (valid AND ready AND not
     # already done), not Sheet rows scanned - plan_upload_targets has
@@ -3544,7 +3889,16 @@ def upload_from_sheet(args) -> int:
 
     log_path = open_log(args.log_dir, "upload")
     try:
-        log_run_header(log_path, config, column_map, live, dry_run, limit=limit, chunk_size=chunk_size)
+        log_run_header(
+            log_path,
+            config,
+            column_map,
+            live,
+            dry_run,
+            limit=limit,
+            chunk_size=chunk_size,
+            batch=getattr(args, "batch", None),
+        )
     except Exception as exc:
         # This record is a receipt for later, not part of the upload itself -
         # a run about to create permanent Internet Archive items must not be
@@ -4417,6 +4771,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Read the project's real Sheet instead of its test Sheet (ignored with --csv)",
     )
+    validate_parser.add_argument(
+        "--batch",
+        default=None,
+        help=(
+            "Report only the rows whose registry-configured batch_column holds this value "
+            "(Sheet path only). Previews exactly the scope `upload --batch` would run, "
+            "through the same code. Matching ignores case and surrounding whitespace."
+        ),
+    )
 
     upload_parser = subparsers.add_parser(
         "upload", help="Upload items from a project's Sheet, or from an offline CSV"
@@ -4466,6 +4829,18 @@ def build_parser() -> argparse.ArgumentParser:
             "--limit 100 uploads 100 of the 150 ready rows, not the first 100 rows read. "
             "Combines with --chunk-size as 'this many total, batched this way': --limit 10 "
             "--chunk-size 3 uploads 10 items in chunks of 3, not 10 chunks of 3."
+        ),
+    )
+    upload_parser.add_argument(
+        "--batch",
+        default=None,
+        help=(
+            "Upload only the rows whose registry-configured batch_column holds this value "
+            "(Sheet path only) - the way a run is scoped to one theme. Only the value goes "
+            "here: which column holds it is a per-project fact and lives in the registry's "
+            "batch_column. Matching ignores case and surrounding whitespace. Narrows the "
+            "scope before anything is counted, so --limit means 'this many OF THE BATCH'. "
+            "A value no row carries is refused, never run as an empty upload."
         ),
     )
     upload_parser.add_argument(
