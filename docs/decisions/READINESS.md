@@ -78,7 +78,7 @@ per-field breakdown (`format_readiness_breakdown`) is what surfaces that
 distinction to an operator deciding what to work on next, rather than folding
 it into one flat, unhelpful total.
 
-**The breakdown names the rows, as compressed ranges.** *Added 2026-09-06.*
+**The missing-field detail belongs to the count above it.** *Added 2026-09-06.*
 A count alone tells an operator what kind of work is outstanding but not where
 to go and do it, and this is the one bucket that cannot be found in the
 itemized report above: a not-ready row prints as `[PASS]`, because a blank
@@ -98,10 +98,33 @@ a row number is something the operator types into Sheets' own go-to-row box,
 which shows `3036`, and a comma inside a range would collide with the comma
 separating the ranges.
 
-The nine lifecycle-summary lines above the breakdown are deliberately left as
-bare counts. Every other bucket already prints its rows individually in the
-report, marked `[FAIL]` or `(not yet catalogued)`, so they can be found; row
-lists on all nine would bury the counts that make that summary readable.
+**The detail sits under its own lifecycle line, not in a block of its own.**
+It first shipped as a standalone block below the summary, headed by its own
+"N rows not yet catalogued" total — and on the ordinary Sheet that header read
+as a verbatim repeat of the line immediately above it. It was not literally a
+repeat: not-ready rows are split across three lifecycle states (never
+assigned; already uploaded but a required column since cleared; reserved but
+not catalogued), and the header was the sum. But two of those three are
+almost always zero, so the sum and its one non-zero part are the same number,
+printed twice, four lines apart.
+
+So `format_missing_field_lines` renders the detail for a *subset* of results
+and `format_lifecycle_summary` calls it once per not-ready state, indenting
+the lines under the count they belong to. Splitting per state is not merely
+tidier: an uncatalogued row and a row whose title was cleared *after* it
+uploaded need different work, and one merged `2 missing title` would hide
+that. The overlap parenthetical follows the same rule — it names the total of
+the block it prints under, never the run's.
+
+What this gives up: the single global per-field total, which used to answer
+"would a script that fills filenames from disk close most of the gap?" in one
+place. It is now read per state, which in practice is the same number, since
+the other two states are almost always empty.
+
+The other six lifecycle lines stay bare counts. Every bucket except not-ready
+already prints its rows individually in the report, marked `[FAIL]` or
+`(not yet catalogued)`, so those rows can be found; row lists on all nine
+would bury the counts that make the summary readable.
 
 ## On the Sheet path, `upload` uploads the valid rows and reports the rest
 

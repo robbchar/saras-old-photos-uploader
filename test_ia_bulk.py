@@ -39,7 +39,7 @@ from ia_bulk import (
     build_sheet_client,
     format_field_receipt,
     format_lifecycle_summary,
-    format_readiness_breakdown,
+    format_missing_field_lines,
     format_row_numbers,
     _format_result_lines,
     _pluralize,
@@ -7296,10 +7296,7 @@ def test_a_field_named_by_both_sources_is_listed_once_not_twice(tmp_path):
     rows = [_sheet_row(title="A Title", name="")]
     _, results = _validate(rows, required_for_upload=("title", "file_name"), tmp_path=tmp_path)
     assert results[0].missing_fields == ["file_name"]
-    assert format_readiness_breakdown(results).splitlines() == [
-        "1 row not yet catalogued",
-        "    1 missing file_name: row 2",
-    ]
+    assert format_missing_field_lines(results) == ["    1 missing file_name: row 2"]
 
 
 # --- Task 8: `validate` reporting - not-ready marker + per-field breakdown ---
@@ -7332,11 +7329,10 @@ def test_breakdown_counts_a_row_missing_two_fields_in_both():
         RowValidation(2, "", missing_fields=["title", "theme"]),
         RowValidation(3, "", missing_fields=["title"]),
     ]
-    breakdown = format_readiness_breakdown(results)
-    lines = breakdown.splitlines()
-    # Was `assert "2 rows not yet catalogued" in breakdown` (substring of
-    # the whole blob) - rewritten to exact-line membership.
-    assert "2 rows not yet catalogued" in lines
+    lines = format_missing_field_lines(results)
+    # The "N rows not yet catalogued" header this used to assert is now the
+    # lifecycle line these lines sit under - see
+    # test_the_missing_fields_are_listed_under_the_line_that_counts_them.
     # Was `assert "2 missing title" in breakdown` - the real line carries
     # 4 leading spaces, which a substring check would not have pinned.
     assert "    2 missing title: rows 2-3" in lines
@@ -7349,7 +7345,7 @@ def test_breakdown_says_the_counts_overlap():
     # Was `assert "more than one count" in format_readiness_breakdown(results)`
     # (substring) - rewritten to the exact overlap-parenthetical line,
     # including its leading spaces and the row-count it interpolates.
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert (
         "    (a row missing more than one field appears in more than one "
         "count above, so these do not sum to 1)"
@@ -7362,12 +7358,12 @@ def test_breakdown_field_list_follows_the_data_not_a_hardcoded_pair():
     # format_readiness_breakdown(results)` (substring) - rewritten to exact
     # line membership, proving the field name is read from missing_fields
     # itself rather than a hardcoded title/theme pair.
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert "    1 missing photographer_studio: row 2" in lines
 
 
 def test_breakdown_is_empty_when_every_row_is_ready():
-    assert format_readiness_breakdown([RowValidation(2, "")]) == ""
+    assert format_missing_field_lines([RowValidation(2, "")]) == []
 
 
 def test_breakdown_omits_the_overlap_parenthetical_when_every_row_misses_exactly_one_field():
@@ -7384,9 +7380,8 @@ def test_breakdown_omits_the_overlap_parenthetical_when_every_row_misses_exactly
         RowValidation(2, "", missing_fields=["title"]),
         RowValidation(3, "", missing_fields=["file_name"]),
     ]
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert lines == [
-        "2 rows not yet catalogued",
         "    1 missing file_name: row 3",
         "    1 missing title: row 2",
     ]
@@ -7406,9 +7401,8 @@ def test_breakdown_orders_by_count_then_breaks_ties_alphabetically():
         RowValidation(2, "", missing_fields=["title", "theme"]),
         RowValidation(3, "", missing_fields=["title", "file_name"]),
     ]
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
     assert lines == [
-        "2 rows not yet catalogued",
         "    2 missing title: rows 2-3",
         "    1 missing file_name: row 3",
         "    1 missing theme: row 2",
@@ -7417,15 +7411,22 @@ def test_breakdown_orders_by_count_then_breaks_ties_alphabetically():
     ]
 
 
-def test_breakdown_uses_the_singular_header_for_one_not_ready_row():
+def test_the_not_ready_lifecycle_line_uses_the_singular_for_one_row():
     """No existing fixture produces exactly one not-ready row - every one
-    of them uses two or three - so the singular branch of the "N row(s)
-    not yet catalogued" header (from _pluralize) has never been rendered
-    by a test. Pins it explicitly."""
-    lines = format_readiness_breakdown(
-        [RowValidation(2, "", missing_fields=["title"])]
-    ).splitlines()
-    assert lines == ["1 row not yet catalogued", "    1 missing title: row 2"]
+    of them uses two or three - so the singular branch of _pluralize on this
+    line has never been rendered by a test. Pins it explicitly. It used to
+    live on the standalone breakdown's own header; that header is gone, and
+    this lifecycle line is what replaced it."""
+    rows = [{"ia_identifier": "", "ia_uploaded": ""}]
+    results = [RowValidation(2, "", missing_fields=["title"])]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    assert lines[1] == (
+        "1 row not yet assigned an identifier and not yet catalogued (missing "
+        "required fields) - waiting on data entry, not blocked by an error"
+    )
+    assert lines[2] == "    1 missing title: row 2"
 
 
 # --- Task 9: `upload` reporting and exit code ---
@@ -10412,21 +10413,16 @@ def test_a_two_row_block_still_reads_as_a_range():
     assert format_row_numbers([12, 13]) == "rows 12-13"
 
 
-def test_readiness_breakdown_names_the_row_behind_a_count_of_one():
+def test_missing_field_lines_name_the_row_behind_a_count_of_one():
     """The bucket an operator cannot pick out of the report above: a
     not-ready row prints as [PASS], indistinguishable at a glance from the
     thousands of rows that are simply fine."""
     results = [RowValidation(189, "", missing_fields=["file_name"])]
 
-    lines = format_readiness_breakdown(results).splitlines()
-
-    assert lines == [
-        "1 row not yet catalogued",
-        "    1 missing file_name: row 189",
-    ]
+    assert format_missing_field_lines(results) == ["    1 missing file_name: row 189"]
 
 
-def test_readiness_breakdown_names_the_rows_per_field_not_per_bucket():
+def test_missing_field_lines_name_the_rows_per_field_not_per_bucket():
     """A row missing two fields is named under both, which is what makes the
     lines actionable - 'go fix title on these, file_name on those'."""
     results = [
@@ -10434,7 +10430,128 @@ def test_readiness_breakdown_names_the_rows_per_field_not_per_bucket():
         RowValidation(3, "", missing_fields=["title"]),
     ]
 
-    lines = format_readiness_breakdown(results).splitlines()
+    lines = format_missing_field_lines(results)
 
     assert "    2 missing title: rows 2-3" in lines
     assert "    1 missing theme: row 2" in lines
+
+
+# --- the missing-field detail sits under the count it belongs to ---
+
+
+def _unassigned(**cells):
+    return {"ia_identifier": "", "ia_uploaded": "", **cells}
+
+
+def _uploaded(**cells):
+    return {"ia_identifier": "lcps-astoriaphotos-00001", "ia_uploaded": "2026-09-06", **cells}
+
+
+def _line_index(lines, fragment):
+    return next(index for index, line in enumerate(lines) if fragment in line)
+
+
+def test_the_missing_fields_are_listed_under_the_line_that_counts_them():
+    """They used to print as a second block below the whole summary, whose
+    header re-stated a count the summary had already given - see the decision
+    record. The detail belongs to its count, not to the report."""
+    rows = [_unassigned()]
+    results = [RowValidation(189, "", missing_fields=["file_name"])]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    parent = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    assert lines[parent + 1] == "    1 missing file_name: row 189"
+
+
+def test_not_ready_rows_in_different_lifecycle_states_keep_their_details_apart():
+    """The reason the detail attaches per line rather than moving wholesale
+    under one of them: an uncatalogued row and a row whose title was cleared
+    AFTER it uploaded need different work, and merging them into one
+    "2 missing title" would hide that."""
+    rows = [_unassigned(), _uploaded()]
+    results = [
+        RowValidation(2, "", missing_fields=["title"]),
+        RowValidation(40, "", missing_fields=["title"]),
+    ]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    unassigned = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    uploaded = _line_index(lines, "already uploaded but missing required fields")
+    assert lines[unassigned + 1] == "    1 missing title: row 2"
+    assert lines[uploaded + 1] == "    1 missing title: row 40"
+
+
+def test_the_overlap_note_belongs_to_its_own_block_and_names_that_blocks_total():
+    """Two not-ready rows here, but only one of them is in the block the note
+    prints under - a note reading "do not sum to 3" would be counting rows
+    from a different bucket."""
+    rows = [_unassigned(), _unassigned(), _uploaded()]
+    results = [
+        RowValidation(2, "", missing_fields=["title", "theme"]),
+        RowValidation(3, "", missing_fields=["title"]),
+        RowValidation(40, "", missing_fields=["title"]),
+    ]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    unassigned = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    assert lines[unassigned + 1] == "    2 missing title: rows 2-3"
+    assert lines[unassigned + 2] == "    1 missing theme: row 2"
+    assert lines[unassigned + 3] == (
+        "    (a row missing more than one field appears in more than one "
+        "count above, so these do not sum to 2)"
+    )
+    # The already-uploaded block's one row misses exactly one field, so its
+    # counts genuinely do sum - the note must not appear there.
+    uploaded = _line_index(lines, "already uploaded but missing required fields")
+    assert lines[uploaded + 1] == "    1 missing title: row 40"
+    assert "count above" not in lines[uploaded + 1]
+
+
+def test_a_ready_line_gets_no_detail_lines_under_it():
+    rows = [_unassigned(), _unassigned()]
+    results = [RowValidation(2, ""), RowValidation(3, "", missing_fields=["title"])]
+
+    lines = format_lifecycle_summary(rows, results).splitlines()
+
+    ready = _line_index(lines, "ready to upload")
+    assert not lines[ready + 1].startswith("    ")
+
+
+def test_missing_field_lines_of_rows_that_are_all_ready_is_empty():
+    assert format_missing_field_lines([RowValidation(2, "")]) == []
+
+
+def test_cmd_validate_prints_the_missing_field_detail_once_not_as_a_second_block(
+    tmp_path, monkeypatch, capsys
+):
+    """End-to-end: the standalone breakdown block and its re-stated header are
+    gone, and the detail appears exactly once, under its count."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    # Row 3 is catalogued except for its file cell, so exactly one field is
+    # missing - which keeps the "printed once" assertion below unambiguous.
+    grid = [
+        ["Title", "file"],
+        ["First photo", "photo1.jpg"],
+        ["Second photo", ""],
+    ]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+
+    cmd_validate(
+        Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    )
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+
+    assert "1 row not yet catalogued" not in lines
+    assert sum(1 for line in lines if "missing file" in line) == 1
+    parent = _line_index(lines, "not yet assigned an identifier and not yet catalogued")
+    assert lines[parent + 1] == "    1 missing file: row 3"

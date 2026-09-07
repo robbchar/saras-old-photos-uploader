@@ -688,6 +688,10 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
         for bucket in ("ready", "invalid", "not_ready")
     }
 
+    # The results themselves, not merely a tally: each not-ready line renders
+    # its own missing-field detail from its own rows (see
+    # format_missing_field_lines), so the bucket has to keep them.
+    buckets: dict[tuple[RowState, str], list[RowValidation]] = {key: [] for key in counts}
     for row, result in zip(rows, row_results):
         state = classify_row(row)
         if result.readiness is Readiness.NOT_READY:
@@ -696,6 +700,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             bucket = "ready"
         else:
             bucket = "invalid"
+        buckets[(state, bucket)].append(result)
         counts[(state, bucket)] += 1
 
     lines = [
@@ -708,6 +713,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "assigned an identifier and not yet catalogued (missing required fields) - "
             "waiting on data entry, not blocked by an error"
         )
+        lines.extend(format_missing_field_lines(buckets[(RowState.UNASSIGNED, "not_ready")]))
     if counts[(RowState.UNASSIGNED, "invalid")]:
         lines.append(
             f"{_pluralize(counts[(RowState.UNASSIGNED, 'invalid')], 'row')} not yet "
@@ -722,6 +728,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "but missing required fields - a required column was cleared after upload; "
             "needs a human to look, not an automatic retry"
         )
+        lines.extend(format_missing_field_lines(buckets[(RowState.DONE, "not_ready")]))
     if counts[(RowState.DONE, "invalid")]:
         lines.append(
             f"{_pluralize(counts[(RowState.DONE, 'invalid')], 'row')} already uploaded but "
@@ -739,6 +746,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "not yet catalogued (missing required fields) - waiting on data entry before "
             "it can retry"
         )
+        lines.extend(format_missing_field_lines(buckets[(RowState.RESERVED, "not_ready")]))
     if counts[(RowState.RESERVED, "invalid")]:
         lines.append(
             f"{_pluralize(counts[(RowState.RESERVED, 'invalid')], 'row')} reserved but "
@@ -827,14 +835,32 @@ def format_row_numbers(numbers, max_ranges: int = MAX_LISTED_ROW_RANGES) -> str:
     return f"{label} {listing}"
 
 
-def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
-    """Counts not-ready rows by which field is missing.
+def format_missing_field_lines(
+    row_results: list[RowValidation], indent: str = "    "
+) -> list[str]:
+    """The per-field detail under one not-ready count: which field is missing,
+    from how many rows, and which rows.
 
-    This is the measurement that sizes a planned follow-up tool: a script
-    that fills filenames in from disk. If most not-ready rows are missing
-    only a filename, that script closes most of the gap; if most are
-    missing a title, it barely helps. A single flat "N not yet catalogued"
-    total cannot answer that question - this can.
+    Takes a SUBSET of a run's results - the not-ready rows of one lifecycle
+    state - and is called once per such state by format_lifecycle_summary,
+    rather than once for the whole report. It used to render a standalone
+    block below the summary, headed by its own "N rows not yet catalogued"
+    total. That header was the sum across the three lifecycle states that can
+    hold a not-ready row, but on the ordinary Sheet only one of them is
+    non-zero, so it read as a verbatim repeat of the line just above it. See
+    docs/decisions/READINESS.md, "The missing-field detail belongs to the
+    count above it".
+
+    Splitting per state is not merely tidier: an uncatalogued row and a row
+    whose title was cleared AFTER it uploaded need different work, and one
+    merged "2 missing title" would hide that.
+
+    This is also the measurement that sizes a planned follow-up tool - a
+    script that fills filenames in from disk. If most not-ready rows are
+    missing only a filename, that script closes most of the gap; if most are
+    missing a title, it barely helps. Since the split, that reading is per
+    state rather than one global total, which in practice is the same number:
+    the other two states are almost always empty.
 
     The field names come from whatever is actually in each result's
     missing_fields, not a hardcoded list - so this stays correct when a
@@ -845,10 +871,10 @@ def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
     counts - so the closing parenthetical noting that is load-bearing, not
     decoration: adjacent numbers are read as a partition (as if they summed
     to the total above them) unless something says otherwise, and here they
-    don't sum to it."""
+    don't sum to it. It names this block's own total, never the run's."""
     not_ready = [result for result in row_results if result.missing_fields]
     if not not_ready:
-        return ""
+        return []
 
     # Rows per field, not merely a count per field: a not-ready row prints as
     # [PASS] in the report above (a blank cell is not an error), so it is
@@ -859,17 +885,18 @@ def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
         for name in result.missing_fields:
             rows_by_field.setdefault(name, []).append(result.row_number)
 
-    lines = [f"{_pluralize(len(not_ready), 'row')} not yet catalogued"]
-    for name, numbers in sorted(
-        rows_by_field.items(), key=lambda item: (-len(item[1]), item[0])
-    ):
-        lines.append(f"    {len(numbers):,} missing {name}: {format_row_numbers(numbers)}")
+    lines = [
+        f"{indent}{len(numbers):,} missing {name}: {format_row_numbers(numbers)}"
+        for name, numbers in sorted(
+            rows_by_field.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+    ]
     if any(len(result.missing_fields) > 1 for result in not_ready):
         lines.append(
-            "    (a row missing more than one field appears in more than one count "
+            f"{indent}(a row missing more than one field appears in more than one count "
             f"above, so these do not sum to {len(not_ready):,})"
         )
-    return "\n".join(lines)
+    return lines
 
 
 def format_report(results: list[RowValidation]) -> str:
@@ -2507,10 +2534,6 @@ def cmd_validate(args) -> int:
     print(format_field_receipt(column_map))
     print()
     print(format_lifecycle_summary(rows, row_results))
-    breakdown = format_readiness_breakdown(row_results)
-    if breakdown:
-        print()
-        print(breakdown)
     print()
     print("suggestions (advisory - nothing is changed automatically):")
     suggestions = suggest_standard_fields(column_map.uploadable_fields())
