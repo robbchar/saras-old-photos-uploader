@@ -40,6 +40,7 @@ from ia_bulk import (
     format_field_receipt,
     format_lifecycle_summary,
     format_readiness_breakdown,
+    format_row_numbers,
     _format_result_lines,
     _pluralize,
     main,
@@ -7297,7 +7298,7 @@ def test_a_field_named_by_both_sources_is_listed_once_not_twice(tmp_path):
     assert results[0].missing_fields == ["file_name"]
     assert format_readiness_breakdown(results).splitlines() == [
         "1 row not yet catalogued",
-        "    1 missing file_name",
+        "    1 missing file_name: row 2",
     ]
 
 
@@ -7338,9 +7339,9 @@ def test_breakdown_counts_a_row_missing_two_fields_in_both():
     assert "2 rows not yet catalogued" in lines
     # Was `assert "2 missing title" in breakdown` - the real line carries
     # 4 leading spaces, which a substring check would not have pinned.
-    assert "    2 missing title" in lines
+    assert "    2 missing title: rows 2-3" in lines
     # Was `assert "1 missing theme" in breakdown` - same reasoning.
-    assert "    1 missing theme" in lines
+    assert "    1 missing theme: row 2" in lines
 
 
 def test_breakdown_says_the_counts_overlap():
@@ -7362,7 +7363,7 @@ def test_breakdown_field_list_follows_the_data_not_a_hardcoded_pair():
     # line membership, proving the field name is read from missing_fields
     # itself rather than a hardcoded title/theme pair.
     lines = format_readiness_breakdown(results).splitlines()
-    assert "    1 missing photographer_studio" in lines
+    assert "    1 missing photographer_studio: row 2" in lines
 
 
 def test_breakdown_is_empty_when_every_row_is_ready():
@@ -7386,8 +7387,8 @@ def test_breakdown_omits_the_overlap_parenthetical_when_every_row_misses_exactly
     lines = format_readiness_breakdown(results).splitlines()
     assert lines == [
         "2 rows not yet catalogued",
-        "    1 missing file_name",
-        "    1 missing title",
+        "    1 missing file_name: row 3",
+        "    1 missing title: row 2",
     ]
 
 
@@ -7408,9 +7409,9 @@ def test_breakdown_orders_by_count_then_breaks_ties_alphabetically():
     lines = format_readiness_breakdown(results).splitlines()
     assert lines == [
         "2 rows not yet catalogued",
-        "    2 missing title",
-        "    1 missing file_name",
-        "    1 missing theme",
+        "    2 missing title: rows 2-3",
+        "    1 missing file_name: row 3",
+        "    1 missing theme: row 2",
         "    (a row missing more than one field appears in more than one "
         "count above, so these do not sum to 2)",
     ]
@@ -7424,7 +7425,7 @@ def test_breakdown_uses_the_singular_header_for_one_not_ready_row():
     lines = format_readiness_breakdown(
         [RowValidation(2, "", missing_fields=["title"])]
     ).splitlines()
-    assert lines == ["1 row not yet catalogued", "    1 missing title"]
+    assert lines == ["1 row not yet catalogued", "    1 missing title: row 2"]
 
 
 # --- Task 9: `upload` reporting and exit code ---
@@ -10365,3 +10366,75 @@ def test_the_run_header_of_an_unscoped_run_says_so_rather_than_omitting_it(
 
     assert header["batch"] is None
     assert header["batch_column"] == "theme"
+
+
+# --- naming the rows behind a count ---
+
+
+def test_row_numbers_names_a_single_row_in_the_singular():
+    assert format_row_numbers([189]) == "row 189"
+
+
+def test_row_numbers_collapses_a_contiguous_block_to_one_range():
+    """The whole reason this is ranges rather than a capped list: the
+    uncatalogued backlog is one long block of appended skeleton rows, and
+    printing 2,847 numbers - or the first ten and a truncation - tells an
+    operator less than '190-3036' does."""
+    assert format_row_numbers(range(190, 3037)) == "rows 190-3036"
+
+
+def test_row_numbers_separates_disjoint_blocks():
+    assert format_row_numbers([12, 13, 14, 40, 42, 43]) == "rows 12-14, 40, 42-43"
+
+
+def test_row_numbers_sorts_and_deduplicates_before_grouping():
+    """Callers collect these while walking results, not in sorted order, and
+    two sources can name the same row."""
+    assert format_row_numbers([40, 12, 13, 12]) == "rows 12-13, 40"
+
+
+def test_row_numbers_caps_the_ranges_it_prints_and_says_how_many_it_dropped():
+    """Compression handles the common shape; this handles the pathological
+    one - hundreds of scattered single rows, where every range is one row
+    long and no compression is possible."""
+    scattered = list(range(2, 42, 2))  # 20 rows, no two adjacent
+
+    assert format_row_numbers(scattered, max_ranges=8) == (
+        "rows 2, 4, 6, 8, 10, 12, 14, 16, and 12 more ranges"
+    )
+
+
+def test_row_numbers_of_nothing_is_empty():
+    assert format_row_numbers([]) == ""
+
+
+def test_a_two_row_block_still_reads_as_a_range():
+    assert format_row_numbers([12, 13]) == "rows 12-13"
+
+
+def test_readiness_breakdown_names_the_row_behind_a_count_of_one():
+    """The bucket an operator cannot pick out of the report above: a
+    not-ready row prints as [PASS], indistinguishable at a glance from the
+    thousands of rows that are simply fine."""
+    results = [RowValidation(189, "", missing_fields=["file_name"])]
+
+    lines = format_readiness_breakdown(results).splitlines()
+
+    assert lines == [
+        "1 row not yet catalogued",
+        "    1 missing file_name: row 189",
+    ]
+
+
+def test_readiness_breakdown_names_the_rows_per_field_not_per_bucket():
+    """A row missing two fields is named under both, which is what makes the
+    lines actionable - 'go fix title on these, file_name on those'."""
+    results = [
+        RowValidation(2, "", missing_fields=["title", "theme"]),
+        RowValidation(3, "", missing_fields=["title"]),
+    ]
+
+    lines = format_readiness_breakdown(results).splitlines()
+
+    assert "    2 missing title: rows 2-3" in lines
+    assert "    1 missing theme: row 2" in lines

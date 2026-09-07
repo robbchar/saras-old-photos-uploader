@@ -776,6 +776,57 @@ def _format_result_lines(results: list[RowValidation]) -> list[str]:
     return lines
 
 
+# How many separate row ranges a listing prints before it summarizes the rest.
+# Compression already handles the shape this Sheet actually has - the
+# uncatalogued backlog is one long contiguous block of appended skeleton rows -
+# so this cap only bites on the pathological case: hundreds of scattered single
+# rows, where no two are adjacent and nothing can be collapsed.
+MAX_LISTED_ROW_RANGES = 8
+
+
+def format_row_numbers(numbers, max_ranges: int = MAX_LISTED_ROW_RANGES) -> str:
+    """"row 189", or "rows 12-14, 40, 42-43" - the rows behind a count.
+
+    Ranges rather than a capped list of numbers. On the real Sheet a
+    per-field count runs to thousands, and those rows are overwhelmingly one
+    contiguous block; "rows 190-3036" is both shorter than ten numbers and a
+    truncation, and tells the operator strictly more. A flat list would have
+    to be cut off long before it said anything useful.
+
+    Input is sorted and de-duplicated here rather than at the call sites:
+    callers collect row numbers while walking results in whatever order those
+    come in, and missing_fields' two sources can name the same row twice."""
+    ordered = sorted(set(numbers))
+    if not ordered:
+        return ""
+
+    ranges: list[tuple[int, int]] = []
+    for number in ordered:
+        if ranges and number == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], number)
+        else:
+            ranges.append((number, number))
+
+    shown = ranges[:max_ranges]
+    # No thousands separators on the numbers themselves, unlike every count
+    # in this report: a row number is something the operator types into
+    # Sheets' own go-to-row box, which shows 3036, not 3,036 - and a comma
+    # inside a range collides with the comma separating the ranges
+    # ("rows 12-3,036, 4,001").
+    listing = ", ".join(
+        f"{start}" if start == end else f"{start}-{end}" for start, end in shown
+    )
+    dropped = len(ranges) - len(shown)
+    if dropped:
+        # "ranges", not "rows": the number of rows behind them is not what was
+        # dropped, and saying "rows" would read as a row count that disagrees
+        # with the count this listing is attached to.
+        listing += f", and {dropped:,} more range{'' if dropped == 1 else 's'}"
+
+    label = "row" if len(ordered) == 1 else "rows"
+    return f"{label} {listing}"
+
+
 def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
     """Counts not-ready rows by which field is missing.
 
@@ -799,14 +850,20 @@ def format_readiness_breakdown(row_results: list[RowValidation]) -> str:
     if not not_ready:
         return ""
 
-    counts: dict[str, int] = {}
+    # Rows per field, not merely a count per field: a not-ready row prints as
+    # [PASS] in the report above (a blank cell is not an error), so it is
+    # indistinguishable at a glance from the thousands of rows that are simply
+    # fine. This is the only place that bucket can be picked out at all.
+    rows_by_field: dict[str, list[int]] = {}
     for result in not_ready:
         for name in result.missing_fields:
-            counts[name] = counts.get(name, 0) + 1
+            rows_by_field.setdefault(name, []).append(result.row_number)
 
     lines = [f"{_pluralize(len(not_ready), 'row')} not yet catalogued"]
-    for name, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
-        lines.append(f"    {count:,} missing {name}")
+    for name, numbers in sorted(
+        rows_by_field.items(), key=lambda item: (-len(item[1]), item[0])
+    ):
+        lines.append(f"    {len(numbers):,} missing {name}: {format_row_numbers(numbers)}")
     if any(len(result.missing_fields) > 1 for result in not_ready):
         lines.append(
             "    (a row missing more than one field appears in more than one count "

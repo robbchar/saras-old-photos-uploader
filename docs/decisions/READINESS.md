@@ -78,6 +78,31 @@ per-field breakdown (`format_readiness_breakdown`) is what surfaces that
 distinction to an operator deciding what to work on next, rather than folding
 it into one flat, unhelpful total.
 
+**The breakdown names the rows, as compressed ranges.** *Added 2026-09-06.*
+A count alone tells an operator what kind of work is outstanding but not where
+to go and do it, and this is the one bucket that cannot be found in the
+itemized report above: a not-ready row prints as `[PASS]`, because a blank
+cell is not an error, which makes it indistinguishable at a glance from the
+thousands of rows that are simply fine. So each per-field line ends with the
+rows behind its count — `1 missing file_name: row 189`.
+
+Ranges rather than a capped list of numbers (`format_row_numbers`). The
+uncatalogued backlog is overwhelmingly one contiguous block of appended
+skeleton rows, so `rows 190-3036` is shorter than either a list of ten numbers
+or a truncation, and says strictly more than both. Compression handles the
+shape this Sheet actually has; the cap (`MAX_LISTED_ROW_RANGES`, 8 ranges,
+then `and N more ranges`) only bites on the pathological case of hundreds of
+scattered single rows, where nothing can be collapsed. The row numbers
+themselves carry no thousands separators, unlike every count in this report:
+a row number is something the operator types into Sheets' own go-to-row box,
+which shows `3036`, and a comma inside a range would collide with the comma
+separating the ranges.
+
+The nine lifecycle-summary lines above the breakdown are deliberately left as
+bare counts. Every other bucket already prints its rows individually in the
+report, marked `[FAIL]` or `(not yet catalogued)`, so they can be found; row
+lists on all nine would bury the counts that make that summary readable.
+
 ## On the Sheet path, `upload` uploads the valid rows and reports the rest
 
 *Decided 2026-08-16. The CSV path keeps the opposite behavior.*
