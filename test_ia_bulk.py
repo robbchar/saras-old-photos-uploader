@@ -8425,6 +8425,128 @@ def test_sync_stamps_each_chunk_as_it_goes(tmp_path, monkeypatch):
     assert [row for row, _ in _pushed_rows(client)] == [2, 3]
 
 
+def test_sync_does_not_stamp_a_row_that_moved_between_read_and_stamp(
+    tmp_path, monkeypatch, capsys
+):
+    """Row numbers are positional. If a human deletes a row above ours
+    mid-run, our row number now addresses a different photograph - stamping
+    there would mark a row synced that never was, and withhold its metadata
+    forever. Skip and report; it goes out on the next run."""
+    from ia_bulk import cmd_sync_metadata
+
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def delete_the_first_data_row(grid, read_count):
+        if read_count == 2:          # the guard's re-read, after the initial one
+            del grid[1]
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(
+        _synced_grid(rows), SheetUploadRecorder(), before_read=delete_the_first_data_row
+    )
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    # Row 2 now holds what was row 3. Neither row may be stamped at row 2.
+    assert _pushed_rows(client) == []
+    assert "edited while the run was in progress" in err
+
+
+def test_sync_stamps_normally_when_nothing_moved(tmp_path, monkeypatch):
+    """The guard must not fire on the ordinary case - a false positive here
+    means a row re-pushes every hour forever."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(_pushed_rows(client)) == 1
+
+
+def test_sync_does_not_stamp_when_the_sync_columns_moved(tmp_path, monkeypatch, capsys):
+    """A column inserted mid-run makes every cached column index wrong, so
+    every cell this run would write lands in the wrong column."""
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_column(grid, read_count):
+        if read_count == 2:
+            for row in grid:
+                row.insert(0, "new")
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(
+        _synced_grid(), SheetUploadRecorder(), before_read=insert_a_column
+    )
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "columns moved" in capsys.readouterr().err
+
+
+def test_sync_survives_a_failed_re_read(tmp_path, monkeypatch, capsys):
+    """A transient 503 on the guard's read must not end a run with a stack
+    trace after it has already changed permanent public metadata. The chunk
+    goes unstamped and re-pushes next run."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder(), raise_on_read=2)
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert _pushed_rows(client) == []
+    assert "could not be re-read" in err
+
+
+def test_sync_reports_and_continues_when_the_stamp_write_fails(tmp_path, monkeypatch, capsys):
+    """An exception inside write_cells_if_any must be reported, not raised:
+    the metadata is already on Internet Archive by this point, and an
+    unstamped row simply re-pushes next run and reports unchanged there.
+    Stopping the run instead would trade that harmless repeat for leaving
+    every later chunk unpushed."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder(), raise_on_write=1)
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert _pushed_rows(client) == []
+    assert "IS on Internet Archive" in err
+
+
 def test_sync_from_sheet_refuses_a_sheet_without_the_sync_state_columns(
     tmp_path, monkeypatch, capsys
 ):

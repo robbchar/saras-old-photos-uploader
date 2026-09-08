@@ -4327,6 +4327,7 @@ class SheetSyncRun:
 
         for chunk in chunk_rows(targets, self.chunk_size):
             stamped: list[tuple[int, str]] = []
+            pushed: list[SyncTarget] = []
 
             for target in chunk:
                 position += 1
@@ -4341,6 +4342,7 @@ class SheetSyncRun:
                     # re-push on every run, forever.
                     unchanged += 1
                     stamped.append((target.row_number, target.content_hash))
+                    pushed.append(target)
                     self._log(target, "unchanged")
                 except Exception as exc:
                     # No stamp. A failed row retries next run, which is the
@@ -4352,30 +4354,95 @@ class SheetSyncRun:
                 else:
                     succeeded += 1
                     stamped.append((target.row_number, target.content_hash))
+                    pushed.append(target)
                     self._log(target, "success")
 
-            self._stamp(stamped)
+            self._stamp(stamped, pushed)
 
         return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
 
-    def _stamp(self, stamped: list[tuple[int, str]]) -> None:
-        """Records what this chunk pushed, in one batch.
+    def _stamp(self, stamped: list[tuple[int, str]], pushed: list[SyncTarget]) -> None:
+        """Records what this chunk pushed, in one batch, at the rows this run
+        planned for - having first proved those are still the same rows.
 
-        A stamp write that fails is reported and the run continues. Nothing
-        is lost by it: an unstamped row re-pushes next run, Internet Archive
-        reports it unchanged, and it stamps then. Stopping the run instead
-        would trade a harmless repeat for leaving the remaining chunks
-        unpushed, which is the worse outcome."""
-        updates = stamp_updates(stamped, self.columns, utc_timestamp())
+        Identity is checked late; content was captured early. The hash
+        written is the one computed when the row was READ (it arrives here in
+        `stamped`), while whether the row is still the same row is decided
+        now. Re-deriving the hash from the Sheet's current cells instead
+        would stamp a human edit made during the run as already-synced, and
+        that edit would be lost permanently with nothing to notice it."""
+        if not stamped:
+            return
+
+        safe = self._verified(pushed)
+        safe_rows = {target.row_number for target in safe}
+        updates = stamp_updates(
+            [(row, digest) for row, digest in stamped if row in safe_rows],
+            self.columns,
+            utc_timestamp(),
+        )
         try:
             write_cells_if_any(self.client, updates)
         except Exception as exc:
             print(
                 f"the Sheet stamp write failed: {exc}. The metadata IS on Internet Archive; "
-                f"{_pluralize(len(stamped), 'row')} will simply be sent again next run and "
-                "reported as unchanged. Continuing.",
+                f"{_pluralize(len(updates) // 2, 'row')} will simply be sent again next run "
+                "and reported as unchanged. Continuing.",
                 file=sys.stderr,
             )
+
+    def _verified(self, pushed: list[SyncTarget]) -> list[SyncTarget]:
+        """The rows still at the position this run planned for them.
+
+        reserved_already=True: this leg checks the fingerprint AND the
+        `ia_identifier` cell. SHEET-PROTOCOL.md warns that checking
+        `ia_identifier` can be tautological - it is, on upload's
+        reserve->confirm leg, because reserve wrote that value moments
+        earlier and the check would be verifying its own write.
+        `sync-metadata` never writes `ia_identifier`: it reads it at the
+        initial read and compares here, so nothing is circular.
+
+        Every failure below skips the whole chunk's stamp rather than
+        raising. By this point permanent public metadata has already changed,
+        and an unstamped row costs one repeat next run - a stack trace in
+        place of the run summary costs the operator the log path."""
+        try:
+            snapshot = read_sheet_snapshot(self.client, self.file_template)
+        except MissingWriteBackColumns as exc:
+            print(f"a column this run writes to is gone: {exc}. Nothing stamped.", file=sys.stderr)
+            return []
+        except Exception as exc:
+            print(
+                f"the Sheet could not be re-read before stamping: {exc}. The metadata IS on "
+                "Internet Archive; these rows re-push next run and report as unchanged.",
+                file=sys.stderr,
+            )
+            return []
+
+        try:
+            columns_now = locate_sync_columns(snapshot.column_map)
+        except MissingSyncColumns as exc:
+            print(f"{exc} Nothing stamped this chunk.", file=sys.stderr)
+            return []
+        if columns_now != self.columns:
+            print(
+                "the Sheet's columns moved while this run was in progress, so every cell it "
+                "would stamp now lands in the wrong column. Nothing stamped.",
+                file=sys.stderr,
+            )
+            return []
+
+        still_there, moved = split_moved_targets(pushed, snapshot, reserved_already=True)
+        for target in moved:
+            print(
+                f"row {target.row_number} is no longer the row this run read for "
+                f"'{target.identifier}' - the Sheet was edited while the run was in progress, "
+                "so stamping there would mark a different photograph as synced. The metadata "
+                "IS on Internet Archive; this row is sent again next run and reported as "
+                "unchanged.",
+                file=sys.stderr,
+            )
+        return still_there
 
     def _log(self, target: SyncTarget, status: str, error: str | None = None) -> None:
         log_result(
