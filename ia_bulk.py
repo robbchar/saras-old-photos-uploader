@@ -3450,24 +3450,39 @@ def metadata_changes(
     return changes
 
 
-def print_sync_dry_run(targets: list[SyncTarget], problems: list[RowValidation]) -> int:
+def print_sync_dry_run(
+    to_push: list[SyncTarget],
+    already_synced: list[SyncTarget],
+    problems: list[RowValidation],
+) -> int:
     """Shows what a sync would CHANGE, not merely which fields it would send.
 
-    Listing field names alone made the dry run unable to answer the one
-    question it is run to answer - "did my edit get picked up?" - because
-    editing a description on a row that already had one produced byte-
-    identical output. So each item's current metadata is read back from
-    Internet Archive and diffed against the Sheet.
+    The hash gate is reported FIRST, and only the rows that would actually be
+    sent are read back from Internet Archive. That is both the honest preview
+    - a dry run must mirror the write, including what it leaves untouched -
+    and a large saving: on a steady-state Sheet this drops from one read per
+    uploaded row to none.
 
-    That costs one read per item. It is the right trade for a command whose
-    other mode writes to permanent public items, and it makes the run's
-    `unchanged` count visible BEFORE anything is sent rather than after."""
-    print(f"reading current metadata for {_pluralize(len(targets), 'item')}...")
+    Nothing is stamped here. A dry run sends nothing, so there is nothing to
+    record having sent; stamping would make the next real run skip rows this
+    one only previewed."""
+    total = len(to_push) + len(already_synced)
+    # {:,} on the raw counts, not just on the _pluralize call - see that
+    # function's docstring: adjacent numbers on one line must agree about how
+    # a number looks.
+    print(
+        f"{_pluralize(total, 'uploaded row')}; {len(to_push):,} changed since their last "
+        f"push, {len(already_synced):,} already in sync and would not be sent"
+    )
+    if not to_push:
+        return 1 if problems else 0
+
+    print(f"reading current metadata for {_pluralize(len(to_push), 'item')}...")
     print()
 
     changed = 0
     unreadable = 0
-    for target in targets:
+    for target in to_push:
         remote = fetch_current_metadata(target.uploaded_as)
         if remote is None:
             unreadable += 1
@@ -3490,9 +3505,9 @@ def print_sync_dry_run(targets: list[SyncTarget], problems: list[RowValidation])
 
     if changed or unreadable:
         print()
-    unchanged = len(targets) - changed - unreadable
+    unchanged = len(to_push) - changed - unreadable
     print(
-        f"{changed} of {_pluralize(len(targets), 'item')} would change; "
+        f"{changed} of {_pluralize(len(to_push), 'item')} would change; "
         f"{unchanged} already match and would be reported as unchanged"
     )
     if unreadable:
@@ -4605,6 +4620,9 @@ def sync_from_sheet(args) -> int:
         print("nothing to sync - no row is marked uploaded yet")
         return 1 if problems else 0
 
+    if dry_run:
+        return print_sync_dry_run(to_push, already_synced, problems)
+
     if not to_push:
         # The steady state on an hourly schedule, and it must be one quiet
         # line: a run that says nothing useful is a run whose output stops
@@ -4614,9 +4632,6 @@ def sync_from_sheet(args) -> int:
             "already match their last push"
         )
         return 1 if problems else 0
-
-    if dry_run:
-        return print_sync_dry_run(to_push, problems)
 
     log_path = open_log(args.log_dir, "sync-metadata")
     try:

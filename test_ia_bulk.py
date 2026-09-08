@@ -9046,6 +9046,59 @@ def test_sync_from_sheet_dry_run_survives_an_item_it_cannot_read(
     assert exit_code == 0
 
 
+def test_sync_dry_run_reports_the_gate_before_reading_anything(
+    tmp_path, monkeypatch, capsys
+):
+    """Preview in the destination's vocabulary, and say what is left
+    untouched. It also cuts the dry run's Internet Archive reads from one per
+    uploaded row to one per CHANGED row - on the steady state, from ~4,000
+    to none."""
+    from ia_bulk import cmd_sync_metadata
+
+    reads = []
+    monkeypatch.setattr(
+        "ia_bulk.fetch_current_metadata", lambda identifier: reads.append(identifier) or {}
+    )
+
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+    ]
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(rows), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))   # stamps row 2
+    reads.clear()
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert reads == []
+    assert "already in sync" in out
+    assert "would not be sent" in out
+
+
+def test_sync_dry_run_does_not_stamp_anything(tmp_path, monkeypatch):
+    """--dry-run sends nothing, so there is nothing to record having sent.
+    Stamping here would make the next real run skip the rows the dry run
+    only previewed."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+
+    assert sent == []
+    assert _pushed_rows(client) == []
+
+
 def test_metadata_changes_treats_a_blank_cell_as_leave_alone():
     """update_metadata_row drops blanks, so a dry run that called one a change
     would predict something the real run does not do."""
