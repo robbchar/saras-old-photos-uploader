@@ -427,8 +427,10 @@ correction".
 
 ### Only a changed row is actually sent — and what to do if yours isn't
 
-This part runs on a schedule now, once an hour, on its own. Most hours it has
-nothing to do, and it says so:
+Right now `sync-metadata` is run by hand, the same way as the other commands
+above (an hourly LaunchAgent is planned — issue #27 — but nothing in this
+repo installs one yet). Whichever way it gets run, most runs have nothing to
+do, and it says so:
 
 ```
 nothing to sync - all 3,842 uploaded rows already match their last push
@@ -437,9 +439,9 @@ nothing to sync - all 3,842 uploaded rows already match their last push
 **That message is good news, not a problem.** It means every photo already
 uploaded still shows the description, title and other details currently in
 the Sheet. The tool only sends a row to the website when that row's details
-have actually changed since the last time it was sent — sending everything,
-every hour, whether it changed or not, would be pointless and would bury the
-one real edit anybody cares about under thousands of "nothing changed" lines.
+have actually changed since the last time it was sent — sending everything
+every run, whether it changed or not, would be pointless and would bury the
+one real edit anybody cares about under a wall of "nothing changed" lines.
 
 To know whether a row changed, the tool keeps two columns of its own on the
 far right of the Sheet: **`ia_sync_hash`** and **`ia_last_synced`**. Like the
@@ -464,9 +466,8 @@ guess it, so don't try.
 Two situations, and what to do about each:
 
 - **One row's edit isn't showing up on the site.** Find that row, clear the
-  `ia_sync_hash` cell on it, and leave it blank. The next hourly run will see
-  the row has no hash on record and send it. You don't need to run anything
-  yourself — just wait for the next run, or ask whoever runs it by hand to
+  `ia_sync_hash` cell on it, and leave it blank. The next run will see the
+  row has no hash on record and send it — ask whoever runs `sync-metadata` to
   kick one off.
 - **Everything needs to go out again** (for example, a formatting change was
   applied to the whole Sheet). Clear the entire `ia_sync_hash` column — every
@@ -504,8 +505,8 @@ It gives `checked` / `pushed` / `changed` / `unchanged` / `already_synced`,
 plus a `failures` list naming each item Internet Archive refused and why, and
 a separate `skipped` list naming the rows the run declined to send at all.
 `already_synced` is the hash gate at work — rows read, found to match their
-last push, and never sent — and on a healthy hourly run it is nearly the
-whole Sheet. `failures` and `skipped` answer different questions: a failure
+last push, and never sent — and on a healthy run it is nearly the whole
+Sheet. `failures` and `skipped` answer different questions: a failure
 means the item was contacted, a skip means it was never touched. The same
 numbers are what the run printed on screen — they come from one place and
 cannot disagree. See

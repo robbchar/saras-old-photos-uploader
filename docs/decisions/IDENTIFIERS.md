@@ -147,9 +147,9 @@ have
 caught it: the collision is between the tool's vocabulary and one particular
 spreadsheet's, and nothing in the repo knew what that spreadsheet contained.
 
-The prefix is a naming **convention**, not the enforcement. `RESERVED_FIELDS`
-in `column_map.py` is what actually keeps a column out of the metadata push,
-and adding an `ia_` column without adding it there uploads it. Issue #24 was
+The prefix is a naming **convention** — `RESERVED_FIELDS` in `column_map.py`
+is what actually keeps a column out of the metadata push, and adding an
+`ia_` column without adding it there uploads it. Issue #24 was
 written believing the prefix did the excluding; as specified, its two new
 columns would have shipped to Internet Archive as item metadata on every push,
 and `ia_sync_hash` would have been an input to its own hash. The set is

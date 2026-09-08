@@ -356,10 +356,13 @@ whole column) — never type a value into that column by hand. See
 [`docs/decisions/SHEET-PROTOCOL.md`](docs/decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed)
 for why.
 
-Pushing and stamping happen in batches of 500 rows at a time (Internet
-Archive's own per-run item cap), overridable with `--chunk-size`, the same
-flag `upload` has — a run interrupted mid-way keeps every chunk it finished
-stamping.
+Pushing and stamping happen in batches of 500 rows at a time, overridable
+with `--chunk-size` — the same flag `upload` has, but for a different reason:
+`sync-metadata` doesn't create items, so IA's per-run item cap doesn't apply
+to it. The batching here is to stay under the Google Sheets API's 60
+writes-per-minute-per-user quota (one write per chunk, not per row), and so
+that a run interrupted mid-way keeps every chunk it finished stamping instead
+of losing all of them.
 
 A blank cell means **leave this field alone**, not "delete it" — so an
 accidental cell clear can never strip metadata from a permanent public item.

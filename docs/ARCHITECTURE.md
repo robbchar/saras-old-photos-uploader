@@ -331,7 +331,8 @@ push. `plan_sync_targets()` hashes each row's `metadata_to_send()` output
 sorts the result into `to_push`/`already_synced`. Only `to_push` is sent —
 this reverses the original "every DONE row is sent every run", which was
 correct for a hand-run command over a few hundred rows and stopped holding at
-~4,000 rows on an hourly schedule (issue #24). See
+~4,000 rows on the hourly schedule planned for issue #27 (the hash gate
+itself is issue #24). See
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 IA's *no changes to `_meta.xml`* response still becomes `MetadataUnchanged`
 and is counted as `unchanged` rather than a failure, and — unlike a genuine
