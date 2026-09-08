@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass
 
 from column_map import ColumnMap, IA_LAST_SYNCED_COLUMN, IA_SYNC_HASH_COLUMN
-from sheet_client import column_letter
+from sheet_client import CellUpdate, column_letter
 
 
 def sync_hash(metadata: dict[str, str]) -> str:
@@ -105,3 +105,25 @@ def locate_sync_columns(column_map: ColumnMap) -> SyncColumns:
         ia_sync_hash=indexes[IA_SYNC_HASH_COLUMN],
         ia_last_synced=indexes[IA_LAST_SYNCED_COLUMN],
     )
+
+
+def stamp_updates(
+    stamped: list[tuple[int, str]], columns: SyncColumns, synced_at: str
+) -> list[CellUpdate]:
+    """The cells recording that these rows pushed successfully.
+
+    Takes (row_number, content_hash) pairs rather than SyncTarget objects so
+    this module never has to import ia_bulk - and, more usefully, so the hash
+    written is unmistakably a value the CALLER captured at read time. There
+    is nowhere in here that could re-derive it from the row's current cells,
+    which is the mistake that would stamp a human's mid-run edit as
+    already-synced and lose it permanently.
+
+    `ia_last_synced` is written alongside the hash because the hash is opaque
+    and useful only to this script; the timestamp is what a human looks at to
+    confirm an edit landed. Nothing ever reads it back."""
+    updates: list[CellUpdate] = []
+    for row_number, content_hash in stamped:
+        updates.append(CellUpdate(columns.cell(columns.ia_sync_hash, row_number), content_hash))
+        updates.append(CellUpdate(columns.cell(columns.ia_last_synced, row_number), synced_at))
+    return updates

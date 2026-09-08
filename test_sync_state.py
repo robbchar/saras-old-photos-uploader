@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 
-from sync_state import sync_hash
+from column_map import build_column_map
+from sheet_client import CellUpdate
+from sync_state import (
+    MissingSyncColumns,
+    SyncColumns,
+    locate_sync_columns,
+    stamp_updates,
+    sync_hash,
+)
 
 
 def test_sync_hash_is_stable_for_the_same_content():
@@ -52,10 +60,6 @@ def test_sync_hash_of_no_fields_is_a_real_hash_not_an_empty_string():
     assert len(sync_hash({})) == 64
 
 
-from column_map import build_column_map
-from sync_state import MissingSyncColumns, SyncColumns, locate_sync_columns
-
-
 def test_locate_sync_columns_finds_both_columns_by_index():
     column_map = build_column_map(["Title", "ia_sync_hash", "ia_last_synced"])
     assert locate_sync_columns(column_map) == SyncColumns(ia_sync_hash=1, ia_last_synced=2)
@@ -92,3 +96,41 @@ def test_sync_columns_renders_a1_references():
     columns = SyncColumns(ia_sync_hash=6, ia_last_synced=7)
     assert columns.cell(columns.ia_sync_hash, 4) == "G4"
     assert columns.cell(columns.ia_last_synced, 4) == "H4"
+
+
+def test_stamp_updates_writes_both_cells_for_each_row():
+    columns = SyncColumns(ia_sync_hash=6, ia_last_synced=7)
+
+    updates = stamp_updates([(4, "abc123")], columns, "2026-09-07T12:00:00Z")
+
+    assert updates == [
+        CellUpdate("G4", "abc123"),
+        CellUpdate("H4", "2026-09-07T12:00:00Z"),
+    ]
+
+
+def test_stamp_updates_batches_every_row_together():
+    """One batchUpdate per chunk. The Sheets API counts a batch as a single
+    request against the 60/minute/user quota, so a 4,000-row re-sync costs
+    about 8 writes rather than 4,000."""
+    columns = SyncColumns(ia_sync_hash=6, ia_last_synced=7)
+
+    updates = stamp_updates([(4, "a"), (5, "b")], columns, "T")
+
+    assert [u.a1 for u in updates] == ["G4", "H4", "G5", "H5"]
+
+
+def test_stamp_updates_of_nothing_is_an_empty_batch():
+    """An empty batch is never sent - see write_cells_if_any()."""
+    assert stamp_updates([], SyncColumns(ia_sync_hash=6, ia_last_synced=7), "T") == []
+
+
+def test_stamp_updates_writes_the_hash_it_is_given_not_one_it_derives():
+    """The stamped value is the hash computed when the row was READ. This
+    function is given it precisely so there is no place here that could
+    re-derive it from current cells and stamp a mid-run edit as synced."""
+    columns = SyncColumns(ia_sync_hash=0, ia_last_synced=1)
+
+    updates = stamp_updates([(9, "read-time-hash")], columns, "T")
+
+    assert updates[0].value == "read-time-hash"
