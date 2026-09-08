@@ -537,9 +537,12 @@ there is no summary to read. `sync-metadata` corrects items that already
 exist; it needs rows that *are* marked uploaded.
 
 First, clear `ia_sync_hash` on the rows you want in the demo — otherwise the
-hash gate correctly recognizes them as already synced, sends nothing, and the
-run returns before it opens a log, the same as "no row is marked uploaded
-yet" above. Then run it against the test Sheet as it stands. Rows already
+hash gate correctly recognizes them as already synced and sends nothing.
+Unlike "no row is marked uploaded yet" above, that outcome still opens a log
+and writes a summary — `pushed` and `changed` both `0`, `already_synced`
+equal to the whole Sheet — so a demo run over unedited hashes shows a
+real record, just not an interesting one. Clear the hashes first for a
+summary worth reading. Then run it against the test Sheet as it stands. Rows already
 carry `zztest-` URLs from earlier rehearsals, and the command targets
 whatever `ia_url` names, so rows uploaded under different stamps are each
 handled correctly:

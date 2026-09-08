@@ -8363,6 +8363,58 @@ def test_sync_over_an_unedited_sheet_pushes_nothing_and_says_so(
     assert exit_code == 0
 
 
+def _all_sync_log_lines(tmp_path):
+    """Every record in every sync-metadata log the run has written so far, in
+    write order.
+
+    Deliberately not "the one log file this run wrote": open_log() names a
+    log by wall-clock second, so two cmd_sync_metadata() calls inside one
+    fast test can legitimately collide on the same filename and append to
+    it. Reading the whole directory and diffing by record count is robust to
+    that collision either way - one growing file, or two separate ones."""
+    lines: list[str] = []
+    for path in sorted((tmp_path / "logs").glob("sync-metadata-*.jsonl")):
+        lines.extend(path.read_text(encoding="utf-8").strip().splitlines())
+    return [json.loads(line) for line in lines if line]
+
+
+def test_sync_over_an_unedited_sheet_still_writes_a_log(tmp_path, monkeypatch, capsys):
+    """The steady state is the MOST common outcome on an hourly schedule, so
+    it is exactly the run an unattended operator most needs a record of -
+    OPERATIONS.md's tail-the-latest-log recipe depends on every run leaving
+    one. The console line stays the single quiet sentence; only the log gets
+    the new record, with the real (mostly zero) numbers in it."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))  # first run: pushes and stamps
+    capsys.readouterr()
+    before = _all_sync_log_lines(tmp_path)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))  # steady state
+    out = capsys.readouterr().out
+    after = _all_sync_log_lines(tmp_path)
+
+    new_entries = after[len(before):]
+    assert any(entry["record"] == "run_header" for entry in new_entries)
+    summary = new_entries[-1]
+    assert summary["record"] == "run_summary"
+    assert summary["checked"] == 1
+    assert summary["changed"] == 0
+    assert summary["unchanged"] == 0
+    assert summary["already_synced"] == 1
+    assert "already match their last push" in out
+    assert "log written to" in out
+    assert exit_code == 0
+
+
 def test_sync_pushes_exactly_the_row_whose_cell_was_edited(tmp_path, monkeypatch):
     """Acceptance criterion 2."""
     rows = [
@@ -8599,6 +8651,36 @@ def test_sync_does_not_stamp_a_row_that_moved_between_read_and_stamp(
     assert "edited while the run was in progress" in err
 
 
+def test_sync_does_not_blame_a_mid_run_edit_for_a_blank_fingerprint(
+    tmp_path, monkeypatch, capsys
+):
+    """A row whose file_template cell is already blank fingerprints as ""
+    (sheet_row_fingerprints()), which can never match - so split_moved_
+    targets() files it as moved on EVERY run, whether or not the Sheet was
+    touched. `file` is a RESERVED_FIELDS column, so clearing it does not
+    change the content hash by itself; this row also has a genuine pending
+    edit (blank stored hash), so it is a push candidate that then fails the
+    moved-row guard for a reason that has nothing to do with anyone editing
+    the Sheet mid-run. The message must not say otherwise."""
+    from ia_bulk import cmd_sync_metadata
+
+    grid = _synced_grid([[
+        "Stone Customshouse", "", "lcps-astoriaphotos-00001",
+        "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg", "", "",
+    ]])
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert len(sent) == 1
+    assert _pushed_rows(client) == []
+    assert "the Sheet was edited while the run was in progress" not in err
+    assert "no file_template fingerprint" in err
+    assert "IS on Internet Archive" in err
+
+
 def test_sync_stamps_normally_when_nothing_moved(tmp_path, monkeypatch):
     """The guard must not fire on the ordinary case - a false positive here
     means a row re-pushes every hour forever."""
@@ -8728,6 +8810,67 @@ def test_sync_from_sheet_refuses_missing_sync_columns_in_live_mode_too(
     assert exit_code == 1
     assert sent == []
     assert "ia_sync_hash" in capsys.readouterr().err
+
+
+def test_sync_from_sheet_refuses_a_sheet_without_ia_identifier_bib(
+    tmp_path, monkeypatch, capsys
+):
+    """ia_identifier_bib is the one write-back column that fails SILENTLY
+    when it is missing, unlike its three companions: without ia_identifier
+    or ia_uploaded no row classifies DONE (refused earlier, at "no row is
+    marked uploaded yet"), and without ia_url every row becomes a reported
+    problem. Without ia_identifier_bib alone, rows classify DONE, the hash
+    gate passes them, permanent metadata goes out to Internet Archive, and
+    only then does _verified() discover the column is gone and stamp
+    nothing - on every chunk, forever. Refused up front instead, before
+    anything is sent."""
+    from ia_bulk import cmd_sync_metadata
+
+    header = [
+        "Title", "file", "ia_identifier", "ia_uploaded", "ia_url",
+        "ia_sync_hash", "ia_last_synced",
+    ]
+    grid = [header] + [[
+        "Stone Customshouse", "photo1.jpg", "lcps-astoriaphotos-00001",
+        "2026-08-23T16:13:31Z", SYNC_URL, "", "",
+    ]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_identifier_bib" in err
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_sync_from_sheet_rejects_a_non_positive_chunk_size(
+    tmp_path, monkeypatch, capsys, chunk_size
+):
+    """Same failure shape as upload's own --chunk-size guard (see
+    test_cmd_upload_rejects_a_non_positive_chunk_size): 0 raises inside
+    chunk_rows() (range() forbids a zero step); -1 silently yields zero
+    chunks, so the run pushes nothing and still reports success. Checked
+    before any Sheet I/O."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    exit_code = cmd_sync_metadata(
+        _sync_sheet_args(tmp_path, registry_path, chunk_size=chunk_size)
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert err.splitlines() == [
+        f"--chunk-size must be a positive number of items, not {chunk_size}. Zero raises "
+        "inside chunk_rows(); a negative value silently produces zero chunks, pushing "
+        "nothing while the run still reports success."
+    ]
 
 
 def test_sync_from_sheet_refuses_a_file_template_naming_a_column_the_sheet_lacks(

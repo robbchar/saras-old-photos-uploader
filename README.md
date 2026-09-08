@@ -344,7 +344,10 @@ mediatype after upload anyway.
 **Only a row whose content actually changed is sent.** The Sheet must already
 carry two more tool-owned columns beyond `upload`'s four —
 `ia_sync_hash` and `ia_last_synced` — and `sync-metadata` refuses to run
-without them, in test mode as well as live. Each successfully-pushed row is
+without any of the six, in test mode as well as live: without `upload`'s
+own four it cannot confirm which item a row's stamp belongs to, and without
+the two hash columns it has nowhere to record what it last pushed. Each
+successfully-pushed row is
 stamped with a hash of what it sent; the next run skips a row whose hash
 still matches, and a run with nothing to push prints `nothing to sync - all N
 uploaded rows already match their last push` rather than resending everything
