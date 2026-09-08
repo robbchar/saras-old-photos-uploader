@@ -8275,6 +8275,7 @@ def _sync_sheet_args(tmp_path, registry_path, **overrides):
         resume_from=None,
         from_log=None,
         dry_run=False,
+        chunk_size=CHUNK_SIZE,
     )
     for name, value in overrides.items():
         setattr(args, name, value)
@@ -8301,6 +8302,127 @@ def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
         lambda metadata, target: sent.append((target, metadata)),
     )
     return registry_path, client
+
+
+def _pushed_rows(client):
+    """The (row_number, hash) pairs a run stamped, read back off the fake
+    Sheet's grid - i.e. what a NEXT run would see, which is the property that
+    actually matters."""
+    header = client.grid[0]
+    hash_index = header.index("ia_sync_hash")
+    return [
+        (index + 1, row[hash_index])
+        for index, row in enumerate(client.grid)
+        if index > 0 and hash_index < len(row) and row[hash_index]
+    ]
+
+
+def test_sync_stamps_a_row_that_pushed_successfully(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(sent) == 1
+    assert len(_pushed_rows(client)) == 1
+
+
+def test_sync_stamps_the_read_time_hash_and_a_timestamp(tmp_path, monkeypatch):
+    """Both cells, and the hash is the one computed from the row as READ."""
+    from ia_bulk import cmd_sync_metadata, plan_sync_targets
+
+    grid = _synced_grid()
+    column_map, rows = grid_to_rows(grid)
+    expected = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )[0][0].content_hash
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][6] == expected
+    assert client.grid[1][7] != ""
+
+
+def test_sync_does_not_stamp_a_row_whose_push_failed(tmp_path, monkeypatch):
+    """The cell is left untouched so the row retries on the next run. A
+    failure means the item may be in a state nobody intended; stamping it
+    would declare it settled."""
+    from ia_bulk import cmd_sync_metadata
+
+    def boom(metadata, target):
+        raise RuntimeError("Internet Archive returned 503")
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", boom)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert _pushed_rows(client) == []
+
+
+def test_sync_stamps_a_row_internet_archive_reports_unchanged(tmp_path, monkeypatch):
+    """"no changes to _meta.xml" means the item already matches the Sheet -
+    a successful reconciliation, not a failure. Leaving it unstamped would
+    make exactly the rows this feature exists to quiet re-push every hour,
+    forever."""
+    from ia_bulk import MetadataUnchanged, cmd_sync_metadata
+
+    def unchanged(metadata, target):
+        raise MetadataUnchanged(target)
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", unchanged)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(_pushed_rows(client)) == 1
+
+
+def test_sync_stamps_each_chunk_as_it_goes(tmp_path, monkeypatch):
+    """Interruption tolerance, pinned. The Mac this runs on sleeps and shuts
+    down unpredictably, including mid-run. A run that dies during chunk 2
+    must leave chunk 1 stamped, so the rerun pushes only the remainder."""
+    from ia_bulk import cmd_sync_metadata
+
+    rows = [
+        [f"Photo {n}", f"photo{n}.jpg", f"lcps-astoriaphotos-{n:05d}",
+         "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-{n:05d}",
+         f"photo{n}.jpg", "", ""]
+        for n in range(1, 5)
+    ]
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(rows), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+
+    def die_on_the_third(metadata, target):
+        if target.endswith("00003"):
+            raise KeyboardInterrupt
+    monkeypatch.setattr("ia_bulk.update_metadata_row", die_on_the_third)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, chunk_size=2))
+
+    # Chunk 1 (rows 2-3) was stamped before chunk 2 was attempted.
+    assert [row for row, _ in _pushed_rows(client)] == [2, 3]
 
 
 def test_sync_from_sheet_refuses_a_sheet_without_the_sync_state_columns(

@@ -48,6 +48,7 @@ from sync_state import (
     MissingSyncColumns,
     SyncColumns,
     locate_sync_columns,
+    stamp_updates,
     sync_hash,
 )
 
@@ -4296,39 +4297,96 @@ def split_unchanged(targets: list[SyncTarget]) -> tuple[list[SyncTarget], list[S
     return to_push, already_synced
 
 
-def run_sheet_sync(targets: list[SyncTarget], log_path: Path, live: bool) -> PushOutcome:
-    """Its own loop rather than run_rows(): that helper keys everything off
-    `row["identifier"]`, and on the Sheet path that column holds the DONOR's
-    archival reference, not this tool's identifier. Reusing it would have
-    meant writing the tool's identifier into a column that means something
-    else.
+@dataclass(frozen=True)
+class SheetSyncRun:
+    """The push -> stamp loop, chunked. Mirrors SheetUploadRun, which does
+    the same job for reserve -> upload -> confirm.
 
-    Collects each failure as it counts it, rather than counting now and
-    recovering the errors from the log afterwards. The caller needs both, and
-    a log line that failed to write would otherwise quietly shorten the
-    summary's failure list while leaving its count intact."""
-    succeeded = 0
-    unchanged = 0
-    failures: list[RowFailure] = []
-    total = len(targets)
-    for position, target in enumerate(targets, start=1):
-        print(f"[{position}/{total}] updating metadata for {target.uploaded_as}")
+    Chunking is not an optimisation here, it is the interruption-tolerance
+    design. The Mac this runs on sleeps and shuts down unpredictably,
+    including mid-run, so no run is guaranteed to finish. One batchUpdate at
+    the END of a run would stamp nothing when the run is killed and the next
+    run would re-push everything; one write per row would blow through the
+    Sheets API's 60 writes/minute/user. One batch per chunk is a single API
+    request per chunk - about 8 for a 4,000-row re-sync - and a kill costs at
+    most one chunk's stamps, whose rows simply push again next time."""
+
+    client: SheetClient
+    columns: SyncColumns
+    file_template: str
+    log_path: Path
+    live: bool
+    chunk_size: int = CHUNK_SIZE
+
+    def execute(self, targets: list[SyncTarget]) -> PushOutcome:
+        succeeded = 0
+        unchanged = 0
+        failures: list[RowFailure] = []
+        total = len(targets)
+        position = 0
+
+        for chunk in chunk_rows(targets, self.chunk_size):
+            stamped: list[tuple[int, str]] = []
+
+            for target in chunk:
+                position += 1
+                print(f"[{position}/{total}] updating metadata for {target.uploaded_as}")
+                try:
+                    update_metadata_row(target.metadata, target.uploaded_as)
+                except MetadataUnchanged:
+                    # Internet Archive saying "no changes to _meta.xml" means
+                    # the item already matches the Sheet. That is a successful
+                    # reconciliation and it stamps - leaving it unstamped
+                    # would make exactly the rows this gating exists to quiet
+                    # re-push on every run, forever.
+                    unchanged += 1
+                    stamped.append((target.row_number, target.content_hash))
+                    self._log(target, "unchanged")
+                except Exception as exc:
+                    # No stamp. A failed row retries next run, which is the
+                    # whole recovery story for a transient Internet Archive
+                    # error.
+                    failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
+                    print(f"    - {format_row_error(exc)}")
+                    self._log(target, "failure", error=str(exc))
+                else:
+                    succeeded += 1
+                    stamped.append((target.row_number, target.content_hash))
+                    self._log(target, "success")
+
+            self._stamp(stamped)
+
+        return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
+
+    def _stamp(self, stamped: list[tuple[int, str]]) -> None:
+        """Records what this chunk pushed, in one batch.
+
+        A stamp write that fails is reported and the run continues. Nothing
+        is lost by it: an unstamped row re-pushes next run, Internet Archive
+        reports it unchanged, and it stamps then. Stopping the run instead
+        would trade a harmless repeat for leaving the remaining chunks
+        unpushed, which is the worse outcome."""
+        updates = stamp_updates(stamped, self.columns, utc_timestamp())
         try:
-            update_metadata_row(target.metadata, target.uploaded_as)
-        except MetadataUnchanged:
-            unchanged += 1
-            log_result(log_path, target.identifier, "", "unchanged", live, uploaded_as=target.uploaded_as)
+            write_cells_if_any(self.client, updates)
         except Exception as exc:
-            failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
-            print(f"    - {format_row_error(exc)}")
-            log_result(
-                log_path, target.identifier, "", "failure", live,
-                error=str(exc), uploaded_as=target.uploaded_as,
+            print(
+                f"the Sheet stamp write failed: {exc}. The metadata IS on Internet Archive; "
+                f"{_pluralize(len(stamped), 'row')} will simply be sent again next run and "
+                "reported as unchanged. Continuing.",
+                file=sys.stderr,
             )
-        else:
-            succeeded += 1
-            log_result(log_path, target.identifier, "", "success", live, uploaded_as=target.uploaded_as)
-    return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
+
+    def _log(self, target: SyncTarget, status: str, error: str | None = None) -> None:
+        log_result(
+            self.log_path,
+            target.identifier,
+            "",
+            status,
+            self.live,
+            error=error,
+            uploaded_as=target.uploaded_as,
+        )
 
 
 def check_uploaded_as(
@@ -4428,9 +4486,7 @@ def sync_from_sheet(args) -> int:
     # well as live: a rehearsal that passes where the real run refuses is a
     # false negative on the one run an operator trusts.
     try:
-        # Called for its exception, not its value - Task 10 binds the result
-        # when SheetSyncRun needs the column indexes.
-        locate_sync_columns(column_map)
+        sync_columns = locate_sync_columns(column_map)
     except MissingSyncColumns as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -4481,9 +4537,17 @@ def sync_from_sheet(args) -> int:
             file=sys.stderr,
         )
 
+    sync_run = SheetSyncRun(
+        client=sheet.client,
+        columns=sync_columns,
+        file_template=config.file_template,
+        log_path=log_path,
+        live=live,
+        chunk_size=getattr(args, "chunk_size", CHUNK_SIZE),
+    )
     summary = SyncSummary(
         checked=len(rows),
-        outcome=run_sheet_sync(targets, log_path, live),
+        outcome=sync_run.execute(targets),
         skipped=tuple(skipped_rows(problems)),
     )
     try_log_run_summary(log_path, summary, live)
@@ -5159,6 +5223,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional with --live, where identifiers are unstamped. Distinct from "
             "--resume-from, which says which rows to SKIP; this says where the rows that "
             "remain should be SENT."
+        ),
+    )
+    sync_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=CHUNK_SIZE,
+        help=(
+            f"Rows per push/stamp batch (Sheet path only; must be positive; default "
+            f"{CHUNK_SIZE}). Each batch costs one Sheets write, and a run interrupted "
+            "mid-way keeps every chunk it finished."
         ),
     )
 
