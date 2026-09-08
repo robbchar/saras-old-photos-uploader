@@ -2812,6 +2812,10 @@ class SheetSnapshot:
     Sheet currently holds ANYWHERE - see claimed_identifiers."""
 
     columns: SheetColumns
+    # Kept so sync-metadata can re-locate its own two columns in this same
+    # read rather than parsing the grid a second time. upload compares
+    # SheetColumns instead, which read_sheet_snapshot already derives.
+    column_map: ColumnMap
     grid: list[list[str]]
     fingerprints: dict[int, str]
     # Every non-blank `ia_identifier` in the Sheet right now, whatever row it
@@ -2827,6 +2831,7 @@ def read_sheet_snapshot(client: SheetClient, file_template: str) -> SheetSnapsho
     column_map, rows = grid_to_rows(grid)
     return SheetSnapshot(
         columns=locate_write_back_columns(column_map),
+        column_map=column_map,
         grid=grid,
         fingerprints=sheet_row_fingerprints(rows, file_template),
         claimed_identifiers=frozenset(

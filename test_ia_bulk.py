@@ -4684,6 +4684,7 @@ def _snapshot(claimed):
 
     return SheetSnapshot(
         columns=SheetColumns(ia_identifier=2, ia_uploaded=3, ia_url=4, ia_identifier_bib=5),
+        column_map=build_column_map(SHEET_HEADER),
         grid=[],
         fingerprints={},
         claimed_identifiers=frozenset(claimed),
@@ -5211,6 +5212,7 @@ def _guard_snapshot(fingerprints, grid):
 
     return SheetSnapshot(
         columns=SheetColumns(ia_identifier=2, ia_uploaded=3, ia_url=4, ia_identifier_bib=5),
+        column_map=build_column_map(SHEET_HEADER),
         grid=grid,
         fingerprints=fingerprints,
         claimed_identifiers=frozenset(),
@@ -8114,6 +8116,19 @@ def _synced_grid(rows=None):
         "", "",
     ]]
     return [SYNC_SHEET_HEADER] + (default if rows is None else rows)
+
+
+def test_read_sheet_snapshot_exposes_the_column_map():
+    """SheetSyncRun re-locates its two sync-state columns in the fresh read
+    to detect that they moved, the same way upload compares SheetColumns.
+    The snapshot already builds a ColumnMap; keeping it costs nothing and
+    saves a second parse of the same grid."""
+    from ia_bulk import read_sheet_snapshot
+
+    client = FakeSheetClient(_synced_grid())
+    snapshot = read_sheet_snapshot(client, "{file}")
+
+    assert snapshot.column_map.field_names["ia_sync_hash"] == "ia_sync_hash"
 
 
 def test_plan_sync_targets_hashes_what_the_row_would_send(tmp_path):
