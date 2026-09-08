@@ -4066,6 +4066,12 @@ class SyncSummary:
     checked: int
     outcome: PushOutcome
     skipped: tuple[RowFailure, ...] = ()
+    # Rows this run read, found already in sync, and did not send. Its own
+    # count rather than folded into `checked`: on the steady state it is
+    # nearly the whole Sheet, and an operator watching an hourly job needs
+    # "4,212 already in sync, 1 updated" to read as a working run rather than
+    # as a run that did almost nothing.
+    already_synced: int = 0
 
     @property
     def pushed(self) -> int:
@@ -4094,6 +4100,7 @@ class SyncSummary:
             "pushed": self.pushed,
             "changed": self.changed,
             "unchanged": self.unchanged,
+            "already_synced": self.already_synced,
             "failures": [failure.as_record() for failure in self.outcome.failures],
             "skipped": [skip.as_record() for skip in self.skipped],
         }
@@ -4110,6 +4117,11 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
         f"{summary.changed} item(s) updated successfully, {summary.unchanged} unchanged, "
         f"{summary.failed} error(s)"
     ]
+    if summary.already_synced:
+        lines.append(
+            f"{_pluralize(summary.already_synced, 'row')} already in sync (unchanged since "
+            "its last push, so nothing was sent)"
+        )
     if summary.skipped:
         lines.append(
             f"{_pluralize(len(summary.skipped), 'row')} skipped (not safely targetable)"
@@ -4587,12 +4599,24 @@ def sync_from_sheet(args) -> int:
     print(format_field_receipt(column_map))
     print()
 
+    to_push, already_synced = split_unchanged(targets)
+
     if not targets:
         print("nothing to sync - no row is marked uploaded yet")
         return 1 if problems else 0
 
+    if not to_push:
+        # The steady state on an hourly schedule, and it must be one quiet
+        # line: a run that says nothing useful is a run whose output stops
+        # being read.
+        print(
+            f"nothing to sync - all {_pluralize(len(already_synced), 'uploaded row')} "
+            "already match their last push"
+        )
+        return 1 if problems else 0
+
     if dry_run:
-        return print_sync_dry_run(targets, problems)
+        return print_sync_dry_run(to_push, problems)
 
     log_path = open_log(args.log_dir, "sync-metadata")
     try:
@@ -4614,8 +4638,9 @@ def sync_from_sheet(args) -> int:
     )
     summary = SyncSummary(
         checked=len(rows),
-        outcome=sync_run.execute(targets),
+        outcome=sync_run.execute(to_push),
         skipped=tuple(skipped_rows(problems)),
+        already_synced=len(already_synced),
     )
     try_log_run_summary(log_path, summary, live)
 

@@ -8317,6 +8317,140 @@ def _pushed_rows(client):
     ]
 
 
+def _run_sync_twice(tmp_path, monkeypatch, grid, edit=None):
+    """A run, then a second run over the Sheet the first one left behind -
+    the only way to test change detection, since the state IS the Sheet.
+    `edit` mutates the grid between the two runs."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(grid, SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+
+    first, second = [], []
+
+    def record_into(destination):
+        # Bound as a default argument, not captured by closure: two stubs
+        # closing over one rebound name is the kind of thing that reads as
+        # correct and silently records both runs into the same list.
+        return lambda metadata, target, out=destination: out.append(target)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", record_into(first))
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    if edit is not None:
+        edit(client.grid)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", record_into(second))
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    return first, second, exit_code
+
+
+def test_sync_over_an_unedited_sheet_pushes_nothing_and_says_so(
+    tmp_path, monkeypatch, capsys
+):
+    """Acceptance criterion 1. The whole point: on an hourly schedule the
+    steady state must be silent."""
+    first, second, exit_code = _run_sync_twice(tmp_path, monkeypatch, _synced_grid())
+    out = capsys.readouterr().out
+
+    assert len(first) == 1
+    assert second == []
+    assert "already match their last push" in out
+    assert exit_code == 0
+
+
+def test_sync_pushes_exactly_the_row_whose_cell_was_edited(tmp_path, monkeypatch):
+    """Acceptance criterion 2."""
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def retitle_the_second_row(grid):
+        grid[2][0] = "Photo 2, corrected"
+
+    first, second, _ = _run_sync_twice(
+        tmp_path, monkeypatch, _synced_grid(rows), edit=retitle_the_second_row
+    )
+
+    assert len(first) == 2
+    assert second == [f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"]
+
+
+def test_clearing_one_hash_cell_re_syncs_only_that_row(tmp_path, monkeypatch):
+    """Acceptance criterion 3, first half. The operational lever, and the
+    single carve-out to the "never edit an ia_ column" rule: clear the cell,
+    never type into it."""
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def clear_the_second_rows_hash(grid):
+        grid[2][6] = ""
+
+    first, second, _ = _run_sync_twice(
+        tmp_path, monkeypatch, _synced_grid(rows), edit=clear_the_second_rows_hash
+    )
+
+    assert len(first) == 2
+    assert second == [f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"]
+
+
+def test_clearing_the_whole_hash_column_re_syncs_everything(tmp_path, monkeypatch):
+    """Acceptance criterion 3, second half."""
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def clear_the_column(grid):
+        for row in grid[1:]:
+            row[6] = ""
+
+    first, second, _ = _run_sync_twice(
+        tmp_path, monkeypatch, _synced_grid(rows), edit=clear_the_column
+    )
+
+    assert len(first) == 2
+    assert len(second) == 2
+
+
+def test_sync_summary_counts_the_rows_it_held_back(tmp_path, monkeypatch, capsys):
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def retitle_the_second_row(grid):
+        grid[2][0] = "Photo 2, corrected"
+
+    _run_sync_twice(tmp_path, monkeypatch, _synced_grid(rows), edit=retitle_the_second_row)
+    out = capsys.readouterr().out
+
+    assert "1 row already in sync" in out
+
+
 def test_sync_stamps_a_row_that_pushed_successfully(tmp_path, monkeypatch):
     from ia_bulk import cmd_sync_metadata
 
