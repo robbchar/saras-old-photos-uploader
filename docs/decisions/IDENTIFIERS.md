@@ -147,6 +147,17 @@ have
 caught it: the collision is between the tool's vocabulary and one particular
 spreadsheet's, and nothing in the repo knew what that spreadsheet contained.
 
+The prefix is a naming **convention**, not the enforcement. `RESERVED_FIELDS`
+in `column_map.py` is what actually keeps a column out of the metadata push,
+and adding an `ia_` column without adding it there uploads it. Issue #24 was
+written believing the prefix did the excluding; as specified, its two new
+columns would have shipped to Internet Archive as item metadata on every push,
+and `ia_sync_hash` would have been an input to its own hash. The set is
+explicit rather than a `startswith("ia_")` rule on purpose: a prefix rule would
+silently stop uploading any Sheet-author column that normalizes into the
+namespace — an "IA Notes" header becomes `ia_notes` and disappears — and a
+silently withheld metadata field is a worse failure than the one it prevents.
+
 ## The four `ia_` columns are required in every mode, including the safe one
 
 *Decided 2026-08-16, when `upload` first wrote to a Sheet.*
@@ -162,6 +173,15 @@ So the check does not vary with the mode, and it runs before anything is
 uploaded rather than after — a run that uploaded first and only then noticed
 it had nowhere to record the identifier would produce exactly the stranded
 item the reserve-first ordering exists to prevent.
+
+This reasoning still holds for these four, and for `upload`. It is not the
+whole story any more: `sync-metadata` owns two more `ia_` columns,
+`ia_sync_hash` and `ia_last_synced`, required by that command alone, in test
+mode as well as live, for the identical reason — see
+[`SHEET-PROTOCOL.md`, "A row pushes only when its content
+changed"](SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
+`upload` and `validate` neither read nor write them, so none of the reasoning
+above about `upload`'s four is affected.
 
 ## `identifier-bib` is written back to the Sheet, not just generated
 

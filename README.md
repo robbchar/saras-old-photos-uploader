@@ -341,10 +341,25 @@ columns, `(LCPS Internal)` columns, and the generated `mediatype`/
 `collection` are all excluded — Internet Archive will not change an item's
 mediatype after upload anyway.
 
-Every uploaded row is sent every run. Internet Archive answers *no changes to
-`_meta.xml`* for an item that already matches, which is counted as
-`unchanged` rather than an error, so a full sync is idempotent and needs no
-change tracking.
+**Only a row whose content actually changed is sent.** The Sheet must already
+carry two more tool-owned columns beyond `upload`'s four —
+`ia_sync_hash` and `ia_last_synced` — and `sync-metadata` refuses to run
+without them, in test mode as well as live. Each successfully-pushed row is
+stamped with a hash of what it sent; the next run skips a row whose hash
+still matches, and a run with nothing to push prints `nothing to sync - all N
+uploaded rows already match their last push` rather than resending everything
+— that message is the healthy steady state, not a failure. If a row's edit
+isn't showing up, or everything needs to go out again, see
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md#only-a-changed-row-is-actually-sent--and-what-to-do-if-yours-isnt)
+for the two recovery levers (clear one row's `ia_sync_hash`, or clear the
+whole column) — never type a value into that column by hand. See
+[`docs/decisions/SHEET-PROTOCOL.md`](docs/decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed)
+for why.
+
+Pushing and stamping happen in batches of 500 rows at a time (Internet
+Archive's own per-run item cap), overridable with `--chunk-size`, the same
+flag `upload` has — a run interrupted mid-way keeps every chunk it finished
+stamping.
 
 A blank cell means **leave this field alone**, not "delete it" — so an
 accidental cell clear can never strip metadata from a permanent public item.

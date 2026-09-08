@@ -44,21 +44,28 @@ case-insensitively, is recorded in `ColumnMap.held_back` and excluded by
 `uploadable_fields()` — it is normalized and reported on (so its transform is
 still visible), but never uploaded.
 
-**Tool-owned columns.** `upload` writes exactly four columns, all `ia_`-prefixed
-so they cannot collide with whatever a Sheet author already has:
-`ia_identifier`, `ia_uploaded`, `ia_url`, `ia_identifier_bib`. `uploadable_fields()`
-also excludes these (`RESERVED_FIELDS`) alongside `file`, so the tool's own
-bookkeeping never ships as IA metadata. The Sheet's own `identifier` column, if
-it has one, is ordinary donor metadata (the archival reference the donor
-supplied), never the minted IA identifier — see
-[`DECISIONS.md`](decisions/IDENTIFIERS.md#tool-owned-sheet-columns-are-all-ia_-prefixed). All four
-`ia_` columns must already exist as Sheet headers before `upload` will run, in
-every mode including the default rehearsal — see
+**Tool-owned columns.** `RESERVED_FIELDS` (`column_map.py`) is six `ia_`-prefixed
+columns plus `file`, all excluded by `uploadable_fields()` so the tool's own
+bookkeeping never ships as IA metadata. `upload` writes four of them:
+`ia_identifier`, `ia_uploaded`, `ia_url`, `ia_identifier_bib`. `sync-metadata`
+owns the other two, `ia_sync_hash` and `ia_last_synced`, which record what a
+row last successfully pushed so an unchanged row is not resent — see
+[`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
+The `ia_` prefix is a naming convention only; `RESERVED_FIELDS` being an
+explicit set rather than a `startswith("ia_")` rule is what actually does the
+excluding, and is itself the enforcement — see
+[`DECISIONS.md`](decisions/IDENTIFIERS.md#tool-owned-sheet-columns-are-all-ia_-prefixed).
+The Sheet's own `identifier` column, if it has one, is ordinary donor metadata
+(the archival reference the donor supplied), never the minted IA identifier.
+`upload`'s four `ia_` columns must already exist as Sheet headers before
+`upload` will run, in every mode including the default rehearsal — see
 [`DECISIONS.md`](decisions/IDENTIFIERS.md#the-four-ia_-columns-are-required-in-every-mode-including-the-safe-one).
+`sync-metadata`'s two are required the same way, by that command alone — see
+[`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 
 `format_field_receipt()` prints, before anything permanent happens, exactly
 which normalized fields will upload and which are held back. `file` and the
-four `ia_` columns never reach this list at all — `uploadable_fields()`
+six `ia_` columns never reach this list at all — `uploadable_fields()`
 already excludes them via `RESERVED_FIELDS` (see "Tool-owned columns" above).
 The receipt separates two different reasons a column does not ship. "NOT
 uploaded — Internet Archive reserves these names" is `identifier` alone
@@ -316,14 +323,29 @@ different stamps is handled without the command knowing that happened.
 The fields sent come from `sheet_metadata_fields()`, shared with `upload`, so
 a column that uploads but does not sync cannot exist. Blank cells are dropped
 by `update_metadata_row()` — blank means "leave this field alone", and
-`REMOVE_TAG` deletes. Every DONE row is sent every run; IA's *no changes to
-`_meta.xml`* response becomes `MetadataUnchanged` and is counted as
-`unchanged`, which is what makes that idempotent.
+`REMOVE_TAG` deletes.
+
+A DONE row is sent only when its content changed since its last successful
+push. `plan_sync_targets()` hashes each row's `metadata_to_send()` output
+(`sync_hash()`) and compares it against `ia_sync_hash`; `split_unchanged()`
+sorts the result into `to_push`/`already_synced`. Only `to_push` is sent —
+this reverses the original "every DONE row is sent every run", which was
+correct for a hand-run command over a few hundred rows and stopped holding at
+~4,000 rows on an hourly schedule (issue #24). See
+[`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
+IA's *no changes to `_meta.xml`* response still becomes `MetadataUnchanged`
+and is counted as `unchanged` rather than a failure, and — unlike a genuine
+failure — it stamps `ia_sync_hash`/`ia_last_synced` just like a real change
+would, since the item now provably matches the Sheet. `sync-metadata` refuses
+to run at all without both columns present as Sheet headers, in every mode —
+see "Tool-owned columns" above.
 
 The `--csv` path is the offline fallback and is the only one that needs
 `--from-log`: a CSV carries real identifiers, so in test mode the stamped
-target has to come from the upload log's `uploaded_as` field. See
-[`DECISIONS.md`](DECISIONS.md), "The Sheet is the correction".
+target has to come from the upload log's `uploaded_as` field. It has no
+per-row hash gate — every row the CSV names is sent every run, since a
+hand-prepared correction file is already the small, deliberate set of rows to
+touch. See [`DECISIONS.md`](DECISIONS.md), "The Sheet is the correction".
 
 ## Reconciling filenames
 
@@ -474,21 +496,28 @@ moved on.
 ### The `run_summary` record
 Every real `sync-metadata` run — Sheet path and `--csv` alike — ends with
 one more record as the log's **last** line: `{record: "run_summary",
-timestamp, live, checked, pushed, changed, unchanged, failures, skipped}`.
-It exists so a scheduled, unattended run produces something a program can
-read without parsing console output or replaying every row line above it,
-and so #26 has something to mirror into the Sheet.
+timestamp, live, checked, pushed, changed, unchanged, already_synced,
+failures, skipped}`. It exists so a scheduled, unattended run produces
+something a program can read without parsing console output or replaying
+every row line above it, and so #26 has something to mirror into the Sheet.
 
 The counts mean:
 
 | field | meaning |
 | --- | --- |
-| `checked` | rows the run evaluated — every row it read. `checked − pushed − len(skipped)` is the rows not marked uploaded. |
+| `checked` | rows the run evaluated — every row it read. `checked − pushed − len(skipped) − already_synced` is the rows not marked uploaded. |
 | `pushed` | rows actually sent to Internet Archive. Always `changed + unchanged + len(failures)`. |
 | `changed` | sends IA accepted as a change. |
 | `unchanged` | IA's *no changes to `_meta.xml`* — the idempotence signal a full re-sync is run to see, kept as its own count rather than folded into `changed`. |
+| `already_synced` | rows the hash gate found already matching their last push and never sent at all — Sheet path only, always `0` on `--csv`, which has no hash gate. On the steady state this is nearly the whole Sheet; see `DECISIONS.md`, "A row pushes only when its content changed". |
 | `failures` | `{identifier, error}` per row IA refused. |
 | `skipped` | `{identifier, error}` per row the run declined to send at all. |
+
+`already_synced` is its own count rather than folded into `checked` or
+`skipped`: unlike `skipped`, nothing was wrong with these rows — the hash
+gate is why `sync-metadata` can run hourly at all, and collapsing "quietly
+correct" into either of the other two would make a healthy run's summary
+look identical to an unhealthy one.
 
 `failures` and `skipped` are separate lists on purpose: a failure means the
 item was contacted and the edit refused; a skip means nothing was sent.

@@ -420,9 +420,62 @@ python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run
 python ia_bulk.py sync-metadata --project sarasoldphotos --live
 ```
 
-Every row marked uploaded is sent to the item its own `ia_url` cell names, so
-nothing needs a log and rows uploaded by different runs are each targeted
-correctly. See [`DECISIONS.md`](DECISIONS.md), "The Sheet is the correction".
+Every row marked uploaded is checked against the item its own `ia_url` cell
+names, so nothing needs a log and rows uploaded by different runs are each
+targeted correctly. See [`DECISIONS.md`](DECISIONS.md), "The Sheet is the
+correction".
+
+### Only a changed row is actually sent — and what to do if yours isn't
+
+This part runs on a schedule now, once an hour, on its own. Most hours it has
+nothing to do, and it says so:
+
+```
+nothing to sync - all 3,842 uploaded rows already match their last push
+```
+
+**That message is good news, not a problem.** It means every photo already
+uploaded still shows the description, title and other details currently in
+the Sheet. The tool only sends a row to the website when that row's details
+have actually changed since the last time it was sent — sending everything,
+every hour, whether it changed or not, would be pointless and would bury the
+one real edit anybody cares about under thousands of "nothing changed" lines.
+
+To know whether a row changed, the tool keeps two columns of its own on the
+far right of the Sheet: **`ia_sync_hash`** and **`ia_last_synced`**. Like the
+other columns the tool owns, they are hidden — you don't need to look at
+them, and you can leave them hidden. `ia_last_synced` just records when a row
+last went out, for a human to glance at. `ia_sync_hash` is what the tool
+actually checks; it isn't meant to be read, only cleared.
+
+**The rule about the tool's own columns hasn't changed, except for one
+carve-out:**
+
+> Never edit a column whose name starts with `ia_` — **unless** a row isn't
+> syncing when it should, and then the *only* thing you may do is **clear**
+> the `ia_sync_hash` cell. Never type anything into it.
+
+Clearing that cell is always safe — worst case, the row gets sent again for
+no reason, and the website just confirms nothing changed. Typing a value in
+is the one thing that can actually cause a problem: it would have to be the
+exact code the tool would have generated for that row, and there is no way to
+guess it, so don't try.
+
+Two situations, and what to do about each:
+
+- **One row's edit isn't showing up on the site.** Find that row, clear the
+  `ia_sync_hash` cell on it, and leave it blank. The next hourly run will see
+  the row has no hash on record and send it. You don't need to run anything
+  yourself — just wait for the next run, or ask whoever runs it by hand to
+  kick one off.
+- **Everything needs to go out again** (for example, a formatting change was
+  applied to the whole Sheet). Clear the entire `ia_sync_hash` column — every
+  cell in it, for every row. The next run will treat every uploaded row as
+  changed and resend all of them.
+
+Both of those are safe to do over the phone: "clear that one cell" or "clear
+the whole column" is the entire instruction, and there's nothing to undo
+afterward if it turns out not to have been needed.
 
 **On the `--csv` path**, point `--from-log` at the log of the upload run whose
 items you are correcting:
@@ -447,12 +500,15 @@ so you do not have to read the row-by-row lines above it:
 tail -1 logs/sync-metadata-20260906T173949Z.jsonl
 ```
 
-It gives `checked` / `pushed` / `changed` / `unchanged`, plus a `failures`
-list naming each item Internet Archive refused and why, and a separate
-`skipped` list naming the rows the run declined to send at all. Those two
-lists answer different questions: a failure means the item was contacted,
-a skip means it was never touched. The same numbers are what the run
-printed on screen — they come from one place and cannot disagree. See
+It gives `checked` / `pushed` / `changed` / `unchanged` / `already_synced`,
+plus a `failures` list naming each item Internet Archive refused and why, and
+a separate `skipped` list naming the rows the run declined to send at all.
+`already_synced` is the hash gate at work — rows read, found to match their
+last push, and never sent — and on a healthy hourly run it is nearly the
+whole Sheet. `failures` and `skipped` answer different questions: a failure
+means the item was contacted, a skip means it was never touched. The same
+numbers are what the run printed on screen — they come from one place and
+cannot disagree. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
 
 To read the newest one without looking up its timestamp:
@@ -479,24 +535,28 @@ no row is marked uploaded yet` and returns **before** it opens a log — so
 there is no summary to read. `sync-metadata` corrects items that already
 exist; it needs rows that *are* marked uploaded.
 
-Run it against the test Sheet as it stands. Rows already carry `zztest-`
-URLs from earlier rehearsals, and the command targets whatever `ia_url`
-names, so rows uploaded under different stamps are each handled
-correctly:
+First, clear `ia_sync_hash` on the rows you want in the demo — otherwise the
+hash gate correctly recognizes them as already synced, sends nothing, and the
+run returns before it opens a log, the same as "no row is marked uploaded
+yet" above. Then run it against the test Sheet as it stands. Rows already
+carry `zztest-` URLs from earlier rehearsals, and the command targets
+whatever `ia_url` names, so rows uploaded under different stamps are each
+handled correctly:
 
 ```bash
 python ia_bulk.py sync-metadata --project sarasoldphotos
 ```
 
-That alone gives a summary where `pushed` equals `unchanged` — Internet
-Archive answers *no changes to `_meta.xml`* for every row that already
-matches. To get more than one outcome into a single record, stage the
-Sheet first:
+With the hashes cleared, that gives a summary where `pushed` equals
+`unchanged` — Internet Archive answers *no changes to `_meta.xml`* for every
+row that already matches, and the run stamps every one of them so a repeat
+of the same command shows nothing to do. To get more than one outcome into a
+single record, stage the Sheet first:
 
 | to see | do this first |
 | --- | --- |
-| `changed` | edit a Title or description cell on one `DONE` row |
-| `skipped` | clear **only** `ia_url` on one `DONE` row, leaving `ia_identifier` and `ia_uploaded` set |
+| `changed` | edit a Title or description cell on one `DONE` row (this alone changes its hash, so clearing is not needed for this row) |
+| `skipped` | clear **only** `ia_url` on one `DONE` row, leaving `ia_identifier` and `ia_uploaded` set — the row never reaches the hash gate, so `ia_sync_hash` doesn't matter here |
 
 The `skipped` setup is the "marked uploaded but its `ia_url` cell is
 blank" case, and it is cheap to undo: restore the URL from that row's

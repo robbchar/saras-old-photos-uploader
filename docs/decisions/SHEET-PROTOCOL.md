@@ -90,12 +90,9 @@ Four choices:
 - **Scope is `RowState.DONE` and nothing else.** An UNASSIGNED row has no item
   to correct; a RESERVED row's upload never confirmed, and `upload` already
   retries those.
-- **Every DONE row is sent, every run.** Internet Archive answers *no changes
-  to `_meta.xml`* for an item that already matches, which becomes
-  `MetadataUnchanged` and is counted as `unchanged`. That makes a full sync
-  idempotent by construction, so there is no need for per-row change
-  detection, a fifth `ia_` column, or a second place for the Sheet and the
-  item to drift apart.
+- **Every DONE row is sent, every run.** *Reversed below, "A row pushes only
+  when its content changed" — this held for a hand-run command over a few
+  hundred rows and stopped holding at ~4,000 rows on an hourly schedule.*
 - **A blank cell means "leave this field alone", as on the `--csv` path.**
   Treating the Sheet as literally canonical — blank means delete — is more
   faithful in principle, but an accidental clear, a bad paste, or a row shift
@@ -110,6 +107,69 @@ Four choices:
 
 `sheet_metadata_fields()` is shared with `upload`, so a column that uploads
 but does not sync — or the reverse — cannot exist.
+
+## A row pushes only when its content changed
+
+*Decided 2026-09-07, reversing "Every DONE row is sent, every run" above —
+issue #24.*
+
+That decision was right for what it was written against: a command a person
+ran by hand, over a few hundred rows, whose idempotence Internet Archive
+guarantees by answering *no changes to `_meta.xml`* for an item that already
+matches. It bought real simplicity — no per-row state, no extra `ia_` column,
+no second place for the Sheet and the item to drift apart.
+
+It does not survive either of the two things that changed. At ~4,000 items on
+the hourly schedule of issue #27 it is ~4,000 pointless writes an hour. And it
+makes the run log useless, which is the worse half: a real edit is
+indistinguishable from the background noise, so the log cannot answer the one
+question anybody asks it.
+
+So each row now carries a hash of what it last successfully pushed, in a
+hidden `ia_sync_hash` column, with `ia_last_synced` beside it for a human to
+read. A row is sent only when its current content hashes differently.
+
+The state lives in the Sheet, not a local file: it survives the machine being
+wiped or replaced, and it gives a non-technical operator a recovery lever that
+works over the phone.
+
+Four choices went into the shape:
+
+- **The hash is over exactly what would be sent.** `metadata_to_send()` is one
+  definition shared by the sender and the hasher, so they cannot disagree
+  about what a row means. A hash over anything else either re-pushes a row
+  forever or silently swallows an edit. Being derived from
+  `sheet_metadata_fields()`, it excludes the six `ia_` columns and the
+  `(LCPS Internal)` ones automatically.
+- **The hash is captured at read time and stamped unchanged.** Identity is
+  checked late — the moved-row guard runs against a fresh read before the
+  stamp write — but content is captured early. Re-reading the row at write
+  time would stamp an edit made mid-run as already-synced, and that edit would
+  be lost permanently with nothing to notice it.
+- **Only a successful push stamps, and Internet Archive's `unchanged` counts
+  as one.** A failure leaves the cell untouched so the row retries. But
+  "no changes to `_meta.xml`" means the item already matches the Sheet — a
+  successful reconciliation. Treating it as a non-success would leave exactly
+  the rows this gating exists to quiet re-pushing every hour, forever.
+- **One stamp batch per chunk, not per run and not per row.** The Mac this
+  runs on sleeps and shuts down unpredictably, including mid-run. A single
+  end-of-run batch stamps nothing when the run is killed; a per-row write
+  exceeds the Sheets API's 60 writes/minute/user. Per chunk is one request per
+  chunk and costs a kill at most one chunk's stamps.
+
+Failure modes are deliberately safe. Deleting the column, clearing cells, or
+pasting over them causes at worst a spurious re-sync, which Internet Archive
+reports as unchanged. The only way to cause a *missed* sync is to type the
+exact current hash of a row you just edited — which is why the operator rule
+is to **clear** `ia_sync_hash`, never to type into it.
+
+Two levers follow, both phone-instruction sized: clear one row's
+`ia_sync_hash` to re-sync that row; clear the column to re-sync everything.
+
+`sync-metadata` refuses to run without both columns, in test mode as well as
+live. The alternative — falling back to pushing everything — makes the failure
+this feature exists to remove into its own silent fallback state, and under an
+unattended schedule nothing would ever fail to say so.
 
 ## `sync-metadata --csv` reads its targets from the upload log
 
