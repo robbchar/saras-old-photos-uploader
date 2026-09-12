@@ -3506,12 +3506,16 @@ def print_sync_dry_run(
     record having sent; stamping would make the next real run skip rows this
     one only previewed."""
     total = len(to_push) + len(already_synced)
+    # A blank hash means never stamped or deliberately cleared, not edited.
+    never_stamped = sum(1 for target in to_push if not target.stored_hash)
+    edited = len(to_push) - never_stamped
     # {:,} on the raw counts, not just on the _pluralize call - see that
     # function's docstring: adjacent numbers on one line must agree about how
     # a number looks.
     print(
-        f"{_pluralize(total, 'uploaded row')}; {len(to_push):,} changed since their last "
-        f"push, {len(already_synced):,} already in sync and would not be sent"
+        f"{_pluralize(total, 'uploaded row')}; {never_stamped:,} with no push on record, "
+        f"{edited:,} changed since their last push, {len(already_synced):,} already in sync "
+        "and would not be sent"
     )
     if not to_push:
         return 1 if problems else 0

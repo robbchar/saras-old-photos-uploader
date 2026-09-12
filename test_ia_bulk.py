@@ -9242,6 +9242,38 @@ def test_sync_dry_run_does_not_stamp_anything(tmp_path, monkeypatch):
     assert _pushed_rows(client) == []
 
 
+def test_sync_dry_run_reports_a_never_stamped_row_as_having_no_push_on_record(
+    monkeypatch, capsys
+):
+    """A blank hash means never stamped, not edited."""
+    from ia_bulk import print_sync_dry_run
+
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+
+    print_sync_dry_run([_sync_target(content_hash="new", stored_hash="")], [], [])
+    gate_line = capsys.readouterr().out.splitlines()[0]
+
+    assert gate_line == (
+        "1 uploaded row; 1 with no push on record, 0 changed since their last push, "
+        "0 already in sync and would not be sent"
+    )
+
+
+def test_sync_dry_run_reports_a_row_with_a_stale_hash_as_changed(monkeypatch, capsys):
+    """A non-blank hash that no longer matches is a real edit."""
+    from ia_bulk import print_sync_dry_run
+
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+
+    print_sync_dry_run([_sync_target(content_hash="new", stored_hash="old")], [], [])
+    gate_line = capsys.readouterr().out.splitlines()[0]
+
+    assert gate_line == (
+        "1 uploaded row; 0 with no push on record, 1 changed since their last push, "
+        "0 already in sync and would not be sent"
+    )
+
+
 def test_metadata_changes_treats_a_blank_cell_as_leave_alone():
     """update_metadata_row drops blanks, so a dry run that called one a change
     would predict something the real run does not do."""
