@@ -4365,7 +4365,8 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     assert len(log_files) == 1
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 2
+    # Header, the one row, then the closing run summary.
+    assert len(lines) == 3
 
     header = json.loads(lines[0])
     assert header["record"] == "run_header"
@@ -4417,11 +4418,13 @@ def test_cmd_upload_survives_a_run_header_write_failure_and_still_uploads(
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
-    # The header failed to write, so the first (and only) line is the row
-    # result, not a run_header record - proving the failure was swallowed
-    # rather than silently retried or masked.
-    assert len(lines) == 1
-    assert json.loads(lines[0])["status"] == "success"
+    # The header failed to write, so no run_header record exists - proving
+    # the failure was swallowed rather than silently retried or masked. The
+    # run's own records are all still there: the row result, then the closing
+    # summary.
+    records = [json.loads(line) for line in lines]
+    assert not any(entry.get("record") == "run_header" for entry in records)
+    assert records[0]["status"] == "success"
 
 
 def test_cmd_upload_with_write_identifier_reserves_then_uploads_then_confirms(
@@ -4848,7 +4851,9 @@ def test_cmd_upload_confirm_skips_a_row_whose_identifier_changed_underneath_it(
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     logged = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-    entries = [entry for entry in logged if entry.get("record") != "run_header"]
+    # Row records only: "record" marks a run-level line (the header, the
+    # closing run summary), and a row carries no such key.
+    entries = [entry for entry in logged if "record" not in entry]
     statuses = {entry["identifier"]: entry["status"] for entry in entries}
     assert statuses["lcps-astoriaphotos-00001"] == "unconfirmed"
     assert statuses["lcps-astoriaphotos-00002"] == "success"
@@ -5473,7 +5478,9 @@ def test_cmd_upload_reports_a_sheets_read_failure_during_verify_instead_of_a_tra
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     logged = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-    entries = [entry for entry in logged if entry.get("record") != "run_header"]
+    # Row records only: "record" marks a run-level line (the header, the
+    # closing run summary), and a row carries no such key.
+    entries = [entry for entry in logged if "record" not in entry]
     assert [entry["status"] for entry in entries] == [
         "success",
         "success",
@@ -5667,7 +5674,9 @@ def test_cmd_upload_reports_a_sheets_write_failure_instead_of_a_traceback(
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     logged = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-    entries = [entry for entry in logged if entry.get("record") != "run_header"]
+    # Row records only: "record" marks a run-level line (the header, the
+    # closing run summary), and a row carries no such key.
+    entries = [entry for entry in logged if "record" not in entry]
     assert [entry["status"] for entry in entries] == ["success", "unconfirmed"]
 
 
@@ -11754,3 +11763,231 @@ def test_a_live_run_header_records_the_registrys_own_collection(tmp_path):
 
     header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
     assert header["collection"] == "lcpsociety"
+
+
+# Issue #26: the upload run's own machine-readable summary (#25 built only
+# sync-metadata's half), and the Sheet log tabs that mirror it.
+
+
+def _upload_log_entries(tmp_path):
+    log_file = next((tmp_path / "logs").glob("upload-*.jsonl"))
+    return [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+
+def test_upload_ends_with_a_machine_readable_summary(tmp_path, monkeypatch):
+    """Upload's closing counts lived only in console output, so an unattended
+    run left nothing a program could read without replaying every per-row
+    record - the gap #25 closed for sync-metadata and not for upload."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["record"] == "run_summary"
+    assert summary["succeeded"] == 2
+    assert summary["attempted"] == 2
+    assert summary["failures"] == []
+    assert summary["unconfirmed"] == []
+    assert summary["skipped"] == []
+    assert summary["not_attempted"] == 0
+    assert summary["rate_limited"] is False
+
+
+def test_the_upload_summary_names_each_failed_row_and_why(tmp_path, monkeypatch):
+    """A summary reporting "1 error(s)" and nothing else sends the reader back
+    to the per-row lines it exists to replace. The identifier recorded is the
+    row's permanent one, matching the per-row records above it."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        fail_for=(f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == [
+        {"identifier": "lcps-astoriaphotos-00002", "error": "boom"}
+    ]
+    assert summary["succeeded"] == 1
+    assert summary["attempted"] == 2
+
+
+def test_the_upload_summary_separates_uploaded_but_unrecorded_from_refused(
+    tmp_path, monkeypatch, capsys
+):
+    """The distinction the summary exists to preserve, and the one that costs
+    the most to get wrong. A refused send created nothing and left the
+    identifier free; an unconfirmed row IS on Internet Archive but unmarked in
+    the Sheet, so a later run reads it as un-uploaded and would send the same
+    photograph again under a second permanent identifier. A flat failure list
+    would flatten the two."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, raise_on_write=2
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == []
+    assert [entry["identifier"] for entry in summary["unconfirmed"]] == [
+        "lcps-astoriaphotos-00001"
+    ]
+    assert summary["succeeded"] == 1
+
+
+def test_a_row_held_back_by_validation_is_skipped_not_failed(tmp_path, monkeypatch, capsys):
+    """A skipped row was never sent, so nothing about the item changed. Folded
+    into `failures` it would read as "Internet Archive refused this", sending
+    a reader months later to look at an item that was never contacted."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    # Only photo2 exists on disk, so row 1 is READY (every required column is
+    # filled) but invalid - which is what `blocked` means. A blank required
+    # column would make it NOT_READY instead, and a not-ready row was never
+    # in this run's scope to skip.
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo2.jpg",)
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == []
+    assert len(summary["skipped"]) == 1
+    assert "photo1.jpg" in summary["skipped"][0]["error"]
+    assert summary["succeeded"] == 1
+    assert exit_code == 1
+
+
+def test_a_rate_limited_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys):
+    """An unattended run that stopped early looks, in every count except this
+    flag, like a run that simply had little to do. The reader has to be able
+    to tell "finished" from "stopped, resume tomorrow" without parsing
+    stderr."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [
+        [f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 6)
+    ]
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=tuple(f"photo{n}.jpg" for n in range(1, 6)),
+    )
+
+    def rate_limited_on_the_third(row, target_identifier, collection, files_dir):
+        recorder.events.append(("upload", target_identifier))
+        if target_identifier.endswith("00003"):
+            raise UploadFailed(
+                f"upload of '{target_identifier}' failed with status 503: SlowDown",
+                status_code=503,
+            )
+
+    monkeypatch.setattr("ia_bulk.upload_row", rate_limited_on_the_third)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["rate_limited"] is True
+    assert summary["succeeded"] == 2
+    assert summary["not_attempted"] == 2
+    assert [entry["identifier"] for entry in summary["failures"]] == [
+        "lcps-astoriaphotos-00003"
+    ]
+
+
+def test_the_upload_console_tail_and_the_summary_record_cannot_disagree(
+    tmp_path, monkeypatch, capsys
+):
+    """Both are rendered from one UploadSummary. Pinned end to end because the
+    two used to be computed separately - a counts dict for the console and
+    nothing at all for a program - which is exactly the drift #25 closed for
+    sync-metadata."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        fail_for=(f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert (
+        f"{summary['succeeded']} file(s) uploaded successfully, "
+        f"{len(summary['failures'])} error(s)" in out.splitlines()
+    )
+
+
+def test_an_upload_summary_that_cannot_be_written_does_not_fail_the_run(
+    tmp_path, monkeypatch, capsys
+):
+    """The summary is a record OF the run, not a step IN it, and it is written
+    last - by the time it fails, items already exist on Internet Archive under
+    permanent identifiers. A run reported as failed invites a rerun, which is
+    the one outcome this must never cause."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    def refuse(log_path, summary, live):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("ia_bulk.log_run_summary", refuse)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "disk full" in captured.err
+    assert "1 file(s) uploaded successfully" in captured.out
