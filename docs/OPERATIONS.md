@@ -512,6 +512,11 @@ numbers are what the run printed on screen — they come from one place and
 cannot disagree. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
 
+If the registry names a `sync_log_tab`, the same summary is in the
+spreadsheet too — see "Reading a run from the Sheet instead" below. Note that
+a run which found every row already in sync writes **no** tab row, so silence
+there means "nothing to do", not "nothing ran"; the JSONL always has the run.
+
 To read the newest one without looking up its timestamp:
 
 ```bash
@@ -716,6 +721,34 @@ grep -o '"status": "[a-z]*"' logs/upload-*.jsonl | sort | uniq -c
 # just the failures, with their errors
 grep '"status": "failure"' logs/upload-20260712T125326.jsonl
 ```
+
+Every real run also ends with a `run_summary` line — `tail -1` of its log
+gives the whole run in one record, without the row lines above it. For
+`upload` that is `attempted` / `succeeded`, a `failures` list, an
+`unconfirmed` list, `not_attempted` and `rate_limited`. Read `unconfirmed`
+first: those files **are** on Internet Archive but were never marked in the
+Sheet, so the next run would upload them again under a second identifier.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
+
+### Reading a run from the Sheet instead
+
+If the project's registry names `upload_log_tab` / `sync_log_tab`, that same
+summary is also in the spreadsheet, in an `Upload Log` and a `Sync Log` tab.
+This is the one that works from a phone, two states away, while someone reads
+you the problem over the telephone — no SSH, no screen share, no talking
+anyone through Terminal.
+
+One row per run, then one row per problem. Each row names `when`, the `run`
+(the log file to go and read for per-file detail), the `outcome`
+(`summary`, `failure`, `unconfirmed` or `skipped`), the `identifier`, and the
+`detail`. A clean run is a single row, and a sync run that found everything
+already in sync writes nothing at all — the tab stays scannable on purpose.
+
+The tabs are written to and never read from, so nothing there can affect a
+future run, and editing or deleting rows in them is safe; a deleted tab is
+recreated on the next run. If a mirror write fails you will see it on
+stderr, and the run still succeeds — the JSONL on disk remains the record of
+record.
 
 ## Development
 

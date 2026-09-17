@@ -632,6 +632,33 @@ prior run's checks) - `skip_identifiers` short-circuits the per-row
 checks but still records the identifier for duplicate detection, and row
 numbers stay aligned with the full CSV either way.
 
+## The Sheet's log tabs
+The same `run_summary` record is also mirrored into the spreadsheet, so a
+run can be diagnosed months later by anyone who can open the Sheet — the
+JSONL lives on whichever machine ran the job. `upload` writes
+`upload_log_tab`, `sync-metadata` writes `sync_log_tab`; both are optional
+registry keys, and a command whose key is absent writes no tab at all.
+
+`log_tab.py` renders a record as rows — one `summary` row, then one row per
+entry in the record's `failures`, `unconfirmed` and `skipped` lists — and
+appends them through `mirror_run()`. It is fed the record rather than the
+summary object, which keeps it free of any import from `ia_bulk` (which
+imports it) and, more usefully, makes the tab and the JSONL the same data
+rendered twice.
+
+`mirror_run_to_log_tab()` in `ia_bulk.py` is the single call site for both
+commands. It reuses the run's own `SheetClient` one tab over
+(`SheetClient.for_tab()`) rather than authenticating again, and what it
+hands the writer has no `write_cells`: the mirror cannot reach the metadata
+columns even by mistake. `mirror_run()` catches everything and reports on
+stderr — by the time it runs, items exist on Internet Archive under
+permanent identifiers, and a telemetry failure reported as a failed run
+would invite the rerun that mints a second identifier.
+
+A sync run that pushed nothing and found nothing wrong is not mirrored
+(`sync_run_is_worth_mirroring()`); see `DECISIONS.md`, "The Sheet's log tabs
+are telemetry, never an input", for that and the rest of the reasoning.
+
 ## `sync-metadata`'s "unchanged" status
 IA's metadata-update endpoint returns an HTTP 400 with
 `{"error": "no changes to _meta.xml"}` when every field in the request

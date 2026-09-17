@@ -51,6 +51,8 @@ configuration lives in the registry, not the command line".
       "sheet_id": "...",
       "test_sheet_id": "...",
       "sheet_tab": "TestSheet",
+      "upload_log_tab": "Upload Log",
+      "sync_log_tab": "Sync Log",
       "files_dir": "./data",
       "file_template": "{folder_on_lacie_drive}/{file_name}",
       "batch_column": "theme",
@@ -59,6 +61,17 @@ configuration lives in the registry, not the command line".
   }
 }
 ```
+
+`upload_log_tab` and `sync_log_tab` are optional and name the tabs each
+command mirrors its run summary into — one row per run, plus one row per
+problem, in the same spreadsheet the run is already reading. They exist so a
+problem can be diagnosed months later from a Sheet anyone can open, without
+reaching the JSONL logs on the machine that ran it. Telemetry only: nothing
+in a log tab is ever read back, a name colliding with `sheet_tab` is refused
+at startup, and a failed mirror write is reported without failing the run.
+Leave a key out and that command writes no tab at all. See
+[`docs/DECISIONS.md`](docs/DECISIONS.md), "The Sheet's log tabs are telemetry,
+never an input".
 
 `batch_column` is optional and names the normalized column `--batch` matches
 against — the column that says which theme, donation or sitting a row belongs

@@ -292,3 +292,73 @@ the fresh read *or* the row already holds this run's proven-unique number
 (guard), and the `ia_identifier` cell holds exactly what the protocol step
 expects. A pure row shift can no longer satisfy all of that against the
 wrong physical row.
+
+## The Sheet's log tabs are telemetry, never an input
+
+Every real run mirrors its own summary into a tab of the spreadsheet it is
+already talking to: `upload` into `upload_log_tab`, `sync-metadata` into
+`sync_log_tab`, both named in the project's registry entry.
+
+The point is **remote diagnosis**. When someone calls about a problem months
+from now, the Sheet can be opened from anywhere — no SSH, no screen sharing,
+no talking a volunteer through Terminal to find a JSONL file on a Mac in an
+office two hours away.
+
+**The direction never reverses.** Nothing in a log tab is ever read back
+into the canonical metadata columns; `Sheet → Internet Archive` stays
+one-directional. That is enforced by construction rather than by care:
+
+- The writer is handed a `SheetClient` bound to the log tab (`for_tab()`),
+  and `log_tab.py` calls exactly two methods on it — `ensure_tab` and
+  `append_rows`. There is no `write_cells` in its way.
+- A `upload_log_tab` or `sync_log_tab` equal to `sheet_tab` is refused at
+  config load. It is the one configuration mistake with a permanent cost —
+  run summaries appended onto the photographs — and by the time a run is
+  appending it is far too late to catch.
+
+**A tab each, not one shared.** An hourly sync and a once-a-week upload
+interleaved in one tab would bury the upload rows someone opened the Sheet
+to find. The tab name already says which command wrote the row, so there is
+no `command` column.
+
+**A row per run, plus a row per problem.** A clean run is one row. Mirroring
+every per-file record would put 10,000 rows in a tab whose entire value is
+that a person can scan it; the per-file detail is not lost, and the `run`
+column names the JSONL to go and read for it. The columns are:
+
+| column | holds |
+| --- | --- |
+| `when` | the summary record's UTC timestamp |
+| `run` | the run's own log file name, e.g. `upload-20260917T180211Z.jsonl` |
+| `outcome` | `summary`, `failure`, `unconfirmed` or `skipped` |
+| `identifier` | the row's permanent identifier — blank on the `summary` row |
+| `detail` | the run's closing console line, or that problem's own error |
+
+The rows are rendered from `summary.as_record(live)` — the very object
+written to the JSONL a line earlier — so the tab and the file cannot
+disagree about what happened.
+
+**A quiet sync run is not mirrored.** An hourly sync's steady state is
+"every row already matches its last push": it sends nothing and finds
+nothing wrong. A row an hour is roughly 9,000 a year, burying the handful
+that report an actual problem. Such a run is still whole in its own JSONL,
+and per-row *did my edit land* is already answered by `ia_last_synced` in
+the Sheet itself. A run that pushed nothing **because everything failed**
+still lands in the tab — that is precisely what someone opens the Sheet to
+find. `upload` needs no equivalent rule: a run with nothing to upload
+returns before a log is opened at all.
+
+**A failed mirror can never fail the run.** By the time it is written, files
+are on Internet Archive under permanent identifiers and the Sheet has
+already been updated. A Sheets hiccup while writing *telemetry* that turned
+a successful upload into a failed one would invite a rerun — and a rerun is
+what mints a second identifier for a photograph that already has one. The
+failure is reported on stderr, naming the JSONL that is still on disk.
+
+**Off unless configured.** A registry entry with neither key does no read,
+no create and no append. There is no default tab name, because a default
+would have a run create a tab in a Sheet whose owner never asked for one.
+The tab is ensured on *every* run rather than once at setup: it is one cheap
+read against a spreadsheet the run is already talking to, and it means a tab
+someone deletes or renames repairs itself on the next run rather than
+silently swallowing every run after it.
