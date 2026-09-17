@@ -308,13 +308,21 @@ office two hours away.
 into the canonical metadata columns; `Sheet → Internet Archive` stays
 one-directional. That is enforced by construction rather than by care:
 
-- The writer is handed a `SheetClient` bound to the log tab (`for_tab()`),
-  and `log_tab.py` calls exactly two methods on it — `ensure_tab` and
-  `append_rows`. There is no `write_cells` in its way.
+- The writer is handed an `AppendOnlyTab` (`SheetClient.append_only_tab()`),
+  a type with `ensure_tab` and `append_rows` and nothing else. Handing it a
+  `SheetClient` would carry `write_cells` along with it, and "it could
+  overwrite the metadata columns but does not" is a promise; a type without
+  the method is a property.
 - A `upload_log_tab` or `sync_log_tab` equal to `sheet_tab` is refused at
   config load. It is the one configuration mistake with a permanent cost —
   run summaries appended onto the photographs — and by the time a run is
   appending it is far too late to catch.
+- Any *other* existing tab is caught at write time instead: if the tab is
+  already there and its first row is neither empty nor the log header,
+  `ensure_tab()` refuses. Configuration can only know about `sheet_tab`; a
+  name mistyped as some other real tab — an archived copy of the metadata, a
+  donor's notes — would otherwise collect telemetry underneath it, quietly,
+  on every run.
 
 **A tab each, not one shared.** An hourly sync and a once-a-week upload
 interleaved in one tab would bury the upload rows someone opened the Sheet
@@ -358,7 +366,10 @@ failure is reported on stderr, naming the JSONL that is still on disk.
 **Off unless configured.** A registry entry with neither key does no read,
 no create and no append. There is no default tab name, because a default
 would have a run create a tab in a Sheet whose owner never asked for one.
-The tab is ensured on *every* run rather than once at setup: it is one cheap
-read against a spreadsheet the run is already talking to, and it means a tab
-someone deletes or renames repairs itself on the next run rather than
-silently swallowing every run after it.
+
+The tab is ensured on *every* run rather than once at setup. It costs a tab
+listing and a one-row read against a spreadsheet the run is already talking
+to, and it means a tab someone deletes or renames repairs itself on the next
+run rather than silently swallowing every run after it. A tab an operator
+creates by hand before the first run is adopted and given its header, so it
+ends up identical to one this created.

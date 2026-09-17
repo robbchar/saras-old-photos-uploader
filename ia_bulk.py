@@ -3761,7 +3761,7 @@ def upload_from_csv(args, csv_path: str) -> int:
     summary = UploadSummary(succeeded=outcome.succeeded, failures=outcome.failures)
     for line in upload_summary_lines(summary):
         print(line)
-    try_log_run_summary(log_path, summary, args.live)
+    try_log_run_summary(log_path, summary, args.live)  # no Sheet here, so no tab
     print(f"log written to {log_path}")
     return 1 if summary.failed else 0
 
@@ -4051,8 +4051,8 @@ def upload_from_sheet(args) -> int:
     lines = upload_summary_lines(summary)
     for line in lines:
         print(line)
-    try_log_run_summary(log_path, summary, live)
-    mirror_run_to_log_tab(client, config.upload_log_tab, log_path, summary, live, lines[0])
+    record = try_log_run_summary(log_path, summary, live)
+    mirror_run_to_log_tab(client, config.upload_log_tab, log_path, record, lines[0])
     print(f"log written to {log_path}")
     return (
         1
@@ -4283,8 +4283,15 @@ class UploadSummary:
         Kept out of SheetUploadRun.execute() because those rows never entered
         it: they were rejected before a target was ever built, and a send loop
         that had to be told about rows it will not send would be the wrong
-        shape. The caller holds both halves and joins them here."""
-        return replace(self, skipped=tuple(skipped))
+        shape. The caller holds both halves and joins them here.
+
+        ADDS to the run's own skipped rows rather than replacing them.
+        execute() has already collected the rows it declined to send because
+        the Sheet was edited underneath the run, and those are the ones with
+        no other record at run level - `not_attempted` counts them without
+        naming them. Overwriting the list dropped exactly the rows a person
+        opens the log tab to find."""
+        return replace(self, skipped=self.skipped + tuple(skipped))
 
     def as_record(self, live: bool) -> dict:
         return {
@@ -4323,9 +4330,7 @@ def upload_summary_lines(summary: UploadSummary) -> list[str]:
     return lines
 
 
-def log_run_summary(
-    log_path: str | Path, summary: SyncSummary | UploadSummary, live: bool
-) -> None:
+def log_run_summary(log_path: str | Path, record: dict) -> None:
     """The last line of a run's log: what the run did, in one record, without
     replaying the per-row lines above it.
 
@@ -4334,27 +4339,35 @@ def log_run_summary(
     stays readable by _read_log_results() whether or not this line was ever
     written."""
     with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(summary.as_record(live)) + "\n")
+        f.write(json.dumps(record) + "\n")
 
 
 def try_log_run_summary(
     log_path: str | Path, summary: SyncSummary | UploadSummary, live: bool
-) -> None:
+) -> dict:
     """log_run_summary(), but a write failure is reported rather than raised.
 
     The summary is a record OF the run, not a step IN it, and it is written
     last - by the time it fails, permanent metadata has already changed. A
     run reported as failed invites a rerun, so the one thing this must never
     do is turn a sync that reached Internet Archive into a crash. Same
-    treatment log_run_header() already gets, and for the same reason."""
+    treatment log_run_header() already gets, and for the same reason.
+
+    Returns the record it wrote - or tried to - so a caller mirroring the
+    same run into the Sheet renders that one object rather than building a
+    second one a second later. Two as_record() calls carry two timestamps,
+    and a tab whose `when` matches no line in the JSONL defeats the very
+    lookup the tab invites."""
+    record = summary.as_record(live)
     try:
-        log_run_summary(log_path, summary, live)
+        log_run_summary(log_path, record)
     except Exception as exc:
         print(
             f"could not write the run-summary record to {log_path}: {exc}. The run itself "
             "completed; this affects only the log's own audit trail.",
             file=sys.stderr,
         )
+    return record
 
 
 def sync_run_is_worth_mirroring(summary: SyncSummary) -> bool:
@@ -4378,8 +4391,7 @@ def mirror_run_to_log_tab(
     client: SheetClient,
     tab: str | None,
     log_path: Path,
-    summary: SyncSummary | UploadSummary,
-    live: bool,
+    record: dict,
     headline: str,
 ) -> None:
     """Mirror the run's summary into the Sheet's log tab for this command, if
@@ -4389,20 +4401,15 @@ def mirror_run_to_log_tab(
     does nothing at all in that case - no read, no create, no append. That is
     the default, so a Sheet only ever grows a tab its owner configured.
 
-    The mirror is fed `summary.as_record(live)` - the very object written to
-    the JSONL a line earlier - so the tab and the file cannot disagree about
-    what happened. It reuses the run's own client one tab over rather than
+    The mirror is fed the very record written to the JSONL a line earlier -
+    passed in, not rebuilt - so the tab and the file cannot disagree about
+    what happened, down to the timestamp. It reuses the run's own client one tab over rather than
     authenticating again, and hands the tab writer a client that has no
     cell-write method: the Sheet -> Internet Archive direction stays
     one-directional by construction, not by care."""
     if not tab:
         return
-    log_tab.mirror_run(
-        client.for_tab(tab),
-        summary.as_record(live),
-        run=log_path.name,
-        headline=headline,
-    )
+    log_tab.mirror_run(client.append_only_tab(tab), record, run=log_path.name, headline=headline)
 
 
 def plan_sync_targets(
@@ -4955,20 +4962,19 @@ def sync_from_sheet(args) -> int:
             skipped=tuple(skipped_rows(problems)),
             already_synced=len(already_synced),
         )
-        try_log_run_summary(log_path, summary, live)
-        if sync_run_is_worth_mirroring(summary):
-            mirror_run_to_log_tab(
-                sheet.client,
-                config.sync_log_tab,
-                log_path,
-                summary,
-                live,
-                sync_summary_lines(summary)[0],
-            )
-        print(
+        record = try_log_run_summary(log_path, summary, live)
+        nothing_to_sync = (
             f"nothing to sync - all {_pluralize(len(already_synced), 'uploaded row')} "
             "already match their last push"
         )
+        if sync_run_is_worth_mirroring(summary):
+            # The headline is this path's own line, not sync_summary_lines()'s
+            # "0 updated, 0 unchanged, 0 error(s)": the tab should say what the
+            # operator saw, and on this path they saw neither of those numbers.
+            mirror_run_to_log_tab(
+                sheet.client, config.sync_log_tab, log_path, record, nothing_to_sync
+            )
+        print(nothing_to_sync)
         print(f"log written to {log_path}")
         return 1 if problems else 0
 
@@ -4986,15 +4992,13 @@ def sync_from_sheet(args) -> int:
         skipped=tuple(skipped_rows(problems)),
         already_synced=len(already_synced),
     )
-    try_log_run_summary(log_path, summary, live)
+    record = try_log_run_summary(log_path, summary, live)
 
     lines = sync_summary_lines(summary)
     for line in lines:
         print(line)
     if sync_run_is_worth_mirroring(summary):
-        mirror_run_to_log_tab(
-            sheet.client, config.sync_log_tab, log_path, summary, live, lines[0]
-        )
+        mirror_run_to_log_tab(sheet.client, config.sync_log_tab, log_path, record, lines[0])
     print(f"log written to {log_path}")
     return 1 if (summary.failed or summary.skipped) else 0
 

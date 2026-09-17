@@ -644,13 +644,16 @@ entry in the record's `failures`, `unconfirmed` and `skipped` lists — and
 appends them through `mirror_run()`. It is fed the record rather than the
 summary object, which keeps it free of any import from `ia_bulk` (which
 imports it) and, more usefully, makes the tab and the JSONL the same data
-rendered twice.
+rendered twice: `try_log_run_summary()` returns the record it wrote, and
+that same dict is what reaches the Sheet, so the two cannot differ even by a
+timestamp.
 
 `mirror_run_to_log_tab()` in `ia_bulk.py` is the single call site for both
-commands. It reuses the run's own `SheetClient` one tab over
-(`SheetClient.for_tab()`) rather than authenticating again, and what it
-hands the writer has no `write_cells`: the mirror cannot reach the metadata
-columns even by mistake. `mirror_run()` catches everything and reports on
+commands. It reuses the run's own connection one tab over
+(`SheetClient.append_only_tab()`) rather than authenticating again, and what
+it hands the writer is an `AppendOnlyTab` — a type carrying `ensure_tab` and
+`append_rows` and no `write_cells` at all, so the mirror cannot reach the
+metadata columns even by mistake. `mirror_run()` catches everything and reports on
 stderr — by the time it runs, items exist on Internet Archive under
 permanent identifiers, and a telemetry failure reported as a failed run
 would invite the rerun that mints a second identifier.

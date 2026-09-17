@@ -4220,7 +4220,7 @@ class RecordingSheetClient:
         # from the metadata tab - which is the whole property under test.
         self.log_tabs = {}
 
-    def for_tab(self, tab):
+    def append_only_tab(self, tab):
         self.log_tabs.setdefault(tab, RecordingLogTab(tab, fails=self._raise_on_log_tab))
         return self.log_tabs[tab]
 
@@ -10044,7 +10044,7 @@ def test_an_unwritable_summary_does_not_fail_a_run_that_reached_the_archive(
 
     registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
 
-    def full_disk(log_path, summary, live):
+    def full_disk(log_path, record):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr("ia_bulk.log_run_summary", full_disk)
@@ -12032,7 +12032,7 @@ def test_an_upload_summary_that_cannot_be_written_does_not_fail_the_run(
     grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
     _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
 
-    def refuse(log_path, summary, live):
+    def refuse(log_path, record):
         raise OSError("disk full")
 
     monkeypatch.setattr("ia_bulk.log_run_summary", refuse)
@@ -12078,6 +12078,10 @@ def test_an_upload_run_appends_its_summary_to_the_configured_log_tab(
     # JSONL to go and read for the per-file detail.
     assert detail in out.splitlines()
     assert run.startswith("upload-") and run.endswith(".jsonl")
+    # The tab and the JSONL are one record rendered twice, down to the
+    # timestamp: `when` has to find its own line in the file it names. Two
+    # as_record() calls a second apart would leave it naming nothing.
+    assert when == _upload_log_entries(tmp_path)[-1]["timestamp"]
 
 
 def test_each_failed_row_gets_its_own_line_in_the_log_tab(tmp_path, monkeypatch, capsys):
@@ -12179,13 +12183,16 @@ def test_the_log_tab_client_cannot_write_to_the_metadata_columns(
     )
 
     cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
-    capsys.readouterr()
+    captured = capsys.readouterr()
 
-    tab = client.log_tabs["Upload Log"]
-    assert not hasattr(tab, "write_cells")
-    # Every cell write this run made went to the metadata tab's client, and
-    # none of them touched a log tab.
+    # Nothing on stderr is what proves the mirror made no call the log tab
+    # could not serve: mirror_run catches everything, so a stray write_cells
+    # would surface here and nowhere else.
+    assert captured.err == ""
+    # Every cell write this run made went to the metadata tab's client; the
+    # log tab saw appends and nothing else.
     assert client.write_count > 0
+    assert client.log_tabs["Upload Log"].appended
 
 
 def _sync_log_registry(tmp_path):
@@ -12318,3 +12325,52 @@ def test_the_csv_upload_path_ends_with_the_same_summary_record(tmp_path, monkeyp
     assert [entry["identifier"] for entry in summary["failures"]] == [
         "lcps-astoriaphotos-00002"
     ]
+
+
+def test_a_row_moved_mid_run_reaches_the_summary_and_the_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    """Both causes of "nothing was sent for this row" have to survive into the
+    summary: validation held it back, or the Sheet was edited underneath the
+    run. The second is the one someone telephones about - it means a
+    volunteer was editing while the run was going - and it is the one that
+    exists nowhere else at run level, since `not_attempted` is a bare count
+    with no identifier in it.
+
+    Two rows at chunk_size 1: row 1's file cell changes before chunk 1's
+    pre-reserve guard reads it, so the run reports it moved and sends
+    nothing for it.
+    """
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [
+        [f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in (1, 2)
+    ]
+
+    def move_row_1_before_the_first_chunk_verifies(live_grid, read_count):
+        if read_count == 2:
+            live_grid[1][1] = "somethingelse.jpg"
+
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        registry=_log_tab_registry(tmp_path),
+        before_read=move_row_1_before_the_first_chunk_verifies,
+    )
+
+    cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, chunk_size=1)
+    )
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert [entry["identifier"] for entry in summary["skipped"]] == [
+        "lcps-astoriaphotos-00001"
+    ]
+    assert "edited while the run was in progress" in summary["skipped"][0]["error"]
+    # and it reaches the tab, which is where it would actually be read
+    rows = client.log_tabs["Upload Log"].appended
+    assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00001"]]

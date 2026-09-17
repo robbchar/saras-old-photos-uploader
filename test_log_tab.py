@@ -108,6 +108,17 @@ def test_every_row_is_as_wide_as_the_header():
 
 
 class RecordingLogTab:
+    """Stands in for sheet_client.AppendOnlyTab. Carries the cell-writing
+    methods a real SheetClient would have, each of them a failure, so a test
+    catches the mirror reaching for one instead of quietly proving that a
+    stub without them cannot be misused."""
+
+    def write_cells(self, updates):
+        raise AssertionError("the log tab writer must never write cells")
+
+    def read_grid(self):
+        raise AssertionError("the log tab writer must never read the grid")
+
     def __init__(self, fail_on=None):
         self.ensured = []
         self.appended = []
@@ -135,16 +146,18 @@ def test_mirroring_creates_the_tab_then_appends_the_run():
     ]
 
 
-def test_mirroring_only_ever_appends():
-    """The one-directional guarantee, asserted rather than trusted: this
-    module is handed a client bound to a log tab and calls nothing on it but
-    ensure_tab and append_rows, so there is no path by which telemetry can
-    reach the metadata columns."""
+def test_mirroring_only_ever_appends(capsys):
+    """The one-directional guarantee. Asserted through stderr rather than
+    through the stub's shape: mirror_run catches every exception, so a stub
+    that merely lacks write_cells would stay green if this module started
+    calling it - the AttributeError would be swallowed and reported. A silent
+    stderr is what actually proves only the two expected calls were made."""
     client = RecordingLogTab()
 
     mirror_run(client, _upload_record(), run="upload-1.jsonl", headline="a headline")
 
-    assert not hasattr(client, "write_cells")
+    assert capsys.readouterr().err == ""
+    assert client.ensured and client.appended
 
 
 @pytest.mark.parametrize("failing_call", ["ensure_tab", "append_rows"])

@@ -13,11 +13,16 @@ class FakeValues:
         self.get_spreadsheet_id = None
         self.batch_update_spreadsheet_id = None
         self.append_spreadsheet_id = None
+        self.first_rows = {}
         self._get_response = get_response if get_response is not None else {"values": grid}
 
     def get(self, spreadsheetId, range):
         self.get_spreadsheet_id = spreadsheetId
         self.get_range = range
+        # A bounded range (the header read) answers from first_rows; the
+        # whole-tab read keeps answering with the grid.
+        if range in self.first_rows:
+            return _Executable({"values": self.first_rows[range]})
         return _Executable(self._get_response)
 
     def batchUpdate(self, spreadsheetId, body):
@@ -215,26 +220,13 @@ def test_ensure_tab_creates_a_missing_tab_with_its_header_row():
     ]
 
 
-def test_ensure_tab_leaves_an_existing_tab_alone():
-    """Every run calls this. Re-adding the header each time would push a row
-    of column names into the middle of the log, and re-creating the tab would
-    fail the whole append."""
-    service = FakeService([["Title"]], tabs=["Donor Photos", "Upload Log"])
-    client = SheetClient(service, "SHEET_ID", "Upload Log")
-
-    client.ensure_tab(["when", "run", "outcome"])
-
-    assert service.sheet_batch_update_calls == []
-    assert service.values_api.append_calls == []
-
-
-def test_for_tab_reuses_the_connection_and_changes_only_the_tab():
+def test_append_only_tab_reuses_the_connection_and_changes_only_the_tab():
     """A run that also writes a log tab must not authenticate a second time
     or build a second service - it is the same spreadsheet, one tab over."""
     service = FakeService([["Title"]])
     client = SheetClient(service, "SHEET_ID", "Donor Photos")
 
-    log_client = client.for_tab("Upload Log")
+    log_client = client.append_only_tab("Upload Log")
 
     log_client.append_rows([["x"]])
     assert service.values_api.append_calls[0]["range"] == "'Upload Log'"
@@ -242,3 +234,60 @@ def test_for_tab_reuses_the_connection_and_changes_only_the_tab():
     # and the original is untouched
     client.append_rows([["y"]])
     assert service.values_api.append_calls[1]["range"] == "'Donor Photos'"
+
+
+def test_an_append_only_tab_has_no_way_to_write_a_cell():
+    """What makes "telemetry can never reach the metadata columns" a property
+    of the code rather than a promise in a docstring. A SheetClient handed to
+    the log-tab writer would carry write_cells with it; this type does not
+    have the method at all."""
+    client = SheetClient(FakeService([["Title"]]), "SHEET_ID", "Donor Photos")
+
+    log_client = client.append_only_tab("Upload Log")
+
+    assert not hasattr(log_client, "write_cells")
+    assert not hasattr(log_client, "read_grid")
+
+
+def test_ensure_tab_refuses_a_tab_that_already_holds_something_else():
+    """The mistake this catches costs data: `upload_log_tab` mistyped as the
+    name of some other tab that holds real content - an archived copy of the
+    metadata, a donor's notes - would otherwise append five-column telemetry
+    rows underneath it, silently, on every run. Only `sheet_tab` itself is
+    caught at config load; every other tab in the spreadsheet is not."""
+    service = FakeService([["Title"]], tabs=["Donor Photos", "Notes"])
+    service.values_api.first_rows = {"'Notes'!1:1": [["Donor", "Told to", "On"]]}
+    client = SheetClient(service, "SHEET_ID", "Notes")
+
+    with pytest.raises(ValueError) as caught:
+        client.ensure_tab(["when", "run", "outcome"])
+
+    assert "Notes" in str(caught.value)
+    assert service.values_api.append_calls == []
+
+
+def test_ensure_tab_adopts_an_empty_tab_someone_made_by_hand():
+    """An operator who creates the tab before the first run gets a working
+    log tab, not five unlabelled columns."""
+    service = FakeService([["Title"]], tabs=["Donor Photos", "Upload Log"])
+    service.values_api.first_rows = {"'Upload Log'!1:1": []}
+    client = SheetClient(service, "SHEET_ID", "Upload Log")
+
+    client.ensure_tab(["when", "run", "outcome"])
+
+    assert service.sheet_batch_update_calls == []
+    assert service.values_api.append_calls[0]["body"]["values"] == [
+        ["when", "run", "outcome"]
+    ]
+
+
+def test_ensure_tab_accepts_a_tab_already_carrying_the_header():
+    """The ordinary case on the second and every later run."""
+    service = FakeService([["Title"]], tabs=["Donor Photos", "Upload Log"])
+    service.values_api.first_rows = {"'Upload Log'!1:1": [["when", "run", "outcome"]]}
+    client = SheetClient(service, "SHEET_ID", "Upload Log")
+
+    client.ensure_tab(["when", "run", "outcome"])
+
+    assert service.sheet_batch_update_calls == []
+    assert service.values_api.append_calls == []
