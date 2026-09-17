@@ -3238,7 +3238,7 @@ class SheetUploadRun:
         # Counted and collected in the same step: every site that bumps a
         # number here already holds the target it belongs to, so the summary's
         # lists cost nothing beyond remembering what was in hand.
-        tally = {"success": 0, "unconfirmed": 0, "not_attempted": 0, "rate_limited": False}
+        tally = {"success": 0, "not_attempted": 0, "rate_limited": False}
         failures: list[RowFailure] = []
         unconfirmed: list[RowFailure] = []
         skipped: list[RowFailure] = []
