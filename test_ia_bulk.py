@@ -4169,6 +4169,28 @@ class SheetUploadRecorder:
         return [event[1] for event in self.events if event[0] == "upload"]
 
 
+class RecordingLogTab:
+    """A client bound to a log tab. Deliberately has no write_cells: the tab
+    writer is handed one of these, so there is no method by which telemetry
+    could reach the metadata columns even if the code tried."""
+
+    def __init__(self, tab, fails=False):
+        self.tab = tab
+        self.ensured = []
+        self.appended = []
+        self._fails = fails
+
+    def ensure_tab(self, header):
+        if self._fails:
+            raise RuntimeError("Sheets API returned 503")
+        self.ensured.append(header)
+
+    def append_rows(self, rows):
+        if self._fails:
+            raise RuntimeError("Sheets API returned 503")
+        self.appended.extend(rows)
+
+
 class RecordingSheetClient:
     """Stands in for SheetClient on the upload path. Unlike FakeSheetClient it
     also accepts writes, and APPLIES them to its own grid - so the confirm
@@ -4176,14 +4198,31 @@ class RecordingSheetClient:
     would. `before_read` is the hook a mid-run-edit test uses to change the
     grid out from under the run between two reads."""
 
-    def __init__(self, grid, recorder, before_read=None, raise_on_write=None, raise_on_read=None):
+    def __init__(
+        self,
+        grid,
+        recorder,
+        before_read=None,
+        raise_on_write=None,
+        raise_on_read=None,
+        raise_on_log_tab=False,
+    ):
         self.grid = [list(row) for row in grid]
         self._recorder = recorder
         self._before_read = before_read
         self._raise_on_write = raise_on_write
         self._raise_on_read = raise_on_read
+        self._raise_on_log_tab = raise_on_log_tab
         self.read_count = 0
         self.write_count = 0
+        # tab name -> the LogTab handed out for it. Each one records what was
+        # written to that tab, so a test can assert on the log tab separately
+        # from the metadata tab - which is the whole property under test.
+        self.log_tabs = {}
+
+    def for_tab(self, tab):
+        self.log_tabs.setdefault(tab, RecordingLogTab(tab, fails=self._raise_on_log_tab))
+        return self.log_tabs[tab]
 
     def read_grid(self):
         self.read_count += 1
@@ -4258,6 +4297,7 @@ def setup_sheet_upload(
     registry=None,
     raise_on_write=None,
     raise_on_read=None,
+    raise_on_log_tab=False,
     timestamps=None,
 ):
     """Builds the whole Sheet-upload world: files on disk, a registry, a
@@ -4283,6 +4323,7 @@ def setup_sheet_upload(
         before_read=before_read,
         raise_on_write=raise_on_write,
         raise_on_read=raise_on_read,
+        raise_on_log_tab=raise_on_log_tab,
     )
     build_calls = []
 
@@ -11991,3 +12032,146 @@ def test_an_upload_summary_that_cannot_be_written_does_not_fail_the_run(
     assert exit_code == 0
     assert "disk full" in captured.err
     assert "1 file(s) uploaded successfully" in captured.out
+
+
+# Issue #26: mirroring a run's summary into the Sheet's own log tab.
+
+
+def _log_tab_registry(tmp_path, **overrides):
+    return make_sheet_registry(files_dir=str(tmp_path), upload_log_tab="Upload Log", **overrides)
+
+
+def test_an_upload_run_appends_its_summary_to_the_configured_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    """The point is remote diagnosis: when someone calls months from now, the
+    Sheet opens from anywhere, and the JSONL on a Mac in the office does
+    not."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=_log_tab_registry(tmp_path)
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    tab = client.log_tabs["Upload Log"]
+    assert tab.ensured == [["when", "run", "outcome", "identifier", "detail"]]
+    assert len(tab.appended) == 1
+    when, run, outcome, identifier, detail = tab.appended[0]
+    assert outcome == "summary"
+    assert identifier == ""
+    # The tab says exactly what the operator saw on screen, and names the
+    # JSONL to go and read for the per-file detail.
+    assert detail in out.splitlines()
+    assert run.startswith("upload-") and run.endswith(".jsonl")
+
+
+def test_each_failed_row_gets_its_own_line_in_the_log_tab(tmp_path, monkeypatch, capsys):
+    """A count alone sends the caller back to the file this tab exists to
+    replace."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        registry=_log_tab_registry(tmp_path),
+        fail_for=(f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    rows = client.log_tabs["Upload Log"].appended
+    assert [row[2:] for row in rows[1:]] == [
+        ["failure", "lcps-astoriaphotos-00002", "boom"]
+    ]
+
+
+def test_no_log_tab_is_written_when_the_registry_names_none(tmp_path, monkeypatch, capsys):
+    """Absent means off. A default tab name would have every run create a tab
+    in a Sheet whose owner never asked for one."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert client.log_tabs == {}
+
+
+def test_a_dry_run_writes_nothing_to_the_log_tab(tmp_path, monkeypatch, capsys):
+    """A dry run uploads nothing, so it has no run to report. Writing a row
+    saying so would put runs in the tab that never happened."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=_log_tab_registry(tmp_path)
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, dry_run=True))
+    capsys.readouterr()
+
+    assert client.log_tabs == {}
+
+
+def test_a_log_tab_that_cannot_be_written_does_not_fail_the_upload(
+    tmp_path, monkeypatch, capsys
+):
+    """Acceptance criterion 3 of #26, end to end. The files are already on
+    Internet Archive under permanent identifiers by the time this runs; a
+    failed telemetry write reported as a failed upload would invite the one
+    thing that costs something - a rerun."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        registry=_log_tab_registry(tmp_path),
+        raise_on_log_tab=True,
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path=tmp_path / "registry.json"))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "1 file(s) uploaded successfully" in captured.out
+    assert "could not mirror this run into its Sheet log tab" in captured.err
+    assert "Sheets API returned 503" in captured.err
+
+
+def test_the_log_tab_client_cannot_write_to_the_metadata_columns(
+    tmp_path, monkeypatch, capsys
+):
+    """#26's standing constraint - Sheet -> Internet Archive stays
+    one-directional - asserted structurally rather than by inspection: what
+    the mirror is handed has no cell-write method at all."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=_log_tab_registry(tmp_path)
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    capsys.readouterr()
+
+    tab = client.log_tabs["Upload Log"]
+    assert not hasattr(tab, "write_cells")
+    # Every cell write this run made went to the metadata tab's client, and
+    # none of them touched a log tab.
+    assert client.write_count > 0

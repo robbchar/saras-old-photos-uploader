@@ -26,6 +26,7 @@ from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
 import google_auth
+import log_tab
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -4041,9 +4042,11 @@ def upload_from_sheet(args) -> int:
         chunk_size=chunk_size,
     ).execute(targets).with_skipped(skipped_rows(blocked))
 
-    for line in upload_summary_lines(summary):
+    lines = upload_summary_lines(summary)
+    for line in lines:
         print(line)
     try_log_run_summary(log_path, summary, live)
+    mirror_run_to_log_tab(client, config.upload_log_tab, log_path, summary, live, lines[0])
     print(f"log written to {log_path}")
     return (
         1
@@ -4346,6 +4349,37 @@ def try_log_run_summary(
             "completed; this affects only the log's own audit trail.",
             file=sys.stderr,
         )
+
+
+def mirror_run_to_log_tab(
+    client: SheetClient,
+    tab: str | None,
+    log_path: Path,
+    summary: SyncSummary | UploadSummary,
+    live: bool,
+    headline: str,
+) -> None:
+    """Mirror the run's summary into the Sheet's log tab for this command, if
+    the registry names one.
+
+    `tab` is None for a project that has not asked for a log tab, and this
+    does nothing at all in that case - no read, no create, no append. That is
+    the default, so a Sheet only ever grows a tab its owner configured.
+
+    The mirror is fed `summary.as_record(live)` - the very object written to
+    the JSONL a line earlier - so the tab and the file cannot disagree about
+    what happened. It reuses the run's own client one tab over rather than
+    authenticating again, and hands the tab writer a client that has no
+    cell-write method: the Sheet -> Internet Archive direction stays
+    one-directional by construction, not by care."""
+    if not tab:
+        return
+    log_tab.mirror_run(
+        client.for_tab(tab),
+        summary.as_record(live),
+        run=log_path.name,
+        headline=headline,
+    )
 
 
 def plan_sync_targets(

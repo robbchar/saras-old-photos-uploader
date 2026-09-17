@@ -33,6 +33,32 @@ class ConfigError(Exception):
     pass
 
 
+def _log_tabs(block: dict, project_id: str) -> dict[str, str | None]:
+    """The two optional log-tab names, normalized to None when unset.
+
+    Blank is treated as unset rather than passed through: emptying the value
+    is how an operator turns mirroring off without editing the registry's
+    shape, and an empty string would instead reach the Sheets API as a
+    request for a tab called nothing.
+
+    A log tab naming the metadata tab is refused here rather than left to
+    fail later, because it would not fail later - it would append telemetry
+    onto the canonical columns, one-directionally and permanently, and the
+    first anyone knew of it would be a Sheet with run summaries interleaved
+    among the photographs."""
+    tabs: dict[str, str | None] = {}
+    for key in ("upload_log_tab", "sync_log_tab"):
+        value = str(block.get(key) or "").strip()
+        if value and value == str(block.get("sheet_tab") or "").strip():
+            raise ConfigError(
+                f"project '{project_id}': {key} is '{value}', which is the metadata tab "
+                "(sheet_tab). A log tab must be its own tab - run summaries appended onto "
+                "the metadata columns cannot be undone"
+            )
+        tabs[key] = value or None
+    return tabs
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     project_id: str
@@ -52,6 +78,12 @@ class ProjectConfig:
     # such column, and matching nothing is exactly the silent unfiltered-or-
     # empty run --batch's guards exist to refuse.
     batch_column: str | None
+    # Where each command mirrors its run summary, or None for "do not
+    # mirror". No default tab name: a default would have a run create a tab
+    # in a Sheet whose owner never asked for one. See docs/DECISIONS.md,
+    # "The Sheet's log tabs are telemetry, never an input".
+    upload_log_tab: str | None = None
+    sync_log_tab: str | None = None
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
@@ -217,6 +249,8 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
                 "normalized form. Your Sheet is fine; the registry entry is not."
             )
 
+    log_tabs = _log_tabs(block, project_id)
+
     if block["sheet_id"].strip() == block["test_sheet_id"].strip():
         raise ConfigError(
             f"project '{project_id}': sheet_id and test_sheet_id must differ, "
@@ -225,6 +259,8 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
 
     return ProjectConfig(
         project_id=project_id,
+        upload_log_tab=log_tabs["upload_log_tab"],
+        sync_log_tab=log_tabs["sync_log_tab"],
         collection_key=collection_key.strip(),
         mediatype=block["mediatype"].strip(),
         ia_collection=block["ia_collection"].strip(),

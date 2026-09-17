@@ -45,6 +45,17 @@ class SheetClient:
         self._spreadsheet_id = spreadsheet_id
         self._tab = tab
 
+    def for_tab(self, tab: str) -> SheetClient:
+        """The same spreadsheet, one tab over.
+
+        A run that also writes a log tab is still one spreadsheet and one
+        authenticated session; rebuilding a client through
+        build_sheet_client() would re-run the OAuth check and build a second
+        service for no reason. Returns a new client rather than mutating this
+        one, so the caller cannot accidentally leave the run's own client
+        pointing at the log tab."""
+        return SheetClient(self._service, self._spreadsheet_id, tab)
+
     def read_grid(self) -> list[list[str]]:
         response = (
             self._service.spreadsheets()
@@ -70,6 +81,36 @@ class SheetClient:
         self._service.spreadsheets().values().batchUpdate(
             spreadsheetId=self._spreadsheet_id, body=body
         ).execute()
+
+    def ensure_tab(self, header: list[str]) -> None:
+        """Creates this client's tab, with `header` as its first row, if the
+        spreadsheet does not already have it.
+
+        Reads the tab list first rather than creating and catching the
+        "already exists" error: every run calls this, so the common path is
+        the one that must be cheap and silent. Creating unconditionally would
+        also re-append the header, pushing a row of column names into the
+        middle of an existing log.
+
+        The header is written through append_rows() rather than as part of
+        the addSheet request, so a tab created here and a tab someone made by
+        hand end up holding the same thing in the same way."""
+        existing = (
+            self._service.spreadsheets()
+            .get(spreadsheetId=self._spreadsheet_id, fields="sheets.properties.title")
+            .execute()
+        )
+        titles = {
+            sheet.get("properties", {}).get("title") for sheet in existing.get("sheets", [])
+        }
+        if self._tab in titles:
+            return
+
+        self._service.spreadsheets().batchUpdate(
+            spreadsheetId=self._spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": self._tab}}}]},
+        ).execute()
+        self.append_rows([header])
 
     def append_rows(self, rows: list[list[str]]) -> None:
         """One append request per call - the API finds the end of the tab's
