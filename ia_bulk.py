@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, TypeVar
+from typing import Callable, Iterator, Protocol, Sequence, TypeVar
 
 import googleapiclient.discovery
 import internetarchive
@@ -29,6 +29,7 @@ import google_auth
 from column_map import (
     ColumnMap,
     FileResolutionError,
+    IA_SYNC_HASH_COLUMN,
     TemplateError,
     candidate_path,
     check_column_map,
@@ -38,11 +39,18 @@ from column_map import (
     resolve_file,
     template_fields,
 )
-from ia_fields import PIPELINE_OWNED_FIELDS, suggest_standard_fields
+from ia_fields import PIPELINE_OWNED_FIELDS, metadata_to_send, suggest_standard_fields
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
 from project_config import ProjectConfig, load_project_config, unregistered_project_error
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
+from sync_state import (
+    MissingSyncColumns,
+    SyncColumns,
+    locate_sync_columns,
+    stamp_updates,
+    sync_hash,
+)
 
 REQUIRED_UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
 # Deliberately excludes "identifier" only - do not "fix" this back to
@@ -1566,11 +1574,7 @@ def update_metadata_row(row: dict, target_identifier: str) -> None:
     value REMOVE_TAG in that cell; the internetarchive library (and the
     official `ia` CLI's `--modify field:REMOVE_TAG`) treats that string as
     a delete sentinel and issues a metadata "remove" op for the field."""
-    metadata = {
-        key: (value or "").strip()
-        for key, value in row.items()
-        if key != "identifier" and (value or "").strip()
-    }
+    metadata = metadata_to_send(row)
 
     def send() -> None:
         """The retried unit, matching upload_row()'s. Repeating a metadata
@@ -2809,6 +2813,10 @@ class SheetSnapshot:
     Sheet currently holds ANYWHERE - see claimed_identifiers."""
 
     columns: SheetColumns
+    # Kept so sync-metadata can re-locate its own two columns in this same
+    # read rather than parsing the grid a second time. upload compares
+    # SheetColumns instead, which read_sheet_snapshot already derives.
+    column_map: ColumnMap
     grid: list[list[str]]
     fingerprints: dict[int, str]
     # Every non-blank `ia_identifier` in the Sheet right now, whatever row it
@@ -2824,6 +2832,7 @@ def read_sheet_snapshot(client: SheetClient, file_template: str) -> SheetSnapsho
     column_map, rows = grid_to_rows(grid)
     return SheetSnapshot(
         columns=locate_write_back_columns(column_map),
+        column_map=column_map,
         grid=grid,
         fingerprints=sheet_row_fingerprints(rows, file_template),
         claimed_identifiers=frozenset(
@@ -2874,10 +2883,49 @@ def check_claimed_identifiers(
     )
 
 
+class MovedRowCandidate(Protocol):
+    """The four attributes split_moved_targets() actually reads off a target.
+
+    UploadTarget (reserve->confirm) and SyncTarget (sync-metadata's stamp
+    write) both satisfy this by shape, not by inheritance - the guard was
+    written once, against upload's leg, and SyncTarget reuses it verbatim
+    (see its own docstring for why that reuse is sound). A nominal base
+    class would have forced one of the two unrelated dataclasses to inherit
+    from the other just to share four field names.
+
+    Declared as read-only properties, not plain attributes: a plain
+    attribute in a Protocol demands a setter as well as a getter, which a
+    frozen dataclass - both UploadTarget and SyncTarget are frozen - can
+    never offer. Reading is all this function ever does."""
+
+    @property
+    def row_number(self) -> int: ...
+    @property
+    def identifier(self) -> str: ...
+    @property
+    def newly_minted(self) -> bool: ...
+    @property
+    def source_fingerprint(self) -> str: ...
+
+
+MovedRowCandidateT = TypeVar("MovedRowCandidateT", bound=MovedRowCandidate)
+
+
 def split_moved_targets(
-    targets: list[UploadTarget], snapshot: SheetSnapshot, reserved_already: bool
-) -> tuple[list[UploadTarget], list[UploadTarget]]:
+    targets: Sequence[MovedRowCandidateT], snapshot: SheetSnapshot, reserved_already: bool
+) -> tuple[list[MovedRowCandidateT], list[MovedRowCandidateT]]:
     """Returns (still_at_their_row, moved).
+
+    Generic over the caller's target type (bound to MovedRowCandidate above)
+    so a caller passing list[SyncTarget] gets list[SyncTarget] back, rather
+    than the list[UploadTarget] a non-generic signature would claim - the
+    previous annotation was honest about upload's own call site and false
+    about sync-metadata's.
+
+    `targets` is typed as a Sequence, not a list: it is only ever read here
+    (iterated once), and list's invariance would otherwise refuse a caller's
+    list[UploadTarget] or list[SyncTarget] against a bare list[T] parameter -
+    Sequence's covariance is what lets T solve to the caller's real type.
 
     Row numbers are positional. A human inserting or deleting a row shifts
     every row below it, and the run holds row numbers from a read that may be
@@ -2920,8 +2968,8 @@ def split_moved_targets(
                 duplicated.add(fingerprint)
             seen.add(fingerprint)
 
-    still_there: list[UploadTarget] = []
-    moved: list[UploadTarget] = []
+    still_there: list[MovedRowCandidateT] = []
+    moved: list[MovedRowCandidateT] = []
     for target in targets:
         expected_identifier = (
             target.identifier if reserved_already or not target.newly_minted else ""
@@ -3441,24 +3489,43 @@ def metadata_changes(
     return changes
 
 
-def print_sync_dry_run(targets: list[SyncTarget], problems: list[RowValidation]) -> int:
+def print_sync_dry_run(
+    to_push: list[SyncTarget],
+    already_synced: list[SyncTarget],
+    problems: list[RowValidation],
+) -> int:
     """Shows what a sync would CHANGE, not merely which fields it would send.
 
-    Listing field names alone made the dry run unable to answer the one
-    question it is run to answer - "did my edit get picked up?" - because
-    editing a description on a row that already had one produced byte-
-    identical output. So each item's current metadata is read back from
-    Internet Archive and diffed against the Sheet.
+    The hash gate is reported FIRST, and only the rows that would actually be
+    sent are read back from Internet Archive. That is both the honest preview
+    - a dry run must mirror the write, including what it leaves untouched -
+    and a large saving: on a steady-state Sheet this drops from one read per
+    uploaded row to none.
 
-    That costs one read per item. It is the right trade for a command whose
-    other mode writes to permanent public items, and it makes the run's
-    `unchanged` count visible BEFORE anything is sent rather than after."""
-    print(f"reading current metadata for {_pluralize(len(targets), 'item')}...")
+    Nothing is stamped here. A dry run sends nothing, so there is nothing to
+    record having sent; stamping would make the next real run skip rows this
+    one only previewed."""
+    total = len(to_push) + len(already_synced)
+    # A blank hash means never stamped or deliberately cleared, not edited.
+    never_stamped = sum(1 for target in to_push if not target.stored_hash)
+    edited = len(to_push) - never_stamped
+    # {:,} on the raw counts, not just on the _pluralize call - see that
+    # function's docstring: adjacent numbers on one line must agree about how
+    # a number looks.
+    print(
+        f"{_pluralize(total, 'uploaded row')}; {never_stamped:,} with no push on record, "
+        f"{edited:,} changed since their last push, {len(already_synced):,} already in sync "
+        "and would not be sent"
+    )
+    if not to_push:
+        return 1 if problems else 0
+
+    print(f"reading current metadata for {_pluralize(len(to_push), 'item')}...")
     print()
 
     changed = 0
     unreadable = 0
-    for target in targets:
+    for target in to_push:
         remote = fetch_current_metadata(target.uploaded_as)
         if remote is None:
             unreadable += 1
@@ -3481,10 +3548,13 @@ def print_sync_dry_run(targets: list[SyncTarget], problems: list[RowValidation])
 
     if changed or unreadable:
         print()
-    unchanged = len(targets) - changed - unreadable
+    unchanged = len(to_push) - changed - unreadable
+    # {:,} on both raw counts, not just on the _pluralize call - see that
+    # function's docstring: adjacent numbers on one line must agree about how
+    # a number looks.
     print(
-        f"{changed} of {_pluralize(len(targets), 'item')} would change; "
-        f"{unchanged} already match and would be reported as unchanged"
+        f"{changed:,} of {_pluralize(len(to_push), 'item')} would change; "
+        f"{unchanged:,} already match and would be reported as unchanged"
     )
     if unreadable:
         print(f"{_pluralize(unreadable, 'item')} could not be read")
@@ -3953,13 +4023,28 @@ def upload_from_sheet(args) -> int:
 
 @dataclass(frozen=True)
 class SyncTarget:
-    """One already-uploaded row whose Sheet metadata this run will push to
+    """One already-uploaded row whose Sheet metadata this run may push to
     Internet Archive."""
 
     row_number: int
     identifier: str        # the real, permanent one, from ia_identifier
     uploaded_as: str       # the item to actually send to, from ia_url
     metadata: dict[str, str]
+    # What this row would send, hashed, as of the run's initial read; and
+    # what `ia_sync_hash` held at that same moment. The row pushes when they
+    # differ. Both captured at READ time: re-deriving content_hash at write
+    # time would stamp a human edit made mid-run as already-synced, losing it
+    # permanently. See docs/DECISIONS.md, "A row pushes only when its content
+    # changed".
+    content_hash: str = ""
+    stored_hash: str = ""
+    # This row's file_template candidate from the RAW cells, re-checked
+    # against a fresh read before the stamp write - see split_moved_targets().
+    source_fingerprint: str = ""
+    # split_moved_targets() reads this. A sync target addresses a row that
+    # uploaded under an earlier run, so it is never a number this run minted;
+    # the guard is always called with reserved_already=True.
+    newly_minted: bool = False
 
 
 @dataclass(frozen=True)
@@ -4042,6 +4127,12 @@ class SyncSummary:
     checked: int
     outcome: PushOutcome
     skipped: tuple[RowFailure, ...] = ()
+    # Rows this run read, found already in sync, and did not send. Its own
+    # count rather than folded into `checked`: on the steady state it is
+    # nearly the whole Sheet, and an operator watching an hourly job needs
+    # "4,212 already in sync, 1 updated" to read as a working run rather than
+    # as a run that did almost nothing.
+    already_synced: int = 0
 
     @property
     def pushed(self) -> int:
@@ -4070,6 +4161,7 @@ class SyncSummary:
             "pushed": self.pushed,
             "changed": self.changed,
             "unchanged": self.unchanged,
+            "already_synced": self.already_synced,
             "failures": [failure.as_record() for failure in self.outcome.failures],
             "skipped": [skip.as_record() for skip in self.skipped],
         }
@@ -4086,6 +4178,11 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
         f"{summary.changed} item(s) updated successfully, {summary.unchanged} unchanged, "
         f"{summary.failed} error(s)"
     ]
+    if summary.already_synced:
+        lines.append(
+            f"{_pluralize(summary.already_synced, 'row')} already in sync (unchanged since "
+            "its last push, so nothing was sent)"
+        )
     if summary.skipped:
         lines.append(
             f"{_pluralize(len(summary.skipped), 'row')} skipped (not safely targetable)"
@@ -4124,7 +4221,11 @@ def try_log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) 
 
 
 def plan_sync_targets(
-    rows: list[dict[str, str]], column_map: ColumnMap, live: bool, project_id: str
+    rows: list[dict[str, str]],
+    column_map: ColumnMap,
+    live: bool,
+    project_id: str,
+    file_template: str,
 ) -> tuple[list[SyncTarget], list[RowValidation]]:
     """Decides which rows this run will correct, and what it will send.
 
@@ -4140,12 +4241,14 @@ def plan_sync_targets(
     on an item that may not exist is a different problem, and `upload` already
     retries those under their existing identifier.
 
-    Every DONE row is sent, not only rows that look changed. Internet Archive
-    answers "no changes to _meta.xml" for an item that already matches, which
-    update_metadata_row turns into MetadataUnchanged and the runner counts as
-    `unchanged` rather than an error - so a full sync is idempotent by
-    construction and needs no per-row change detection, no extra tool-owned
-    column, and no second place for the Sheet and the item to drift apart.
+    A row is sent only when its content changed. `content_hash` is what this
+    row would send, hashed; `stored_hash` is what it last successfully sent,
+    read out of `ia_sync_hash`. split_unchanged() compares them. This
+    reverses the original decision that every DONE row is sent every run -
+    that was correct for a hand-run command over a few hundred rows and does
+    not survive ~4,000 rows on an hourly schedule, where it is ~4,000
+    pointless writes an hour and a log in which a real edit is invisible. See
+    docs/DECISIONS.md, "A row pushes only when its content changed".
 
     Blank cells are dropped by update_metadata_row, so a cleared cell means
     "leave this field alone" and REMOVE_TAG deletes - identical to the --csv
@@ -4156,6 +4259,9 @@ def plan_sync_targets(
     problem rather than a silent skip: the operator edited it expecting the
     edit to reach the site."""
     fields = sheet_metadata_fields(column_map)
+    # Raw cells: sync never calls resolve_sheet_files(), so row['file'] has
+    # not been rewritten and these compare correctly against a fresh read.
+    fingerprints = sheet_row_fingerprints(rows, file_template)
     targets: list[SyncTarget] = []
     problems: list[RowValidation] = []
 
@@ -4229,51 +4335,238 @@ def plan_sync_targets(
             )
             continue
 
+        metadata = {key: value for key, value in row.items() if key in fields}
         targets.append(
             SyncTarget(
                 row_number=row_number,
                 identifier=identifier,
                 uploaded_as=uploaded_as,
-                metadata={key: value for key, value in row.items() if key in fields},
+                metadata=metadata,
+                content_hash=sync_hash(metadata_to_send(metadata)),
+                stored_hash=(row.get(IA_SYNC_HASH_COLUMN) or "").strip(),
+                source_fingerprint=fingerprints.get(row_number, ""),
             )
         )
 
     return targets, problems
 
 
-def run_sheet_sync(targets: list[SyncTarget], log_path: Path, live: bool) -> PushOutcome:
-    """Its own loop rather than run_rows(): that helper keys everything off
-    `row["identifier"]`, and on the Sheet path that column holds the DONOR's
-    archival reference, not this tool's identifier. Reusing it would have
-    meant writing the tool's identifier into a column that means something
-    else.
+def split_unchanged(targets: list[SyncTarget]) -> tuple[list[SyncTarget], list[SyncTarget]]:
+    """Returns (to_push, already_synced).
 
-    Collects each failure as it counts it, rather than counting now and
-    recovering the errors from the log afterwards. The caller needs both, and
-    a log line that failed to write would otherwise quietly shorten the
-    summary's failure list while leaving its count intact."""
-    succeeded = 0
-    unchanged = 0
-    failures: list[RowFailure] = []
-    total = len(targets)
-    for position, target in enumerate(targets, start=1):
-        print(f"[{position}/{total}] updating metadata for {target.uploaded_as}")
+    Its own function rather than a filter inside plan_sync_targets, so the
+    gate can be tested on its own and so the dry run can report both halves
+    without re-deriving anything.
+
+    A blank stored hash pushes. That covers a row that has never synced and a
+    row whose `ia_sync_hash` cell an operator cleared on purpose - the
+    documented lever for forcing a re-sync, and deliberately the same code
+    path, since an operator clearing a cell should get exactly what a fresh
+    row gets."""
+    to_push: list[SyncTarget] = []
+    already_synced: list[SyncTarget] = []
+    for target in targets:
+        (already_synced if target.content_hash == target.stored_hash else to_push).append(target)
+    return to_push, already_synced
+
+
+@dataclass(frozen=True)
+class SheetSyncRun:
+    """The push -> stamp loop, chunked. Mirrors SheetUploadRun, which does
+    the same job for reserve -> upload -> confirm.
+
+    Chunking is not an optimisation here, it is the interruption-tolerance
+    design. The Mac this runs on sleeps and shuts down unpredictably,
+    including mid-run, so no run is guaranteed to finish. One batchUpdate at
+    the END of a run would stamp nothing when the run is killed and the next
+    run would re-push everything; one write per row would blow through the
+    Sheets API's 60 writes/minute/user. One batch per chunk is a single API
+    request per chunk - about 8 for a 4,000-row re-sync - and a kill costs at
+    most one chunk's stamps, whose rows simply push again next time."""
+
+    client: SheetClient
+    columns: SyncColumns
+    file_template: str
+    log_path: Path
+    live: bool
+    chunk_size: int = CHUNK_SIZE
+
+    def execute(self, targets: list[SyncTarget]) -> PushOutcome:
+        succeeded = 0
+        unchanged = 0
+        failures: list[RowFailure] = []
+        total = len(targets)
+        position = 0
+
+        for chunk in chunk_rows(targets, self.chunk_size):
+            stamped: list[tuple[int, str]] = []
+            pushed: list[SyncTarget] = []
+
+            for target in chunk:
+                position += 1
+                print(f"[{position}/{total}] updating metadata for {target.uploaded_as}")
+                try:
+                    update_metadata_row(target.metadata, target.uploaded_as)
+                except MetadataUnchanged:
+                    # Internet Archive saying "no changes to _meta.xml" means
+                    # the item already matches the Sheet. That is a successful
+                    # reconciliation and it stamps - leaving it unstamped
+                    # would make exactly the rows this gating exists to quiet
+                    # re-push on every run, forever.
+                    unchanged += 1
+                    stamped.append((target.row_number, target.content_hash))
+                    pushed.append(target)
+                    self._log(target, "unchanged")
+                except Exception as exc:
+                    # No stamp. A failed row retries next run, which is the
+                    # whole recovery story for a transient Internet Archive
+                    # error.
+                    failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
+                    print(f"    - {format_row_error(exc)}")
+                    self._log(target, "failure", error=str(exc))
+                else:
+                    succeeded += 1
+                    stamped.append((target.row_number, target.content_hash))
+                    pushed.append(target)
+                    self._log(target, "success")
+
+            self._stamp(stamped, pushed)
+
+        return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
+
+    def _stamp(self, stamped: list[tuple[int, str]], pushed: list[SyncTarget]) -> None:
+        """Records what this chunk pushed, in one batch, at the rows this run
+        planned for - having first proved those are still the same rows.
+
+        Identity is checked late; content was captured early. The hash
+        written is the one computed when the row was READ (it arrives here in
+        `stamped`), while whether the row is still the same row is decided
+        now. Re-deriving the hash from the Sheet's current cells instead
+        would stamp a human edit made during the run as already-synced, and
+        that edit would be lost permanently with nothing to notice it."""
+        if not stamped:
+            return
+
+        safe = self._verified(pushed)
+        safe_rows = {target.row_number for target in safe}
+        updates = stamp_updates(
+            [(row, digest) for row, digest in stamped if row in safe_rows],
+            self.columns,
+            utc_timestamp(),
+        )
         try:
-            update_metadata_row(target.metadata, target.uploaded_as)
-        except MetadataUnchanged:
-            unchanged += 1
-            log_result(log_path, target.identifier, "", "unchanged", live, uploaded_as=target.uploaded_as)
+            write_cells_if_any(self.client, updates)
         except Exception as exc:
-            failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
-            print(f"    - {format_row_error(exc)}")
-            log_result(
-                log_path, target.identifier, "", "failure", live,
-                error=str(exc), uploaded_as=target.uploaded_as,
+            print(
+                f"the Sheet stamp write failed: {exc}. The metadata IS on Internet Archive; "
+                f"{_pluralize(len(updates) // 2, 'row')} will simply be sent again next run "
+                "and reported as unchanged. Continuing.",
+                file=sys.stderr,
             )
-        else:
-            succeeded += 1
-            log_result(log_path, target.identifier, "", "success", live, uploaded_as=target.uploaded_as)
-    return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
+
+    def _verified(self, pushed: list[SyncTarget]) -> list[SyncTarget]:
+        """The rows still at the position this run planned for them.
+
+        reserved_already=True: this leg checks the fingerprint AND the
+        `ia_identifier` cell. SHEET-PROTOCOL.md warns that checking
+        `ia_identifier` can be tautological - it is, on upload's
+        reserve->confirm leg, because reserve wrote that value moments
+        earlier and the check would be verifying its own write.
+        `sync-metadata` never writes `ia_identifier`: it reads it at the
+        initial read and compares here, so nothing is circular.
+
+        Every failure below skips the whole chunk's stamp rather than
+        raising. By this point permanent public metadata has already changed,
+        and an unstamped row costs one repeat next run - a stack trace in
+        place of the run summary costs the operator the log path.
+
+        All five messages below say "the metadata IS on Internet Archive":
+        every one of them fires after the chunk already pushed, so an
+        operator reading any single one must be told the same thing an
+        operator reading any other one is told - an inconsistency here reads
+        as "some of these failures mean the run failed" when none of them
+        do."""
+        try:
+            snapshot = read_sheet_snapshot(self.client, self.file_template)
+        except MissingWriteBackColumns as exc:
+            # sync-metadata only READS these four columns - it never writes
+            # them, unlike upload's own equivalent message this one used to
+            # share verbatim. And by the time this runs, locate_write_back_
+            # columns() has already passed once, at startup (sync_from_sheet),
+            # so reaching this branch means the column was there when the run
+            # began and disappeared while it was in progress.
+            print(
+                f"a column this run reads to confirm a row's identity is gone: {exc}. It was "
+                "there when this run started. The metadata IS on Internet Archive; these rows "
+                "are sent again next run and reported as unchanged. Nothing stamped this "
+                "chunk.",
+                file=sys.stderr,
+            )
+            return []
+        except Exception as exc:
+            print(
+                f"the Sheet could not be re-read before stamping: {exc}. The metadata IS on "
+                "Internet Archive; these rows re-push next run and report as unchanged.",
+                file=sys.stderr,
+            )
+            return []
+
+        try:
+            columns_now = locate_sync_columns(snapshot.column_map)
+        except MissingSyncColumns as exc:
+            print(
+                f"{exc} The metadata IS on Internet Archive; these rows are sent again next "
+                "run and reported as unchanged. Nothing stamped this chunk.",
+                file=sys.stderr,
+            )
+            return []
+        if columns_now != self.columns:
+            print(
+                "the Sheet's columns moved while this run was in progress, so every cell it "
+                "would stamp now lands in the wrong column. The metadata IS on Internet "
+                "Archive; these rows are sent again next run and reported as unchanged. "
+                "Nothing stamped this chunk.",
+                file=sys.stderr,
+            )
+            return []
+
+        still_there, moved = split_moved_targets(pushed, snapshot, reserved_already=True)
+        for target in moved:
+            if not target.source_fingerprint:
+                # A row whose file_template columns were already blank at
+                # read time fingerprints as "" (sheet_row_fingerprints()),
+                # which can never match - so this row lands here on every
+                # run regardless of whether anyone touched the Sheet. Telling
+                # the operator "the Sheet was edited" below would send them
+                # looking for an edit that may never have happened.
+                print(
+                    f"row {target.row_number} ('{target.identifier}') has no file_template "
+                    "fingerprint to confirm it is still the same row it was when this run "
+                    "started, so it is not stamped this run. The metadata IS on Internet "
+                    "Archive; this row is sent again next run and reported as unchanged.",
+                    file=sys.stderr,
+                )
+                continue
+            print(
+                f"row {target.row_number} is no longer the row this run read for "
+                f"'{target.identifier}' - the Sheet was edited while the run was in progress, "
+                "so stamping there would mark a different photograph as synced. The metadata "
+                "IS on Internet Archive; this row is sent again next run and reported as "
+                "unchanged.",
+                file=sys.stderr,
+            )
+        return still_there
+
+    def _log(self, target: SyncTarget, status: str, error: str | None = None) -> None:
+        log_result(
+            self.log_path,
+            target.identifier,
+            "",
+            status,
+            self.live,
+            error=error,
+            uploaded_as=target.uploaded_as,
+        )
 
 
 def check_uploaded_as(
@@ -4350,6 +4643,24 @@ def sync_from_sheet(args) -> int:
             )
             return 1
 
+    # Read and validated before any Sheet I/O, the same way and for the same
+    # reason upload's own --chunk-size is (see cmd_upload): chunk_rows()'s
+    # range(0, len(rows), chunk_size) raises ValueError for zero - but only
+    # after open_log/log_run_header have already run, leaving a log with a
+    # header and no summary - and silently yields zero chunks for a negative
+    # value, so the run pushes nothing and still reports success.
+    chunk_size = getattr(args, "chunk_size", None)
+    if chunk_size is None:
+        chunk_size = CHUNK_SIZE
+    if chunk_size <= 0:
+        print(
+            f"--chunk-size must be a positive number of items, not {chunk_size}. Zero raises "
+            "inside chunk_rows(); a negative value silently produces zero chunks, pushing "
+            "nothing while the run still reports success.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         sheet = read_sheet(args, registry, config, live, "sync-metadata")
     except SheetSetupFailed:
@@ -4369,7 +4680,46 @@ def sync_from_sheet(args) -> int:
         )
         return 1
 
-    targets, problems = plan_sync_targets(rows, column_map, live, config.project_id)
+    # All three checks are before anything is sent, and all three apply in
+    # test mode as well as live: a rehearsal that passes where the real run
+    # refuses is a false negative on the one run an operator trusts.
+    try:
+        sync_columns = locate_sync_columns(column_map)
+    except MissingSyncColumns as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    # _verified() re-checks this same thing before every stamp write, because
+    # a column can vanish mid-run - but relying on that alone lets a Sheet
+    # that never had ia_identifier_bib through the front door: ia_identifier
+    # and ia_uploaded absent means no row classifies DONE (refused above, at
+    # "no row is marked uploaded yet"), and ia_url absent means every row is
+    # a reported problem, but ia_identifier_bib absent is invisible here -
+    # rows plan, hash-gate, and push, and only then does _verified() catch
+    # it, per chunk, forever, stamping nothing while permanent metadata keeps
+    # going out. Checked here for the same reason check_file_template is.
+    try:
+        locate_write_back_columns(column_map)
+    except MissingWriteBackColumns as exc:
+        print(f"project '{config.project_id}': {exc}", file=sys.stderr)
+        return 1
+
+    # The moved-row guard fingerprints a row by its file_template columns.
+    # A template naming a column the Sheet lacks fingerprints EVERY row as
+    # "", which never matches - so nothing would ever be stamped and every
+    # row would re-push forever, silently. Header check only; no disk access.
+    try:
+        check_file_template(config.file_template, column_map)
+    except TemplateError as exc:
+        print(
+            f"project '{config.project_id}': {exc} - fix 'file_template' in {args.registry}",
+            file=sys.stderr,
+        )
+        return 1
+
+    targets, problems = plan_sync_targets(
+        rows, column_map, live, config.project_id, config.file_template
+    )
 
     if problems:
         print("\n".join(_format_result_lines(problems)))
@@ -4383,13 +4733,18 @@ def sync_from_sheet(args) -> int:
     print(format_field_receipt(column_map))
     print()
 
+    to_push, already_synced = split_unchanged(targets)
+
     if not targets:
         print("nothing to sync - no row is marked uploaded yet")
         return 1 if problems else 0
 
     if dry_run:
-        return print_sync_dry_run(targets, problems)
+        return print_sync_dry_run(to_push, already_synced, problems)
 
+    # From here every path is a real run - even the one that sends nothing -
+    # so every path gets a log. A dry run above never reaches this line and
+    # so still writes none, which is correct: it sent nothing to summarize.
     log_path = open_log(args.log_dir, "sync-metadata")
     try:
         log_run_header(log_path, config, column_map, live, dry_run)
@@ -4400,10 +4755,42 @@ def sync_from_sheet(args) -> int:
             file=sys.stderr,
         )
 
+    if not to_push:
+        # The steady state on an hourly schedule, and the console line must
+        # stay one quiet sentence: a run that says nothing useful is a run
+        # whose output stops being read. But this is the MOST common outcome
+        # of a scheduled run, and "ran, found nothing to do" has to be
+        # distinguishable from "did not run at all" - see OPERATIONS.md's
+        # tail-the-latest-log recipe - so it still gets the same header and
+        # summary record every other run writes, with the real (mostly zero)
+        # numbers in it.
+        summary = SyncSummary(
+            checked=len(rows),
+            outcome=PushOutcome(),
+            skipped=tuple(skipped_rows(problems)),
+            already_synced=len(already_synced),
+        )
+        try_log_run_summary(log_path, summary, live)
+        print(
+            f"nothing to sync - all {_pluralize(len(already_synced), 'uploaded row')} "
+            "already match their last push"
+        )
+        print(f"log written to {log_path}")
+        return 1 if problems else 0
+
+    sync_run = SheetSyncRun(
+        client=sheet.client,
+        columns=sync_columns,
+        file_template=config.file_template,
+        log_path=log_path,
+        live=live,
+        chunk_size=chunk_size,
+    )
     summary = SyncSummary(
         checked=len(rows),
-        outcome=run_sheet_sync(targets, log_path, live),
+        outcome=sync_run.execute(to_push),
         skipped=tuple(skipped_rows(problems)),
+        already_synced=len(already_synced),
     )
     try_log_run_summary(log_path, summary, live)
 
@@ -5078,6 +5465,16 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional with --live, where identifiers are unstamped. Distinct from "
             "--resume-from, which says which rows to SKIP; this says where the rows that "
             "remain should be SENT."
+        ),
+    )
+    sync_parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=CHUNK_SIZE,
+        help=(
+            f"Rows per push/stamp batch (Sheet path only; must be positive; default "
+            f"{CHUNK_SIZE}). Each batch costs one Sheets write, and a run interrupted "
+            "mid-way keeps every chunk it finished."
         ),
     )
 

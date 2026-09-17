@@ -28,6 +28,12 @@ def normalize_header(header: str) -> str:
 
 
 HELD_BACK_MARKER = "(lcps internal)"
+
+# The columns this tool writes and therefore never uploads. Named constants
+# for the two sync-state ones because sync_state.py needs them by name.
+IA_SYNC_HASH_COLUMN = "ia_sync_hash"
+IA_LAST_SYNCED_COLUMN = "ia_last_synced"
+
 # `identifier` is deliberately NOT here: the real Sheet's own `Identifier`
 # column holds the donor's original archival reference (e.g.
 # "CD 1 01 53 58 1 Central SS"), not a minted IA identifier - that lives in
@@ -35,7 +41,21 @@ HELD_BACK_MARKER = "(lcps internal)"
 # `ia_` prefix so it cannot collide with whatever a Sheet author already
 # named a column. See docs/DECISIONS.md, "Tool-owned Sheet columns are all
 # `ia_`-prefixed".
-RESERVED_FIELDS = frozenset({"file", "ia_identifier", "ia_identifier_bib", "ia_uploaded", "ia_url"})
+#
+# The prefix is a NAMING CONVENTION; this frozenset is the enforcement. They
+# are not the same thing, and issue #24 was written believing they were - as
+# specified, its two new `ia_` columns would have shipped to Internet Archive
+# as item metadata on every push. Adding an `ia_` column without adding it
+# here uploads it.
+RESERVED_FIELDS = frozenset({
+    "file",
+    "ia_identifier",
+    "ia_identifier_bib",
+    "ia_uploaded",
+    "ia_url",
+    IA_SYNC_HASH_COLUMN,
+    IA_LAST_SYNCED_COLUMN,
+})
 
 
 def is_held_back(header: str) -> bool:

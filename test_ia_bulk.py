@@ -16,7 +16,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
-from column_map import build_column_map
+from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
     read_csv,
     load_registry,
@@ -4684,6 +4684,7 @@ def _snapshot(claimed):
 
     return SheetSnapshot(
         columns=SheetColumns(ia_identifier=2, ia_uploaded=3, ia_url=4, ia_identifier_bib=5),
+        column_map=build_column_map(SHEET_HEADER),
         grid=[],
         fingerprints={},
         claimed_identifiers=frozenset(claimed),
@@ -5211,6 +5212,7 @@ def _guard_snapshot(fingerprints, grid):
 
     return SheetSnapshot(
         columns=SheetColumns(ia_identifier=2, ia_uploaded=3, ia_url=4, ia_identifier_bib=5),
+        column_map=build_column_map(SHEET_HEADER),
         grid=grid,
         fingerprints=fingerprints,
         claimed_identifiers=frozenset(),
@@ -8097,14 +8099,170 @@ SYNC_STAMP = "20260823t161331"
 SYNC_URL = f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
 
 
+# The sync path needs two more columns than the upload path: sync-metadata
+# records what it last pushed so it can send only the rows that changed.
+# G=ia_sync_hash, H=ia_last_synced.
+SYNC_SHEET_HEADER = SHEET_HEADER + ["ia_sync_hash", "ia_last_synced"]
+
+
 def _synced_grid(rows=None):
     """A Sheet whose rows are already uploaded, as upload's confirm write
-    leaves it: ia_identifier, ia_uploaded and ia_url all populated."""
+    leaves it: ia_identifier, ia_uploaded and ia_url all populated, and the
+    two sync-state cells still blank - so every row reads as changed and
+    pushes, which is what the pre-hash-gating tests all assume."""
     default = [[
         "Stone Customshouse", "photo1.jpg",
         "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "", "",
     ]]
-    return [SHEET_HEADER] + (default if rows is None else rows)
+    return [SYNC_SHEET_HEADER] + (default if rows is None else rows)
+
+
+def test_read_sheet_snapshot_exposes_the_column_map():
+    """SheetSyncRun re-locates its two sync-state columns in the fresh read
+    to detect that they moved, the same way upload compares SheetColumns.
+    The snapshot already builds a ColumnMap; keeping it costs nothing and
+    saves a second parse of the same grid."""
+    from ia_bulk import read_sheet_snapshot
+
+    client = FakeSheetClient(_synced_grid())
+    snapshot = read_sheet_snapshot(client, "{file}")
+
+    assert snapshot.column_map.field_names["ia_sync_hash"] == "ia_sync_hash"
+
+
+def test_plan_sync_targets_hashes_what_the_row_would_send(tmp_path):
+    """Computed at READ time and carried on the target. Re-deriving it at
+    write time would stamp a mid-run human edit as already-synced, and that
+    edit would be lost permanently with nothing to notice it."""
+    from ia_bulk import plan_sync_targets
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, problems = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert problems == []
+    assert targets[0].content_hash == sync_hash(metadata_to_send(targets[0].metadata))
+
+
+def test_plan_sync_targets_reads_the_stored_hash_off_the_row():
+    from ia_bulk import plan_sync_targets
+
+    grid = _synced_grid([[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "deadbeef", "2026-09-01T00:00:00Z",
+    ]])
+    column_map, rows = grid_to_rows(grid)
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].stored_hash == "deadbeef"
+
+
+def test_plan_sync_targets_treats_a_blank_hash_cell_as_no_stored_hash():
+    """A never-synced row, and a row whose hash cell an operator cleared to
+    force a re-sync, are the same case and must both push."""
+    from ia_bulk import plan_sync_targets
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].stored_hash == ""
+    assert targets[0].content_hash != ""
+
+
+def test_plan_sync_targets_fingerprints_the_row_for_the_moved_row_guard():
+    """The fingerprint is the file_template candidate from the RAW cells -
+    the same value sheet_row_fingerprints() produces - so it can be compared
+    against a fresh read of the Sheet, which has raw cells in it."""
+    from ia_bulk import plan_sync_targets, sheet_row_fingerprints
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].source_fingerprint == sheet_row_fingerprints(rows, "{file}")[2]
+    assert targets[0].source_fingerprint != ""
+
+
+def test_sync_target_is_never_newly_minted():
+    """split_moved_targets reads this attribute. A sync target addresses a
+    row that uploaded long ago, so it is never a number this run minted -
+    and the guard is always called on the post-reserve leg."""
+    from ia_bulk import plan_sync_targets
+
+    column_map, rows = grid_to_rows(_synced_grid())
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].newly_minted is False
+
+
+def _sync_target(row_number=2, content_hash="new", stored_hash=""):
+    from ia_bulk import SyncTarget
+
+    return SyncTarget(
+        row_number=row_number,
+        identifier=f"lcps-astoriaphotos-{row_number:05d}",
+        uploaded_as=f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-{row_number:05d}",
+        metadata={"title": "Pier 39"},
+        content_hash=content_hash,
+        stored_hash=stored_hash,
+    )
+
+
+def test_split_unchanged_pushes_a_row_whose_content_changed():
+    from ia_bulk import split_unchanged
+
+    to_push, already = split_unchanged([_sync_target(content_hash="b", stored_hash="a")])
+
+    assert len(to_push) == 1
+    assert already == []
+
+
+def test_split_unchanged_holds_back_a_row_that_already_matches():
+    from ia_bulk import split_unchanged
+
+    to_push, already = split_unchanged([_sync_target(content_hash="a", stored_hash="a")])
+
+    assert to_push == []
+    assert len(already) == 1
+
+
+def test_split_unchanged_pushes_a_row_that_has_never_synced():
+    """A blank stored hash. Also the state an operator creates deliberately
+    by clearing the cell to force a re-sync."""
+    from ia_bulk import split_unchanged
+
+    to_push, already = split_unchanged([_sync_target(content_hash="a", stored_hash="")])
+
+    assert len(to_push) == 1
+    assert already == []
+
+
+def test_split_unchanged_preserves_order():
+    """Rows are reported to a human by row number; reordering them would make
+    the output disagree with the Sheet on screen next to it."""
+    from ia_bulk import split_unchanged
+
+    targets = [
+        _sync_target(row_number=2, content_hash="a", stored_hash=""),
+        _sync_target(row_number=3, content_hash="b", stored_hash="b"),
+        _sync_target(row_number=4, content_hash="c", stored_hash=""),
+    ]
+    to_push, already = split_unchanged(targets)
+
+    assert [t.row_number for t in to_push] == [2, 4]
+    assert [t.row_number for t in already] == [3]
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
@@ -8117,24 +8275,648 @@ def _sync_sheet_args(tmp_path, registry_path, **overrides):
         resume_from=None,
         from_log=None,
         dry_run=False,
+        chunk_size=CHUNK_SIZE,
     )
     for name, value in overrides.items():
         setattr(args, name, value)
     return args
 
 
-def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent):
+def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
+    """RecordingSheetClient, not FakeSheetClient: sync-metadata now WRITES to
+    the Sheet (the hash stamp), and it re-reads before each write for the
+    moved-row guard, so the fake has to apply writes to its own grid the way
+    a real Sheet would.
+
+    Returns (registry_path, client) - a test that only cares about what was
+    sent can ignore the second element."""
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    client = FakeSheetClient(grid)
+    if client is None:
+        client = RecordingSheetClient(grid, SheetUploadRecorder())
     monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
     monkeypatch.setattr(
         "ia_bulk.update_metadata_row",
         lambda metadata, target: sent.append((target, metadata)),
     )
-    return registry_path
+    return registry_path, client
+
+
+def _pushed_rows(client):
+    """The (row_number, hash) pairs a run stamped, read back off the fake
+    Sheet's grid - i.e. what a NEXT run would see, which is the property that
+    actually matters."""
+    header = client.grid[0]
+    hash_index = header.index("ia_sync_hash")
+    return [
+        (index + 1, row[hash_index])
+        for index, row in enumerate(client.grid)
+        if index > 0 and hash_index < len(row) and row[hash_index]
+    ]
+
+
+def _run_sync_twice(tmp_path, monkeypatch, grid, edit=None):
+    """A run, then a second run over the Sheet the first one left behind -
+    the only way to test change detection, since the state IS the Sheet.
+    `edit` mutates the grid between the two runs."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(grid, SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+
+    first, second = [], []
+
+    def record_into(destination):
+        # Bound as a default argument, not captured by closure: two stubs
+        # closing over one rebound name is the kind of thing that reads as
+        # correct and silently records both runs into the same list.
+        return lambda metadata, target, out=destination: out.append(target)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", record_into(first))
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    if edit is not None:
+        edit(client.grid)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", record_into(second))
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    return first, second, exit_code
+
+
+def test_sync_over_an_unedited_sheet_pushes_nothing_and_says_so(
+    tmp_path, monkeypatch, capsys
+):
+    """Acceptance criterion 1. The whole point: on an hourly schedule the
+    steady state must be silent."""
+    first, second, exit_code = _run_sync_twice(tmp_path, monkeypatch, _synced_grid())
+    out = capsys.readouterr().out
+
+    assert len(first) == 1
+    assert second == []
+    assert "already match their last push" in out
+    assert exit_code == 0
+
+
+def _all_sync_log_lines(tmp_path):
+    """Every record in every sync-metadata log the run has written so far, in
+    write order.
+
+    Deliberately not "the one log file this run wrote": open_log() names a
+    log by wall-clock second, so two cmd_sync_metadata() calls inside one
+    fast test can legitimately collide on the same filename and append to
+    it. Reading the whole directory and diffing by record count is robust to
+    that collision either way - one growing file, or two separate ones."""
+    lines: list[str] = []
+    for path in sorted((tmp_path / "logs").glob("sync-metadata-*.jsonl")):
+        lines.extend(path.read_text(encoding="utf-8").strip().splitlines())
+    return [json.loads(line) for line in lines if line]
+
+
+def test_sync_over_an_unedited_sheet_still_writes_a_log(tmp_path, monkeypatch, capsys):
+    """The steady state is the MOST common outcome on an hourly schedule, so
+    it is exactly the run an unattended operator most needs a record of -
+    OPERATIONS.md's tail-the-latest-log recipe depends on every run leaving
+    one. The console line stays the single quiet sentence; only the log gets
+    the new record, with the real (mostly zero) numbers in it."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))  # first run: pushes and stamps
+    capsys.readouterr()
+    before = _all_sync_log_lines(tmp_path)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))  # steady state
+    out = capsys.readouterr().out
+    after = _all_sync_log_lines(tmp_path)
+
+    new_entries = after[len(before):]
+    assert any(entry["record"] == "run_header" for entry in new_entries)
+    summary = new_entries[-1]
+    assert summary["record"] == "run_summary"
+    assert summary["checked"] == 1
+    assert summary["changed"] == 0
+    assert summary["unchanged"] == 0
+    assert summary["already_synced"] == 1
+    assert "already match their last push" in out
+    assert "log written to" in out
+    assert exit_code == 0
+
+
+def test_sync_pushes_exactly_the_row_whose_cell_was_edited(tmp_path, monkeypatch):
+    """Acceptance criterion 2."""
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def retitle_the_second_row(grid):
+        grid[2][0] = "Photo 2, corrected"
+
+    first, second, _ = _run_sync_twice(
+        tmp_path, monkeypatch, _synced_grid(rows), edit=retitle_the_second_row
+    )
+
+    assert len(first) == 2
+    assert second == [f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"]
+
+
+def test_clearing_one_hash_cell_re_syncs_only_that_row(tmp_path, monkeypatch):
+    """Acceptance criterion 3, first half. The operational lever, and the
+    single carve-out to the "never edit an ia_ column" rule: clear the cell,
+    never type into it."""
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def clear_the_second_rows_hash(grid):
+        grid[2][6] = ""
+
+    first, second, _ = _run_sync_twice(
+        tmp_path, monkeypatch, _synced_grid(rows), edit=clear_the_second_rows_hash
+    )
+
+    assert len(first) == 2
+    assert second == [f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"]
+
+
+def test_clearing_the_whole_hash_column_re_syncs_everything(tmp_path, monkeypatch):
+    """Acceptance criterion 3, second half."""
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def clear_the_column(grid):
+        for row in grid[1:]:
+            row[6] = ""
+
+    first, second, _ = _run_sync_twice(
+        tmp_path, monkeypatch, _synced_grid(rows), edit=clear_the_column
+    )
+
+    assert len(first) == 2
+    assert len(second) == 2
+
+
+def test_sync_summary_counts_the_rows_it_held_back(tmp_path, monkeypatch, capsys):
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def retitle_the_second_row(grid):
+        grid[2][0] = "Photo 2, corrected"
+
+    _run_sync_twice(tmp_path, monkeypatch, _synced_grid(rows), edit=retitle_the_second_row)
+    out = capsys.readouterr().out
+
+    assert "1 row already in sync" in out
+
+
+def test_sync_stamps_a_row_that_pushed_successfully(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(sent) == 1
+    assert len(_pushed_rows(client)) == 1
+
+
+def test_sync_stamps_the_read_time_hash_and_a_timestamp(tmp_path, monkeypatch):
+    """Both cells, and the hash is the one computed from the row as READ."""
+    from ia_bulk import cmd_sync_metadata, plan_sync_targets
+
+    grid = _synced_grid()
+    column_map, rows = grid_to_rows(grid)
+    expected = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )[0][0].content_hash
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][6] == expected
+    assert client.grid[1][7] != ""
+
+
+def test_sync_does_not_stamp_a_row_whose_push_failed(tmp_path, monkeypatch):
+    """The cell is left untouched so the row retries on the next run. A
+    failure means the item may be in a state nobody intended; stamping it
+    would declare it settled."""
+    from ia_bulk import cmd_sync_metadata
+
+    def boom(metadata, target):
+        raise RuntimeError("Internet Archive returned 503")
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", boom)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert _pushed_rows(client) == []
+
+
+def test_sync_stamps_a_row_internet_archive_reports_unchanged(tmp_path, monkeypatch):
+    """"no changes to _meta.xml" means the item already matches the Sheet -
+    a successful reconciliation, not a failure. Leaving it unstamped would
+    make exactly the rows this feature exists to quiet re-push every hour,
+    forever."""
+    from ia_bulk import MetadataUnchanged, cmd_sync_metadata
+
+    def unchanged(metadata, target):
+        raise MetadataUnchanged(target)
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", unchanged)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(_pushed_rows(client)) == 1
+
+
+def test_sync_stamps_each_chunk_as_it_goes(tmp_path, monkeypatch):
+    """Interruption tolerance, pinned. The Mac this runs on sleeps and shuts
+    down unpredictably, including mid-run. A run that dies during chunk 2
+    must leave chunk 1 stamped, so the rerun pushes only the remainder."""
+    from ia_bulk import cmd_sync_metadata
+
+    rows = [
+        [f"Photo {n}", f"photo{n}.jpg", f"lcps-astoriaphotos-{n:05d}",
+         "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-{n:05d}",
+         f"photo{n}.jpg", "", ""]
+        for n in range(1, 5)
+    ]
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(rows), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+
+    def die_on_the_third(metadata, target):
+        if target.endswith("00003"):
+            raise KeyboardInterrupt
+    monkeypatch.setattr("ia_bulk.update_metadata_row", die_on_the_third)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, chunk_size=2))
+
+    # Chunk 1 (rows 2-3) was stamped before chunk 2 was attempted.
+    assert [row for row, _ in _pushed_rows(client)] == [2, 3]
+
+
+def test_sync_does_not_stamp_a_row_that_moved_between_read_and_stamp(
+    tmp_path, monkeypatch, capsys
+):
+    """Row numbers are positional. If a human deletes a row above ours
+    mid-run, our row number now addresses a different photograph - stamping
+    there would mark a row synced that never was, and withhold its metadata
+    forever. Skip and report; it goes out on the next run."""
+    from ia_bulk import cmd_sync_metadata
+
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+        ["Photo 2", "photo2.jpg", "lcps-astoriaphotos-00002", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+         "photo2.jpg", "", ""],
+    ]
+
+    def delete_the_first_data_row(grid, read_count):
+        if read_count == 2:          # the guard's re-read, after the initial one
+            del grid[1]
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(
+        _synced_grid(rows), SheetUploadRecorder(), before_read=delete_the_first_data_row
+    )
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    # Row 2 now holds what was row 3. Neither row may be stamped at row 2.
+    assert _pushed_rows(client) == []
+    assert "edited while the run was in progress" in err
+
+
+def test_sync_does_not_blame_a_mid_run_edit_for_a_blank_fingerprint(
+    tmp_path, monkeypatch, capsys
+):
+    """A row whose file_template cell is already blank fingerprints as ""
+    (sheet_row_fingerprints()), which can never match - so split_moved_
+    targets() files it as moved on EVERY run, whether or not the Sheet was
+    touched. `file` is a RESERVED_FIELDS column, so clearing it does not
+    change the content hash by itself; this row also has a genuine pending
+    edit (blank stored hash), so it is a push candidate that then fails the
+    moved-row guard for a reason that has nothing to do with anyone editing
+    the Sheet mid-run. The message must not say otherwise."""
+    from ia_bulk import cmd_sync_metadata
+
+    grid = _synced_grid([[
+        "Stone Customshouse", "", "lcps-astoriaphotos-00001",
+        "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg", "", "",
+    ]])
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert len(sent) == 1
+    assert _pushed_rows(client) == []
+    assert "the Sheet was edited while the run was in progress" not in err
+    assert "no file_template fingerprint" in err
+    assert "IS on Internet Archive" in err
+
+
+def test_sync_stamps_normally_when_nothing_moved(tmp_path, monkeypatch):
+    """The guard must not fire on the ordinary case - a false positive here
+    means a row re-pushes every hour forever."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(_pushed_rows(client)) == 1
+
+
+def test_sync_does_not_stamp_when_the_sync_columns_moved(tmp_path, monkeypatch, capsys):
+    """A column inserted mid-run makes every cached column index wrong, so
+    every cell this run would write lands in the wrong column."""
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_column(grid, read_count):
+        if read_count == 2:
+            for row in grid:
+                row.insert(0, "new")
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(
+        _synced_grid(), SheetUploadRecorder(), before_read=insert_a_column
+    )
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "columns moved" in capsys.readouterr().err
+
+
+def test_sync_survives_a_failed_re_read(tmp_path, monkeypatch, capsys):
+    """A transient 503 on the guard's read must not end a run with a stack
+    trace after it has already changed permanent public metadata. The chunk
+    goes unstamped and re-pushes next run."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder(), raise_on_read=2)
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert _pushed_rows(client) == []
+    assert "could not be re-read" in err
+
+
+def test_sync_reports_and_continues_when_the_stamp_write_fails(tmp_path, monkeypatch, capsys):
+    """An exception inside write_cells_if_any must be reported, not raised:
+    the metadata is already on Internet Archive by this point, and an
+    unstamped row simply re-pushes next run and reports unchanged there.
+    Stopping the run instead would trade that harmless repeat for leaving
+    every later chunk unpushed."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder(), raise_on_write=1)
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert _pushed_rows(client) == []
+    assert "IS on Internet Archive" in err
+
+
+def test_sync_from_sheet_refuses_a_sheet_without_the_sync_state_columns(
+    tmp_path, monkeypatch, capsys
+):
+    """Without somewhere to record what it pushed, this command would send
+    every row on every run and nothing would fail to say so. On an hourly
+    schedule that is silent, permanent noise - the exact failure hash gating
+    exists to remove, so it must not be the fallback when a column is
+    missing."""
+    from ia_bulk import cmd_sync_metadata
+
+    grid = [SHEET_HEADER] + [[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+    ]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_sync_hash" in err
+    assert "ia_last_synced" in err
+
+
+def test_sync_from_sheet_refuses_missing_sync_columns_in_live_mode_too(
+    tmp_path, monkeypatch, capsys
+):
+    """A rehearsal that gates where the real run would not is not a
+    rehearsal. Same reasoning as the four write-back columns being required
+    in every mode."""
+    from ia_bulk import cmd_sync_metadata
+
+    live_url = "https://archive.org/details/lcps-astoriaphotos-00001"
+    grid = [SHEET_HEADER] + [[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", live_url, "photo1.jpg",
+    ]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_sync_hash" in capsys.readouterr().err
+
+
+def test_sync_from_sheet_refuses_a_sheet_without_ia_identifier_bib(
+    tmp_path, monkeypatch, capsys
+):
+    """ia_identifier_bib is the one write-back column that fails SILENTLY
+    when it is missing, unlike its three companions: without ia_identifier
+    or ia_uploaded no row classifies DONE (refused earlier, at "no row is
+    marked uploaded yet"), and without ia_url every row becomes a reported
+    problem. Without ia_identifier_bib alone, rows classify DONE, the hash
+    gate passes them, permanent metadata goes out to Internet Archive, and
+    only then does _verified() discover the column is gone and stamp
+    nothing - on every chunk, forever. Refused up front instead, before
+    anything is sent."""
+    from ia_bulk import cmd_sync_metadata
+
+    header = [
+        "Title", "file", "ia_identifier", "ia_uploaded", "ia_url",
+        "ia_sync_hash", "ia_last_synced",
+    ]
+    grid = [header] + [[
+        "Stone Customshouse", "photo1.jpg", "lcps-astoriaphotos-00001",
+        "2026-08-23T16:13:31Z", SYNC_URL, "", "",
+    ]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_identifier_bib" in err
+
+
+@pytest.mark.parametrize("chunk_size", [0, -1])
+def test_sync_from_sheet_rejects_a_non_positive_chunk_size(
+    tmp_path, monkeypatch, capsys, chunk_size
+):
+    """Same failure shape as upload's own --chunk-size guard (see
+    test_cmd_upload_rejects_a_non_positive_chunk_size): 0 raises inside
+    chunk_rows() (range() forbids a zero step); -1 silently yields zero
+    chunks, so the run pushes nothing and still reports success. Checked
+    before any Sheet I/O."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    exit_code = cmd_sync_metadata(
+        _sync_sheet_args(tmp_path, registry_path, chunk_size=chunk_size)
+    )
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert err.splitlines() == [
+        f"--chunk-size must be a positive number of items, not {chunk_size}. Zero raises "
+        "inside chunk_rows(); a negative value silently produces zero chunks, pushing "
+        "nothing while the run still reports success."
+    ]
+
+
+def test_sync_from_sheet_refuses_a_file_template_naming_a_column_the_sheet_lacks(
+    tmp_path, monkeypatch, capsys
+):
+    """sync-metadata did not care about file_template until the moved-row
+    guard arrived - the guard's fingerprint is built from those columns.
+    sheet_row_fingerprints() fingerprints a row it cannot resolve as "",
+    which never matches, so a broken template would report EVERY row as
+    moved, stamp nothing, and re-push everything forever without ever
+    failing. Refused up front instead.
+
+    A header check only: no disk access, so a correction still does not
+    depend on the photo drive being attached."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), file_template="{no_such_column}")),
+        encoding="utf-8",
+    )
+    sent = []
+    client = RecordingSheetClient(_synced_grid(), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr(
+        "ia_bulk.update_metadata_row",
+        lambda metadata, target: sent.append((target, metadata)),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert sent == []
+    assert "no_such_column" in err
+
+
+def test_sync_from_sheet_still_runs_with_a_valid_file_template(tmp_path, monkeypatch):
+    """The refusal above must not fire on the ordinary case."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert len(sent) == 1
 
 
 def test_sync_from_sheet_sends_the_sheets_own_metadata_to_the_recorded_item(
@@ -8147,7 +8929,7 @@ def test_sync_from_sheet_sends_the_sheets_own_metadata_to_the_recorded_item(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8168,14 +8950,18 @@ def test_sync_from_sheet_never_sends_tool_owned_or_pipeline_owned_columns(
     Internet Archive will not change it after upload."""
     from ia_bulk import cmd_sync_metadata
 
-    header = SHEET_HEADER + ["Notes (LCPS Internal)", "Mediatype", "Identifier"]
+    header = SHEET_HEADER + [
+        "ia_sync_hash", "ia_last_synced",
+        "Notes (LCPS Internal)", "Mediatype", "Identifier",
+    ]
     grid = [header] + [[
         "Stone Customshouse", "photo1.jpg",
         "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "", "",
         "donor phone number", "texts", "CD 1 01 53 58 1 Central SS",
     ]]
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -8184,6 +8970,7 @@ def test_sync_from_sheet_never_sends_tool_owned_or_pipeline_owned_columns(
     for excluded in (
         "notes_lcps_internal",
         "ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib",
+        "ia_sync_hash", "ia_last_synced",
         "mediatype",
         "identifier",
         "file",
@@ -8203,7 +8990,7 @@ def test_sync_from_sheet_skips_rows_that_are_not_uploaded_yet(tmp_path, monkeypa
         ["Reserved only", "photo3.jpg", "lcps-astoriaphotos-00002", "", "", ""],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -8223,7 +9010,7 @@ def test_sync_from_sheet_reports_an_uploaded_row_with_no_usable_url(
          "2026-08-23T16:13:31Z", "", "photo1.jpg"],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8241,7 +9028,7 @@ def test_sync_from_sheet_refuses_to_send_a_live_correction_to_a_test_item(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
     out = capsys.readouterr().out
@@ -8261,7 +9048,7 @@ def test_sync_from_sheet_refuses_to_send_a_test_correction_to_a_real_item(
          "https://archive.org/details/lcps-astoriaphotos-00001", "photo1.jpg"],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8286,7 +9073,7 @@ def test_sync_from_sheet_refuses_an_item_belonging_to_another_project(
          "photo1.jpg"],
     ])
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
     out = capsys.readouterr().out
@@ -8344,7 +9131,7 @@ def test_sync_from_sheet_dry_run_shows_what_would_change_not_just_field_names(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
     monkeypatch.setattr(
         "ia_bulk.fetch_current_metadata",
         lambda identifier: {"title": "Stone Customshuose"},
@@ -8370,7 +9157,7 @@ def test_sync_from_sheet_dry_run_reports_an_item_that_already_matches(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
     monkeypatch.setattr(
         "ia_bulk.fetch_current_metadata",
         lambda identifier: {"title": "Stone Customshouse"},
@@ -8391,7 +9178,7 @@ def test_sync_from_sheet_dry_run_survives_an_item_it_cannot_read(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
     monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: None)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
@@ -8400,6 +9187,91 @@ def test_sync_from_sheet_dry_run_survives_an_item_it_cannot_read(
     assert "could not read its current metadata" in out
     assert "1 item could not be read" in out
     assert exit_code == 0
+
+
+def test_sync_dry_run_reports_the_gate_before_reading_anything(
+    tmp_path, monkeypatch, capsys
+):
+    """Preview in the destination's vocabulary, and say what is left
+    untouched. It also cuts the dry run's Internet Archive reads from one per
+    uploaded row to one per CHANGED row - on the steady state, from ~4,000
+    to none."""
+    from ia_bulk import cmd_sync_metadata
+
+    reads = []
+    monkeypatch.setattr(
+        "ia_bulk.fetch_current_metadata", lambda identifier: reads.append(identifier) or {}
+    )
+
+    rows = [
+        ["Photo 1", "photo1.jpg", "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z",
+         f"https://archive.org/details/zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001",
+         "photo1.jpg", "", ""],
+    ]
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(_synced_grid(rows), SheetUploadRecorder())
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda metadata, target: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))   # stamps row 2
+    reads.clear()
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert reads == []
+    assert "already in sync" in out
+    assert "would not be sent" in out
+
+
+def test_sync_dry_run_does_not_stamp_anything(tmp_path, monkeypatch):
+    """--dry-run sends nothing, so there is nothing to record having sent.
+    Stamping here would make the next real run skip the rows the dry run
+    only previewed."""
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, client = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+
+    assert sent == []
+    assert _pushed_rows(client) == []
+
+
+def test_sync_dry_run_reports_a_never_stamped_row_as_having_no_push_on_record(
+    monkeypatch, capsys
+):
+    """A blank hash means never stamped, not edited."""
+    from ia_bulk import print_sync_dry_run
+
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+
+    print_sync_dry_run([_sync_target(content_hash="new", stored_hash="")], [], [])
+    gate_line = capsys.readouterr().out.splitlines()[0]
+
+    assert gate_line == (
+        "1 uploaded row; 1 with no push on record, 0 changed since their last push, "
+        "0 already in sync and would not be sent"
+    )
+
+
+def test_sync_dry_run_reports_a_row_with_a_stale_hash_as_changed(monkeypatch, capsys):
+    """A non-blank hash that no longer matches is a real edit."""
+    from ia_bulk import print_sync_dry_run
+
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+
+    print_sync_dry_run([_sync_target(content_hash="new", stored_hash="old")], [], [])
+    gate_line = capsys.readouterr().out.splitlines()[0]
+
+    assert gate_line == (
+        "1 uploaded row; 0 with no push on record, 1 changed since their last push, "
+        "0 already in sync and would not be sent"
+    )
 
 
 def test_metadata_changes_treats_a_blank_cell_as_leave_alone():
@@ -8459,7 +9331,7 @@ def test_sync_from_sheet_rejects_csv_only_log_flags(tmp_path, monkeypatch, capsy
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
 
     for flag in ("resume_from", "from_log"):
         exit_code = cmd_sync_metadata(
@@ -8728,7 +9600,7 @@ def test_sync_from_sheet_sends_a_live_correction_to_the_real_item(
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
     out = capsys.readouterr().out
@@ -8796,7 +9668,7 @@ def test_sync_from_sheet_live_records_the_mode_in_its_log(tmp_path, monkeypatch)
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _live_grid(), sent)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
 
@@ -8872,7 +9744,7 @@ def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypa
     from ia_bulk import cmd_sync_metadata
 
     sent = []
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -8917,7 +9789,7 @@ def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypa
     the reader back to the per-row lines this record exists to replace."""
     from ia_bulk import cmd_sync_metadata
 
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
 
     def refuse_the_second(metadata, target):
         if target.endswith("00002"):
@@ -8952,7 +9824,7 @@ def test_a_row_that_was_never_sent_is_skipped_not_failed(tmp_path, monkeypatch):
         ["Flavel House", "photo2.jpg", "lcps-astoriaphotos-00002",
          "2026-08-23T16:13:31Z", "", "photo2.jpg"],
     ])
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
@@ -9054,7 +9926,7 @@ def test_the_summary_and_the_console_cannot_disagree_about_a_mixed_run(
         ["Liberty Theatre", "photo4.jpg", "lcps-astoriaphotos-00004",
          "2026-08-23T16:13:31Z", "", "photo4.jpg"],
     ])
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
 
     def one_of_each(metadata, target):
         if target.endswith("00002"):
@@ -9093,7 +9965,7 @@ def test_dry_run_writes_no_summary_because_it_writes_no_log(tmp_path, monkeypatc
     happened, in the same directory a real run's summaries are read from."""
     from ia_bulk import cmd_sync_metadata
 
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
 
@@ -9109,7 +9981,7 @@ def test_an_unwritable_summary_does_not_fail_a_run_that_reached_the_archive(
     rerun of work that succeeded."""
     from ia_bulk import cmd_sync_metadata
 
-    registry_path = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
 
     def full_disk(log_path, summary, live):
         raise OSError(28, "No space left on device")

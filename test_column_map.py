@@ -62,6 +62,22 @@ def test_uploadable_fields_excludes_reserved_names():
     assert column_map.uploadable_fields() == ["title"]
 
 
+def test_uploadable_fields_excludes_the_sync_state_columns():
+    """ia_sync_hash and ia_last_synced are tool-owned. They must never reach
+    Internet Archive as metadata, and ia_sync_hash must never be an input to
+    its own hash - sheet_metadata_fields() derives the hash input from this
+    same list.
+
+    Pinned because issue #24 was written believing the `ia_` PREFIX did the
+    excluding. It does not: RESERVED_FIELDS does, and these two names were
+    not in it."""
+    column_map = build_column_map(
+        ["Title", "file", "ia_identifier", "ia_uploaded", "ia_url",
+         "ia_identifier_bib", "ia_sync_hash", "ia_last_synced"]
+    )
+    assert column_map.uploadable_fields() == ["title"]
+
+
 def test_grid_to_rows_keys_rows_by_normalized_name():
     grid = [
         ["Title", "Genre / Form", "Notes (LCPS Internal)"],
@@ -190,6 +206,8 @@ def test_reserved_fields_are_all_ia_prefixed_except_file():
         "ia_identifier_bib",
         "ia_uploaded",
         "ia_url",
+        "ia_sync_hash",
+        "ia_last_synced",
     }
 
 
