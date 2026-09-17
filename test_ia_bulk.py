@@ -3457,7 +3457,7 @@ def test_cmd_upload_writes_success_log_with_test_prefixed_target_when_not_live(t
     assert exit_code == 0
     log_files = list(log_dir.glob("upload-*.jsonl"))
     assert len(log_files) == 1
-    entry = json.loads(log_files[0].read_text(encoding="utf-8").strip())
+    entry = _row_records(log_files[0])[0]
     assert entry["identifier"] == "lcps-astoriaphotos-00001"
     assert entry["uploaded_as"] == f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"
     assert entry["status"] == "success"
@@ -3530,7 +3530,7 @@ def test_cmd_upload_csv_path_stamps_every_row_with_one_run_stamp_not_a_fresh_one
     assert exit_code == 0
     assert stamp_calls == [0]
     log_files = list(log_dir.glob("upload-*.jsonl"))
-    entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").strip().splitlines()]
+    entries = _row_records(log_files[0])
     assert [entry["uploaded_as"] for entry in entries] == [
         "zztest-stamp0-lcps-astoriaphotos-00001",
         "zztest-stamp0-lcps-astoriaphotos-00002",
@@ -3583,7 +3583,7 @@ def test_cmd_upload_uses_real_identifier_as_target_when_live(tmp_path, monkeypat
     exit_code = cmd_upload(args)
 
     assert exit_code == 0
-    entry = json.loads(list(log_dir.glob("upload-*.jsonl"))[0].read_text(encoding="utf-8").strip())
+    entry = _row_records(next(log_dir.glob("upload-*.jsonl")))[0]
     assert entry["uploaded_as"] == "lcps-astoriaphotos-00001"
 
 
@@ -4248,6 +4248,17 @@ class RecordingSheetClient:
             while len(row) <= column:
                 row.append("")
             row[column] = value
+
+
+def _row_records(log_path):
+    """A log's per-row records, without its run-level ones. "record" marks a
+    run-level line - the header, and the closing run summary - and a row
+    carries no such key."""
+    entries = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    return [entry for entry in entries if "record" not in entry]
 
 
 def make_upload_stub(recorder, fail_for=(), captured=None):
@@ -8332,7 +8343,7 @@ def _sync_sheet_args(tmp_path, registry_path, **overrides):
     return args
 
 
-def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
+def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None, registry=None):
     """RecordingSheetClient, not FakeSheetClient: sync-metadata now WRITES to
     the Sheet (the hash stamp), and it re-reads before each write for the
     moved-row guard, so the fake has to apply writes to its own grid the way
@@ -8342,7 +8353,7 @@ def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
     sent can ignore the second element."""
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
-        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+        json.dumps(registry or make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
     if client is None:
         client = RecordingSheetClient(grid, SheetUploadRecorder())
@@ -12175,3 +12186,135 @@ def test_the_log_tab_client_cannot_write_to_the_metadata_columns(
     # Every cell write this run made went to the metadata tab's client, and
     # none of them touched a log tab.
     assert client.write_count > 0
+
+
+def _sync_log_registry(tmp_path):
+    return make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+
+
+def test_a_sync_run_that_changed_something_appends_to_its_own_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    """Sync gets its own tab rather than sharing upload's: an hourly job and
+    a once-a-week upload interleaved in one tab would bury the upload rows
+    someone opened the Sheet to find."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert len(rows) == 1
+    assert rows[0][2] == "summary"
+    assert rows[0][1].startswith("sync-metadata-")
+    assert rows[0][4] in out.splitlines()
+
+
+def test_a_sync_run_with_nothing_to_do_leaves_the_log_tab_alone(
+    tmp_path, monkeypatch, capsys
+):
+    """The steady state of an hourly job, and the reason the tab stays
+    readable. A row every hour saying "4,212 already in sync" would be 9,000
+    rows a year, burying the handful that report an actual problem. The run
+    is still fully recorded in its own JSONL."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    client.log_tabs.clear()
+
+    # Second run: every row now matches its last push, so the hash gate holds
+    # them all back and the run does nothing.
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert "already match their last push" in out
+    assert client.log_tabs.get("Sync Log") is None or client.log_tabs["Sync Log"].appended == []
+
+
+def test_a_sync_run_that_only_failed_still_reaches_the_log_tab(tmp_path, monkeypatch, capsys):
+    """The quiet-run guard must not silence the runs that matter: a run that
+    pushed nothing because everything was refused is precisely what someone
+    opens the Sheet to find."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+
+    def refused(metadata, target):
+        raise RuntimeError("Access Denied - This item has been taken offline")
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", refused)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert [row[2] for row in rows] == ["summary", "failure", "failure"]
+    assert "Access Denied" in rows[1][4]
+
+
+def test_the_csv_upload_path_ends_with_the_same_summary_record(tmp_path, monkeypatch, capsys):
+    """The offline fallback is the path most likely to be run unattended, and
+    a summary only the Sheet path writes makes "read the run summary" advice
+    that silently does not apply half the time - the same reasoning that gave
+    sync-metadata's --csv path one in #25. It writes no log tab: there is no
+    Sheet on this path to write one into."""
+    from ia_bulk import cmd_upload
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    (tmp_path / "photo2.jpg").write_bytes(b"x")
+    csv_path = tmp_path / "rows.csv"
+    write_csv(
+        csv_path,
+        ["identifier", "file", "mediatype", "title"],
+        [
+            {
+                "identifier": "lcps-astoriaphotos-00001",
+                "file": "photo1.jpg",
+                "mediatype": "image",
+                "title": "One",
+            },
+            {
+                "identifier": "lcps-astoriaphotos-00002",
+                "file": "photo2.jpg",
+                "mediatype": "image",
+                "title": "Two",
+            },
+        ],
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
+
+    def fail_the_second(row, target_identifier, collection, files_dir):
+        if target_identifier.endswith("00002"):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("ia_bulk.upload_row", fail_the_second)
+
+    cmd_upload(
+        make_upload_args(
+            tmp_path,
+            registry_path,
+            csv=str(csv_path),
+            files_dir=str(tmp_path),
+            collection="lcps",
+        )
+    )
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["record"] == "run_summary"
+    assert summary["succeeded"] == 1
+    assert [entry["identifier"] for entry in summary["failures"]] == [
+        "lcps-astoriaphotos-00002"
+    ]

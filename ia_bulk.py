@@ -3755,9 +3755,15 @@ def upload_from_csv(args, csv_path: str) -> int:
         file_value_for=lambda row: row["file"].strip(),
     )
 
-    print(f"{outcome.succeeded} file(s) uploaded successfully, {outcome.failed} error(s)")
+    # The same summary object the Sheet path builds, from this path's own
+    # PushOutcome. No log tab: there is no Sheet on this path to write one
+    # into, and the record is what an unattended run is read from anyway.
+    summary = UploadSummary(succeeded=outcome.succeeded, failures=outcome.failures)
+    for line in upload_summary_lines(summary):
+        print(line)
+    try_log_run_summary(log_path, summary, args.live)
     print(f"log written to {log_path}")
-    return 1 if outcome.failed else 0
+    return 1 if summary.failed else 0
 
 
 def upload_from_sheet(args) -> int:
@@ -4351,6 +4357,23 @@ def try_log_run_summary(
         )
 
 
+def sync_run_is_worth_mirroring(summary: SyncSummary) -> bool:
+    """Whether a sync run has anything to say in the Sheet's log tab.
+
+    An hourly sync's steady state is "every row already matches its last
+    push" - it sends nothing and finds nothing wrong. Mirrored, that would be
+    a row an hour, roughly 9,000 a year, burying the handful of rows that
+    report an actual problem in the tab whose entire value is that a person
+    can scan it. Such a run is still fully recorded in its own JSONL, and
+    per-row "did my edit land" is already answered by `ia_last_synced` in the
+    Sheet itself.
+
+    Upload has no equivalent rule: a run with nothing to upload returns
+    before a log is even opened, so every upload run that gets this far did
+    something worth a row."""
+    return bool(summary.pushed or summary.failed or summary.skipped)
+
+
 def mirror_run_to_log_tab(
     client: SheetClient,
     tab: str | None,
@@ -4933,6 +4956,15 @@ def sync_from_sheet(args) -> int:
             already_synced=len(already_synced),
         )
         try_log_run_summary(log_path, summary, live)
+        if sync_run_is_worth_mirroring(summary):
+            mirror_run_to_log_tab(
+                sheet.client,
+                config.sync_log_tab,
+                log_path,
+                summary,
+                live,
+                sync_summary_lines(summary)[0],
+            )
         print(
             f"nothing to sync - all {_pluralize(len(already_synced), 'uploaded row')} "
             "already match their last push"
@@ -4956,8 +4988,13 @@ def sync_from_sheet(args) -> int:
     )
     try_log_run_summary(log_path, summary, live)
 
-    for line in sync_summary_lines(summary):
+    lines = sync_summary_lines(summary)
+    for line in lines:
         print(line)
+    if sync_run_is_worth_mirroring(summary):
+        mirror_run_to_log_tab(
+            sheet.client, config.sync_log_tab, log_path, summary, live, lines[0]
+        )
     print(f"log written to {log_path}")
     return 1 if (summary.failed or summary.skipped) else 0
 
