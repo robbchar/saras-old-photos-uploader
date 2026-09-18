@@ -7,3 +7,6 @@ data/
 .ignored/
 # Worktrees live here; never part of the tree itself.
 .claude/worktrees/
+# Defense in depth: these must never land in a public repo even outside .ignored/.
+*service-account*.json
+client_secret_*.json
