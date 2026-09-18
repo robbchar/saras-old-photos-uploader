@@ -103,6 +103,13 @@ def test_unusable_key_file_raises_an_actionable_error(tmp_path, content):
         load_service_account_credentials(key_path)
 
 
+def test_unreadable_key_path_names_a_permissions_problem(tmp_path):
+    with pytest.raises(AuthUnavailable) as exc:
+        load_service_account_credentials(tmp_path)
+
+    assert "owner and permissions" in str(exc.value)
+
+
 def test_google_rejecting_the_key_is_reported_as_a_credential_problem(
     tmp_path, monkeypatch, private_key_pem
 ):
@@ -119,6 +126,23 @@ def test_google_rejecting_the_key_is_reported_as_a_credential_problem(
 
     assert "rejected the service account key" in str(exc.value)
     assert "network problem" not in str(exc.value)
+    assert "clock" in str(exc.value)
+
+
+def test_retryable_token_failure_is_reported_as_temporary(tmp_path, monkeypatch, private_key_pem):
+    key_path = tmp_path / "key.json"
+    _write_key(key_path, _service_account_key(private_key_pem))
+
+    def _unavailable(self, request):
+        raise RefreshError("503 backend error", retryable=True)
+
+    monkeypatch.setattr(service_account.Credentials, "refresh", _unavailable)
+
+    with pytest.raises(AuthUnavailable) as exc:
+        load_service_account_credentials(key_path)
+
+    assert "temporary" in str(exc.value)
+    assert "rejected" not in str(exc.value)
 
 
 def test_unreachable_google_is_reported_as_a_network_problem(tmp_path, monkeypatch, private_key_pem):

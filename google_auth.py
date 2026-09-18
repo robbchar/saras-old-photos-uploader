@@ -34,7 +34,12 @@ def load_service_account_credentials(key_path: Path) -> service_account.Credenti
         credentials = service_account.Credentials.from_service_account_file(
             str(key_path), scopes=SCOPES
         )
-    except (OSError, ValueError, AttributeError) as exc:
+    except OSError as exc:
+        raise AuthUnavailable(
+            f"could not read the service account key at {key_path} ({exc}). Check the "
+            "file's owner and permissions."
+        ) from exc
+    except (ValueError, AttributeError) as exc:
         # ValueError: bad JSON, missing fields, or a bad PEM; AttributeError: JSON that is not an object.
         raise AuthUnavailable(
             f"the file at {key_path} is not a readable service account key ({exc}). "
@@ -49,10 +54,16 @@ def load_service_account_credentials(key_path: Path) -> service_account.Credenti
             "problem, not a credential one - check the connection and re-run."
         ) from exc
     except RefreshError as exc:
+        if exc.retryable:
+            raise AuthUnavailable(
+                f"Google could not issue a token right now ({exc}). This is a temporary "
+                "problem, not a credential one - re-run in a few minutes."
+            ) from exc
         raise AuthUnavailable(
-            f"Google rejected the service account key at {key_path} ({exc}). The key "
-            "may have been deleted or disabled in the Google Cloud console - create a "
-            "new one and save it there."
+            f"Google rejected the service account key at {key_path} ({exc}). Check that "
+            "this computer's clock is correct; otherwise the key or the service account may "
+            "have been deleted or disabled in the Google Cloud console - create a new key "
+            "and save it there."
         ) from exc
     return credentials
 
