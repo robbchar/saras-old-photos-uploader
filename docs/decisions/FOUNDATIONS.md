@@ -1,7 +1,8 @@
 # Foundations
 
 The choices everything else rests on: what talks to Internet Archive, what is
-configuration, and what was accepted as a known limit rather than missed.
+configuration, how the Sheet is reached, and what was accepted as a known
+limit rather than missed.
 
 One of the decision records indexed by
 [`../DECISIONS.md`](../DECISIONS.md). Section titles here are cited verbatim
@@ -74,6 +75,13 @@ The key is loaded and a token fetched before any Sheet work starts. A missing,
 unreadable, deleted or disabled key stops the run with a message saying which,
 and a network failure at that point is reported as a network failure, never as
 a credential problem. There is no fallback to OAuth.
+
+The accepted cost: the key never expires and sits in a file on a shared
+machine, so its reach is only the Sheets it has been shared with, not the
+whole Cloud project. Replacing it is described in
+[`OPERATIONS.md`](../OPERATIONS.md). Where it lives on the LCPS Mac and its
+file permissions are settled by the Mac deployment work (issue #39), not
+here.
 
 An API key stays ruled out: it is read-only and reaches only publicly shared
 Sheets.

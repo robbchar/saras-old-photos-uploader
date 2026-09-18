@@ -92,7 +92,10 @@ pip install -r requirements.txt
 ```
 
 Requires `internetarchive` to be authenticated against the shared org
-account (`ia configure`) before running `upload` or `sync-metadata`.
+account (`ia configure`) before running `upload` or `sync-metadata`. Sheet
+commands also need the Google service account key saved at
+`.ignored/google-service-account.json` — see
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md), "Google Cloud prerequisites".
 
 ## Commands
 

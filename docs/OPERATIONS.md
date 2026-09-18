@@ -32,6 +32,16 @@ run on a machine:
   `upload` writes `ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib`
   back to the Sheet, so read-only sharing is not enough, even in test mode
   with `--write-identifier`.
+- The **Google Sheets API** must be enabled in the Cloud project (APIs &
+  Services → Library).
+- Creating a key can be refused by the organization policy "Disable service
+  account key creation" (`iam.disableServiceAccountKeyCreation`), which
+  Google enforces by default on newer organizations; an organization-policy
+  administrator can turn it off for this one project.
+- If the Google Workspace that owns the Sheet restricts sharing outside its
+  domain, sharing with the service account's address (which is outside the
+  domain) is blocked until an admin allows it (admin.google.com → Apps →
+  Google Workspace → Drive and Docs → Sharing settings).
 
 Every edit the tool makes appears in the Sheet's version history as the
 service account, whoever ran the command.

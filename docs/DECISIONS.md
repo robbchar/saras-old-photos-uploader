@@ -17,7 +17,8 @@ it first.
 ## [Foundations](decisions/FOUNDATIONS.md)
 
 The choices everything else rests on: what talks to Internet Archive, what is
-configuration, and what was accepted as a known limit rather than missed.
+configuration, how the Sheet is reached, and what was accepted as a known
+limit rather than missed.
 
 - [Use the `internetarchive` Python library, not `ia upload --spreadsheet`](decisions/FOUNDATIONS.md#use-the-internetarchive-python-library-not-ia-upload---spreadsheet)
 - [Generic to "a project", not hardcoded to photos](decisions/FOUNDATIONS.md#generic-to-a-project-not-hardcoded-to-photos)
