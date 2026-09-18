@@ -172,7 +172,6 @@ run writes down about itself.
   `ia_uploaded` column so an interrupted run is recoverable.
 - ~~Which Google credential type the Sheet integration uses~~ **Settled
   2026-08-08** as OAuth with the **Internal** user type; **superseded
-  2026-09-18** — see [The Sheet is reached as a service account, not as a
-  person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person).
+  2026-09-18** — see [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person).
 - Automating the Sheet → CSV *export* was raised and deferred pending maintainer
   input. **Superseded 2026-08-08** by reading the Sheet directly (above).
