@@ -5809,6 +5809,32 @@ def test_cmd_upload_reports_a_sheets_write_failure_instead_of_a_traceback(
     assert [entry["status"] for entry in entries] == ["success", "unconfirmed"]
 
 
+def test_cmd_upload_write_failure_names_the_service_account_to_share_with(
+    tmp_path, monkeypatch, capsys
+):
+    """The same write failure also has to tell the operator who the Sheet
+    must be shared with, as Editor, so re-sharing is a one-step fix."""
+    from ia_bulk import cmd_upload
+
+    key_path = tmp_path / "key.json"
+    key_path.write_text(
+        json.dumps({"client_email": "sheets-sync@example.iam.gserviceaccount.com"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("ia_bulk.google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH", key_path)
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, raise_on_write=2
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "sheets-sync@example.iam.gserviceaccount.com" in captured.err
+    assert "as Editor" in captured.err
+
+
 # ---------------------------------------------------------------------------
 # Task 12: --limit, --chunk-size, and Internet Archive rate-limit detection.
 #

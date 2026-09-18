@@ -3448,7 +3448,8 @@ class SheetUploadRun:
             print(
                 f"the Sheet {step} write failed: {exc}. Stopping here rather than uploading more "
                 "items this run cannot record. Nothing is lost - rerun once the Sheet is "
-                "reachable and every unrecorded row is picked up from where it stopped.",
+                f"reachable and shared, as Editor, with {sheet_sharing_target()}, and every "
+                "unrecorded row is picked up from where it stopped.",
                 file=sys.stderr,
             )
             return False
