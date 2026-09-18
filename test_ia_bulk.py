@@ -12374,3 +12374,34 @@ def test_a_row_moved_mid_run_reaches_the_summary_and_the_log_tab(
     # and it reaches the tab, which is where it would actually be read
     rows = client.log_tabs["Upload Log"].appended
     assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00001"]]
+
+
+def test_a_sync_run_with_only_skips_mirrors_the_line_the_operator_saw(
+    tmp_path, monkeypatch, capsys
+):
+    """The nothing-to-push path prints "nothing to sync - ..." and never the
+    usual "N updated, N unchanged, N error(s)" line. It is still mirrored when
+    a row was skipped, and the tab has to say what the operator saw rather
+    than a count line that appeared nowhere on screen."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+    # First run stamps both rows, so the second finds nothing to push.
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    capsys.readouterr()
+    client.log_tabs.clear()
+
+    # Marked uploaded but naming no item: skipped before the hash gate.
+    ia_url_column = client.grid[0].index("ia_url")
+    client.grid[2][ia_url_column] = ""
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert rows[0][2] == "summary"
+    assert rows[0][4].startswith("nothing to sync")
+    assert rows[0][4] in out.splitlines()
+    assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00002"]]
