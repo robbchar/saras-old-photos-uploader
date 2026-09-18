@@ -9,40 +9,37 @@ a run's output.
 a `test_collection` run (`"live": false`). The first real run is still ahead,
 and several things below have never been exercised against production.
 
-## Google Cloud prerequisites (one-time, per operator)
+## Google Cloud prerequisites (one-time)
 
-Reading and writing the Sheet uses Google OAuth as a real signed-in person,
-not a service account and not an API key — both were considered and ruled
-out; see [`docs/DECISIONS.md`](DECISIONS.md#still-open), "Which Google
-credential type the Sheet integration uses". Concretely, before the first
+Reading and writing the Sheet uses a Google Cloud **service account**: no
+browser sign-in and no expiring token. See [`docs/DECISIONS.md`](DECISIONS.md),
+"The Sheet is reached as a service account, not as a person". Before the first
 run on a machine:
 
-- The Google Cloud project backing this integration must have its OAuth
-  consent screen set to **Internal** user type, and the project itself must
-  sit inside the **lcpsociety.org** Google Workspace organization. Internal
-  apps skip Google's verification review and are not subject to the 7-day
-  refresh-token expiry that External apps in Testing status get.
-- Whoever runs `ia_bulk.py` and completes the one-time browser consent must
-  do so with an **`@lcpsociety.org` account**. A personal `gmail.com` account
-  cannot authorize an Internal app — Google refuses with `org_internal`.
-- An OAuth 2.0 **Desktop app** client ID's downloaded JSON secret must be
-  saved to `.ignored/google-client-secret.json` (relative to the project
-  root; never committed — everything under `.ignored/` is gitignored).
+- The service account is in the project's Google Cloud project, under IAM &
+  Admin → Service Accounts. It has no project roles; all of its access comes
+  from Sheet sharing.
+- Its JSON key must be saved to `.ignored/google-service-account.json`
+  (relative to the project root; never committed — everything under
+  `.ignored/` is gitignored). The key never expires, so treat it as a
+  password: never email it, and never put it in Drive or chat. To replace it,
+  create a new key on the service account's **Keys** tab, then delete the old
+  one there.
 - The target Sheet (both the real one and the test one named in the
-  project's registry entry) must be shared with — or owned by — that same
-  `@lcpsociety.org` account, with **edit** access. `upload` writes
-  `ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib` back to the
-  Sheet, so read-only sharing is not enough even in test mode with
-  `--write-identifier`.
+  project's registry entry) must be shared with the service account's address
+  as **Editor**, with "Notify people" unchecked. The address is the
+  `client_email` in the key file, and is also listed under Service Accounts.
+  `upload` writes `ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib`
+  back to the Sheet, so read-only sharing is not enough, even in test mode
+  with `--write-identifier`.
 
-**First run, on a terminal a human is sitting at:** running any Sheet-reading
-command (`validate` or `upload`, no special flag needed) opens a browser for
-the consent screen once. Approve it as the `@lcpsociety.org` account above,
-and the resulting token is cached to `.ignored/google-token.json`. Every
-later run — including an unattended one, like a cron job — reuses and
-silently refreshes that cached token; it only fails loudly if the token is
-missing, unreadable, or its refresh token has been revoked, in which case
-re-run from an interactive terminal to re-consent.
+Every edit the tool makes appears in the Sheet's version history as the
+service account, whoever ran the command.
+
+If the key is missing, unreadable, or deleted or disabled in the console,
+every Sheet command stops before doing anything and says which. A Sheet not
+yet shared with the service account fails its first read with a message naming
+the address to share it with.
 
 ## The pipeline
 

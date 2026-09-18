@@ -50,6 +50,34 @@ path is assembled from a root plus one or more Sheet columns, which is
 plumbing; the people maintaining the Sheet should never have to think about
 it.
 
+## The Sheet is reached as a service account, not as a person
+
+**Settled 2026-09-18, reversing 2026-08-08.** Every Sheet read and write
+authenticates with a Google Cloud service account whose JSON key lives at
+`.ignored/google-service-account.json`. The Sheet is shared with the service
+account's `...iam.gserviceaccount.com` address as Editor.
+
+The OAuth user token it replaces fails an unattended machine in two ways.
+Recovering an expired or revoked token needs a browser sign-in on that
+machine, and the token belonged to a human account (`tools@`) that a
+Workspace cleanup or password change could break without warning.
+
+The 2026-08-08 reason for ruling a service account out was that it loses
+per-person attribution in the Sheet's edit history. That attribution never
+existed: every run authorized as the shared `tools@` account, so the history
+named no one. Per-person attribution is also not a goal. LCPS is run by
+volunteers, and anyone with access to the LCPS Mac in the building may run the
+pipeline. Pipeline edits are attributed to the service account, and that is
+accepted.
+
+The key is loaded and a token fetched before any Sheet work starts. A missing,
+unreadable, deleted or disabled key stops the run with a message saying which,
+and a network failure at that point is reported as a network failure, never as
+a credential problem. There is no fallback to OAuth.
+
+An API key stays ruled out: it is read-only and reaches only publicly shared
+Sheets.
+
 ## Accepted, not overlooked
 
 The final build review named these and chose to leave them. They are recorded
