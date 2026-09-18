@@ -13,11 +13,16 @@ class FakeValues:
         self.get_spreadsheet_id = None
         self.batch_update_spreadsheet_id = None
         self.append_spreadsheet_id = None
+        self.first_rows = {}
         self._get_response = get_response if get_response is not None else {"values": grid}
 
     def get(self, spreadsheetId, range):
         self.get_spreadsheet_id = spreadsheetId
         self.get_range = range
+        # A bounded range (the header read) answers from first_rows; the
+        # whole-tab read keeps answering with the grid.
+        if range in self.first_rows:
+            return _Executable({"values": self.first_rows[range]})
         return _Executable(self._get_response)
 
     def batchUpdate(self, spreadsheetId, body):
@@ -47,14 +52,31 @@ class _Executable:
 
 
 class FakeService:
-    def __init__(self, grid, get_response=None):
+    """`spreadsheets()` returns self, so the spreadsheet-level calls
+    (`get`, `batchUpdate`) sit here and the value-level ones behind
+    `values()` - the same split the real client has."""
+
+    def __init__(self, grid, get_response=None, tabs=("Donor Photos",)):
         self.values_api = FakeValues(grid, get_response)
+        self.tabs = list(tabs)
+        self.sheet_batch_update_calls = []
 
     def spreadsheets(self):
         return self
 
     def values(self):
         return self.values_api
+
+    def get(self, spreadsheetId, fields):
+        return _Executable(
+            {"sheets": [{"properties": {"title": title}} for title in self.tabs]}
+        )
+
+    def batchUpdate(self, spreadsheetId, body):
+        self.sheet_batch_update_calls.append(body)
+        for request in body["requests"]:
+            self.tabs.append(request["addSheet"]["properties"]["title"])
+        return _Executable({"replies": []})
 
 
 @pytest.mark.parametrize("index,letter", [(0, "A"), (25, "Z"), (26, "AA"), (27, "AB")])
@@ -178,3 +200,94 @@ def test_write_cells_quotes_a_tab_name_containing_an_apostrophe():
 
     body = service.values_api.batch_update_calls[0]
     assert body["data"] == [{"range": "'Sara''s Photos'!B2", "values": [["x"]]}]
+
+
+def test_ensure_tab_creates_a_missing_tab_with_its_header_row():
+    """A tab nobody created by hand is the normal case: the operator sets up
+    the metadata Sheet, and the log tabs appear the first time a run writes
+    one. Requiring manual setup would make the first real run the moment
+    someone discovers a step they skipped."""
+    service = FakeService([["Title"]], tabs=["Donor Photos"])
+    client = SheetClient(service, "SHEET_ID", "Upload Log")
+
+    client.ensure_tab(["when", "run", "outcome"])
+
+    assert service.sheet_batch_update_calls == [
+        {"requests": [{"addSheet": {"properties": {"title": "Upload Log"}}}]}
+    ]
+    assert service.values_api.append_calls[0]["body"]["values"] == [
+        ["when", "run", "outcome"]
+    ]
+
+
+def test_append_only_tab_reuses_the_connection_and_changes_only_the_tab():
+    """A run that also writes a log tab must not authenticate a second time
+    or build a second service - it is the same spreadsheet, one tab over."""
+    service = FakeService([["Title"]])
+    client = SheetClient(service, "SHEET_ID", "Donor Photos")
+
+    log_client = client.append_only_tab("Upload Log")
+
+    log_client.append_rows([["x"]])
+    assert service.values_api.append_calls[0]["range"] == "'Upload Log'"
+    assert service.values_api.append_spreadsheet_id == "SHEET_ID"
+    # and the original is untouched
+    client.append_rows([["y"]])
+    assert service.values_api.append_calls[1]["range"] == "'Donor Photos'"
+
+
+def test_an_append_only_tab_has_no_way_to_write_a_cell():
+    """What makes "telemetry can never reach the metadata columns" a property
+    of the code rather than a promise in a docstring. A SheetClient handed to
+    the log-tab writer would carry write_cells with it; this type does not
+    have the method at all."""
+    client = SheetClient(FakeService([["Title"]]), "SHEET_ID", "Donor Photos")
+
+    log_client = client.append_only_tab("Upload Log")
+
+    assert not hasattr(log_client, "write_cells")
+    assert not hasattr(log_client, "read_grid")
+
+
+def test_ensure_tab_refuses_a_tab_that_already_holds_something_else():
+    """The mistake this catches costs data: `upload_log_tab` mistyped as the
+    name of some other tab that holds real content - an archived copy of the
+    metadata, a donor's notes - would otherwise append five-column telemetry
+    rows underneath it, silently, on every run. Only `sheet_tab` itself is
+    caught at config load; every other tab in the spreadsheet is not."""
+    service = FakeService([["Title"]], tabs=["Donor Photos", "Notes"])
+    service.values_api.first_rows = {"'Notes'!1:1": [["Donor", "Told to", "On"]]}
+    client = SheetClient(service, "SHEET_ID", "Notes")
+
+    with pytest.raises(ValueError) as caught:
+        client.ensure_tab(["when", "run", "outcome"])
+
+    assert "Notes" in str(caught.value)
+    assert service.values_api.append_calls == []
+
+
+def test_ensure_tab_adopts_an_empty_tab_someone_made_by_hand():
+    """An operator who creates the tab before the first run gets a working
+    log tab, not five unlabelled columns."""
+    service = FakeService([["Title"]], tabs=["Donor Photos", "Upload Log"])
+    service.values_api.first_rows = {"'Upload Log'!1:1": []}
+    client = SheetClient(service, "SHEET_ID", "Upload Log")
+
+    client.ensure_tab(["when", "run", "outcome"])
+
+    assert service.sheet_batch_update_calls == []
+    assert service.values_api.append_calls[0]["body"]["values"] == [
+        ["when", "run", "outcome"]
+    ]
+
+
+def test_ensure_tab_accepts_a_tab_already_carrying_the_header():
+    """The ordinary case on the second and every later run."""
+    service = FakeService([["Title"]], tabs=["Donor Photos", "Upload Log"])
+    service.values_api.first_rows = {"'Upload Log'!1:1": [["when", "run", "outcome"]]}
+    client = SheetClient(service, "SHEET_ID", "Upload Log")
+
+    client.ensure_tab(["when", "run", "outcome"])
+
+    assert service.sheet_batch_update_calls == []
+    assert service.values_api.append_calls == []

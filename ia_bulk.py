@@ -14,7 +14,7 @@ import random
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Protocol, Sequence, TypeVar
@@ -26,6 +26,7 @@ from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
 import google_auth
+import log_tab
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -3210,7 +3211,7 @@ class SheetUploadRun:
         __setattr__."""
         return sheet_metadata_fields(self.column_map)
 
-    def execute(self, targets: list[UploadTarget]) -> dict[str, int]:
+    def execute(self, targets: list[UploadTarget]) -> UploadSummary:
         """One chunk at a time: verify, reserve, upload, verify, confirm,
         having logged each row's outcome as it happened.
 
@@ -3234,7 +3235,24 @@ class SheetUploadRun:
         confirmed before returning: a rate limit must not leave a row
         RESERVED-but-unconfirmed, which would make tomorrow's run re-upload
         it under a second identifier."""
-        counts = {"success": 0, "failure": 0, "unconfirmed": 0, "not_attempted": 0, "rate_limited": 0}
+        # Counted and collected in the same step: every site that bumps a
+        # number here already holds the target it belongs to, so the summary's
+        # lists cost nothing beyond remembering what was in hand.
+        tally = {"success": 0, "not_attempted": 0, "rate_limited": False}
+        failures: list[RowFailure] = []
+        unconfirmed: list[RowFailure] = []
+        skipped: list[RowFailure] = []
+
+        def summary() -> UploadSummary:
+            return UploadSummary(
+                succeeded=tally["success"],
+                failures=tuple(failures),
+                unconfirmed=tuple(unconfirmed),
+                not_attempted=tally["not_attempted"],
+                rate_limited=tally["rate_limited"],
+                skipped=tuple(skipped),
+            )
+
         total = len(targets)
         position = 0
         # Targets that already have a verdict of any kind - uploaded, failed, or
@@ -3252,14 +3270,23 @@ class SheetUploadRun:
             if self.write_back:
                 outcome = self._verify(chunk, reserved_already=False)
                 for target in outcome.moved:
-                    counts["not_attempted"] += 1
+                    tally["not_attempted"] += 1
                     settled += 1
-                    self._report_moved(target, uploaded=False, cause=outcome.stop_reason)
+                    # Nothing was sent for this row, which is what `skipped`
+                    # means - the same word its per-row log record already uses.
+                    skipped.append(
+                        RowFailure(
+                            identifier=target.identifier,
+                            error=self._report_moved(
+                                target, uploaded=False, cause=outcome.stop_reason
+                            ),
+                        )
+                    )
                 if outcome.stop_reason is not None or not self._write(
                     reserve_updates(outcome.ok, self.columns), "reserve"
                 ):
-                    counts["not_attempted"] += total - settled
-                    return counts
+                    tally["not_attempted"] += total - settled
+                    return summary()
                 working = outcome.ok
 
             succeeded: list[UploadTarget] = []
@@ -3279,45 +3306,56 @@ class SheetUploadRun:
                     # A rate limit is logged as an ordinary failure - the
                     # message is the server's either way - and additionally
                     # ends the run after this chunk's confirm write.
-                    counts["failure"] += 1
+                    failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
                     print(f"    - {format_row_error(exc)}")
                     self._log(target, "failure", error=str(exc))
                     if is_rate_limit_error(exc):
                         rate_limited = True
                         break
                     continue
-                counts["success"] += 1
+                tally["success"] += 1
                 self._log(target, "success")
                 succeeded.append(target)
 
             if self.write_back and succeeded:
                 outcome = self._verify(succeeded, reserved_already=True)
                 for target in outcome.moved:
-                    counts["unconfirmed"] += 1
-                    self._report_moved(target, uploaded=True, cause=outcome.stop_reason)
+                    unconfirmed.append(
+                        RowFailure(
+                            identifier=target.identifier,
+                            error=self._report_moved(
+                                target, uploaded=True, cause=outcome.stop_reason
+                            ),
+                        )
+                    )
                 if outcome.stop_reason is not None:
-                    counts["not_attempted"] += total - settled
-                    return counts
+                    tally["not_attempted"] += total - settled
+                    return summary()
                 if not self._write(confirm_updates(outcome.ok, self.columns, uploaded_at), "confirm"):
-                    counts["unconfirmed"] += len(outcome.ok)
                     for target in outcome.ok:
+                        unconfirmed.append(
+                            RowFailure(
+                                identifier=target.identifier,
+                                error="the Sheet write failed",
+                            )
+                        )
                         self._log(target, "unconfirmed", error="the Sheet write failed")
-                    counts["not_attempted"] += total - settled
-                    return counts
+                    tally["not_attempted"] += total - settled
+                    return summary()
 
             if rate_limited:
-                attempted = counts["success"] + counts["failure"]
-                counts["not_attempted"] += total - settled
-                counts["rate_limited"] = 1
+                attempted = tally["success"] + len(failures)
+                tally["not_attempted"] += total - settled
+                tally["rate_limited"] = True
                 print(
                     f"stopped: Internet Archive reported a rate limit after "
                     f"{_pluralize(attempted, 'item')}",
                     file=sys.stderr,
                 )
-                print(f"{counts['success']} uploaded this run - resume by re-running tomorrow")
-                return counts
+                print(f"{tally['success']} uploaded this run - resume by re-running tomorrow")
+                return summary()
 
-        return counts
+        return summary()
 
     def _verify(self, targets: list[UploadTarget], reserved_already: bool) -> VerifyOutcome:
         """Re-reads the Sheet and splits the targets into those still at the
@@ -3365,7 +3403,7 @@ class SheetUploadRun:
 
     def _report_moved(
         self, target: UploadTarget, uploaded: bool, cause: str | None = None
-    ) -> None:
+    ) -> str:
         """`cause` names a whole-Sheet problem (a failed read, a moved column)
         when there is one. Without it this said "row N is no longer the row
         this run planned for" for a COLUMN change too, which is wrong in kind
@@ -3393,6 +3431,10 @@ class SheetUploadRun:
         )
         print(message, file=sys.stderr)
         self._log(target, "unconfirmed" if uploaded else "skipped", error=message)
+        # Returned so the run summary can carry the same sentence the log row
+        # carries. Built once here, where the distinction between an uploaded
+        # and a never-uploaded moved row is already drawn.
+        return message
 
     def _write(self, updates: list[CellUpdate], step: str) -> bool:
         """A Sheets write failing (a 503, an expired token, a revoked share) is
@@ -3713,9 +3755,15 @@ def upload_from_csv(args, csv_path: str) -> int:
         file_value_for=lambda row: row["file"].strip(),
     )
 
-    print(f"{outcome.succeeded} file(s) uploaded successfully, {outcome.failed} error(s)")
+    # The same summary object the Sheet path builds, from this path's own
+    # PushOutcome. No log tab: there is no Sheet on this path to write one
+    # into, and the record is what an unattended run is read from anyway.
+    summary = UploadSummary(succeeded=outcome.succeeded, failures=outcome.failures)
+    for line in upload_summary_lines(summary):
+        print(line)
+    try_log_run_summary(log_path, summary, args.live)  # no Sheet here, so no tab
     print(f"log written to {log_path}")
-    return 1 if outcome.failed else 0
+    return 1 if summary.failed else 0
 
 
 def upload_from_sheet(args) -> int:
@@ -3986,7 +4034,7 @@ def upload_from_sheet(args) -> int:
             "it - this only affects the log's own audit trail, not the upload that follows.",
             file=sys.stderr,
         )
-    counts = SheetUploadRun(
+    summary = SheetUploadRun(
         client=client,
         columns=columns,
         column_map=column_map,
@@ -3998,25 +4046,17 @@ def upload_from_sheet(args) -> int:
         write_back=write_back,
         log_path=log_path,
         chunk_size=chunk_size,
-    ).execute(targets)
+    ).execute(targets).with_skipped(skipped_rows(blocked))
 
-    print(f"{counts['success']} file(s) uploaded successfully, {counts['failure']} error(s)")
-    if counts["unconfirmed"]:
-        print(
-            f"{_pluralize(counts['unconfirmed'], 'item')} uploaded but NOT recorded in the Sheet "
-            "- each one is named on stderr above, and in the log"
-        )
-    if counts["not_attempted"]:
-        print(
-            f"{_pluralize(counts['not_attempted'], 'row')} not attempted - the run stopped early; "
-            "see the reason on stderr above"
-        )
-    if blocked:
-        print(f"{_pluralize(len(blocked), 'row')} skipped (failed validation)")
+    lines = upload_summary_lines(summary)
+    for line in lines:
+        print(line)
+    record = try_log_run_summary(log_path, summary, live)
+    mirror_run_to_log_tab(client, config.upload_log_tab, log_path, record, lines[0])
     print(f"log written to {log_path}")
     return (
         1
-        if (counts["failure"] or counts["unconfirmed"] or counts["not_attempted"] or blocked)
+        if (summary.failed or summary.unconfirmed or summary.not_attempted or summary.skipped)
         else 0
     )
 
@@ -4190,7 +4230,107 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
     return lines
 
 
-def log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) -> None:
+@dataclass(frozen=True)
+class UploadSummary:
+    """One upload run, whole - upload's half of what SyncSummary does for
+    sync-metadata. The console's closing lines and the log's `run_summary`
+    record are both rendered from this object, so the number a person reads
+    and the number a program reads cannot drift apart.
+
+    Upload keeps its own vocabulary rather than borrowing sync's: there is no
+    `unchanged` here, because an upload either created the item or did not.
+
+    The ways a row can miss are kept apart, because months later they are
+    three different phone calls:
+
+    - `failures` - the send was attempted and Internet Archive refused it.
+      Nothing was created, and the identifier is still unused.
+    - `unconfirmed` - the file IS on Internet Archive but the Sheet was never
+      marked. The dangerous one: a later run reads the row as un-uploaded and
+      would upload the same photograph again under a second identifier.
+    - `skipped` - nothing was sent. Either the row failed validation, or the
+      Sheet was edited mid-run and the row no longer matched what this run
+      planned for it.
+
+    `not_attempted` is a count rather than a list, and it is the one number
+    here that OVERLAPS the lists rather than partitioning against them: it is
+    the console's own "the run stopped early" figure, which counts a row this
+    run declined to touch whether or not that row also appears under
+    `skipped`. Reading the counts as a partition and summing them is
+    therefore wrong - `attempted` is the only derived total."""
+
+    succeeded: int = 0
+    failures: tuple[RowFailure, ...] = ()
+    unconfirmed: tuple[RowFailure, ...] = ()
+    not_attempted: int = 0
+    rate_limited: bool = False
+    skipped: tuple[RowFailure, ...] = ()
+
+    @property
+    def failed(self) -> int:
+        return len(self.failures)
+
+    @property
+    def attempted(self) -> int:
+        """Rows actually sent to Internet Archive this run, refused or not.
+        Derived rather than carried, so there is no second number to forget
+        to bump - the rule PushOutcome.failed already follows."""
+        return self.succeeded + self.failed
+
+    def with_skipped(self, skipped: list[RowFailure]) -> UploadSummary:
+        """The same run, plus the rows validation held back.
+
+        Kept out of SheetUploadRun.execute() because those rows never entered
+        it: they were rejected before a target was ever built, and a send loop
+        that had to be told about rows it will not send would be the wrong
+        shape. The caller holds both halves and joins them here.
+
+        ADDS to the run's own skipped rows rather than replacing them.
+        execute() has already collected the rows it declined to send because
+        the Sheet was edited underneath the run, and those are the ones with
+        no other record at run level - `not_attempted` counts them without
+        naming them. Overwriting the list dropped exactly the rows a person
+        opens the log tab to find."""
+        return replace(self, skipped=self.skipped + tuple(skipped))
+
+    def as_record(self, live: bool) -> dict:
+        return {
+            "record": "run_summary",
+            "timestamp": utc_timestamp(),
+            "live": live,
+            "attempted": self.attempted,
+            "succeeded": self.succeeded,
+            "failures": [failure.as_record() for failure in self.failures],
+            "unconfirmed": [entry.as_record() for entry in self.unconfirmed],
+            "not_attempted": self.not_attempted,
+            "rate_limited": self.rate_limited,
+            "skipped": [entry.as_record() for entry in self.skipped],
+        }
+
+
+def upload_summary_lines(summary: UploadSummary) -> list[str]:
+    """The run's closing lines for a person to read.
+
+    Rendered from the same UploadSummary that log_run_summary() writes, and
+    the only place the upload path formats those numbers - which is why this
+    takes the summary rather than the counts it prints."""
+    lines = [f"{summary.succeeded} file(s) uploaded successfully, {summary.failed} error(s)"]
+    if summary.unconfirmed:
+        lines.append(
+            f"{_pluralize(len(summary.unconfirmed), 'item')} uploaded but NOT recorded in the "
+            "Sheet - each one is named on stderr above, and in the log"
+        )
+    if summary.not_attempted:
+        lines.append(
+            f"{_pluralize(summary.not_attempted, 'row')} not attempted - the run stopped early; "
+            "see the reason on stderr above"
+        )
+    if summary.skipped:
+        lines.append(f"{_pluralize(len(summary.skipped), 'row')} skipped (failed validation)")
+    return lines
+
+
+def log_run_summary(log_path: str | Path, record: dict) -> None:
     """The last line of a run's log: what the run did, in one record, without
     replaying the per-row lines above it.
 
@@ -4199,25 +4339,77 @@ def log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) -> N
     stays readable by _read_log_results() whether or not this line was ever
     written."""
     with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(summary.as_record(live)) + "\n")
+        f.write(json.dumps(record) + "\n")
 
 
-def try_log_run_summary(log_path: str | Path, summary: SyncSummary, live: bool) -> None:
+def try_log_run_summary(
+    log_path: str | Path, summary: SyncSummary | UploadSummary, live: bool
+) -> dict:
     """log_run_summary(), but a write failure is reported rather than raised.
 
     The summary is a record OF the run, not a step IN it, and it is written
     last - by the time it fails, permanent metadata has already changed. A
     run reported as failed invites a rerun, so the one thing this must never
     do is turn a sync that reached Internet Archive into a crash. Same
-    treatment log_run_header() already gets, and for the same reason."""
+    treatment log_run_header() already gets, and for the same reason.
+
+    Returns the record it wrote - or tried to - so a caller mirroring the
+    same run into the Sheet renders that one object rather than building a
+    second one a second later. Two as_record() calls carry two timestamps,
+    and a tab whose `when` matches no line in the JSONL defeats the very
+    lookup the tab invites."""
+    record = summary.as_record(live)
     try:
-        log_run_summary(log_path, summary, live)
+        log_run_summary(log_path, record)
     except Exception as exc:
         print(
             f"could not write the run-summary record to {log_path}: {exc}. The run itself "
             "completed; this affects only the log's own audit trail.",
             file=sys.stderr,
         )
+    return record
+
+
+def sync_run_is_worth_mirroring(summary: SyncSummary) -> bool:
+    """Whether a sync run has anything to say in the Sheet's log tab.
+
+    An hourly sync's steady state is "every row already matches its last
+    push" - it sends nothing and finds nothing wrong. Mirrored, that would be
+    a row an hour, roughly 9,000 a year, burying the handful of rows that
+    report an actual problem in the tab whose entire value is that a person
+    can scan it. Such a run is still fully recorded in its own JSONL, and
+    per-row "did my edit land" is already answered by `ia_last_synced` in the
+    Sheet itself.
+
+    Upload has no equivalent rule: a run with nothing to upload returns
+    before a log is even opened, so every upload run that gets this far did
+    something worth a row."""
+    return bool(summary.pushed or summary.failed or summary.skipped)
+
+
+def mirror_run_to_log_tab(
+    client: SheetClient,
+    tab: str | None,
+    log_path: Path,
+    record: dict,
+    headline: str,
+) -> None:
+    """Mirror the run's summary into the Sheet's log tab for this command, if
+    the registry names one.
+
+    `tab` is None for a project that has not asked for a log tab, and this
+    does nothing at all in that case - no read, no create, no append. That is
+    the default, so a Sheet only ever grows a tab its owner configured.
+
+    The mirror is fed the very record written to the JSONL a line earlier -
+    passed in, not rebuilt - so the tab and the file cannot disagree about
+    what happened, down to the timestamp. It reuses the run's own client one tab over rather than
+    authenticating again, and hands the tab writer a client that has no
+    cell-write method: the Sheet -> Internet Archive direction stays
+    one-directional by construction, not by care."""
+    if not tab:
+        return
+    log_tab.mirror_run(client.append_only_tab(tab), record, run=log_path.name, headline=headline)
 
 
 def plan_sync_targets(
@@ -4770,11 +4962,19 @@ def sync_from_sheet(args) -> int:
             skipped=tuple(skipped_rows(problems)),
             already_synced=len(already_synced),
         )
-        try_log_run_summary(log_path, summary, live)
-        print(
+        record = try_log_run_summary(log_path, summary, live)
+        nothing_to_sync = (
             f"nothing to sync - all {_pluralize(len(already_synced), 'uploaded row')} "
             "already match their last push"
         )
+        if sync_run_is_worth_mirroring(summary):
+            # The headline is this path's own line, not sync_summary_lines()'s
+            # "0 updated, 0 unchanged, 0 error(s)": the tab should say what the
+            # operator saw, and on this path they saw neither of those numbers.
+            mirror_run_to_log_tab(
+                sheet.client, config.sync_log_tab, log_path, record, nothing_to_sync
+            )
+        print(nothing_to_sync)
         print(f"log written to {log_path}")
         return 1 if problems else 0
 
@@ -4792,10 +4992,13 @@ def sync_from_sheet(args) -> int:
         skipped=tuple(skipped_rows(problems)),
         already_synced=len(already_synced),
     )
-    try_log_run_summary(log_path, summary, live)
+    record = try_log_run_summary(log_path, summary, live)
 
-    for line in sync_summary_lines(summary):
+    lines = sync_summary_lines(summary)
+    for line in lines:
         print(line)
+    if sync_run_is_worth_mirroring(summary):
+        mirror_run_to_log_tab(sheet.client, config.sync_log_tab, log_path, record, lines[0])
     print(f"log written to {log_path}")
     return 1 if (summary.failed or summary.skipped) else 0
 

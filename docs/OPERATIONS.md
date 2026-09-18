@@ -512,6 +512,11 @@ numbers are what the run printed on screen — they come from one place and
 cannot disagree. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
 
+If the registry names a `sync_log_tab`, the same summary is in the
+spreadsheet too — see "Reading a run from the Sheet instead" below. Note that
+a run which found every row already in sync writes **no** tab row, so silence
+there means "nothing to do", not "nothing ran"; the JSONL always has the run.
+
 To read the newest one without looking up its timestamp:
 
 ```bash
@@ -716,6 +721,119 @@ grep -o '"status": "[a-z]*"' logs/upload-*.jsonl | sort | uniq -c
 # just the failures, with their errors
 grep '"status": "failure"' logs/upload-20260712T125326.jsonl
 ```
+
+Every real run also ends with a `run_summary` line — `tail -1` of its log
+gives the whole run in one record, without the row lines above it. For
+`upload` that is `attempted` / `succeeded`, a `failures` list, an
+`unconfirmed` list, `not_attempted` and `rate_limited`. Read `unconfirmed`
+first: those files **are** on Internet Archive but were never marked in the
+Sheet, so the next run would upload them again under a second identifier.
+See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
+
+### Reading a run from the Sheet instead
+
+If the project's registry names `upload_log_tab` / `sync_log_tab`, that same
+summary is also in the spreadsheet, in an `Upload Log` and a `Sync Log` tab.
+This is the one that works from a phone, two states away, while someone reads
+you the problem over the telephone — no SSH, no screen share, no talking
+anyone through Terminal.
+
+One row per run, then one row per problem. Each row names `when`, the `run`
+(the log file to go and read for per-file detail), the `outcome`
+(`summary`, `failure`, `unconfirmed` or `skipped`), the `identifier`, and the
+`detail`. A clean run is a single row, and a sync run that found everything
+already in sync writes nothing at all — the tab stays scannable on purpose.
+
+The tabs are written to and never read from, so nothing there can affect a
+future run, and editing or deleting rows in them is safe; a deleted tab is
+recreated on the next run. If a mirror write fails you will see it on
+stderr, and the run still succeeds — the JSONL on disk remains the record of
+record.
+
+### Rehearsing the log tabs
+
+A repeatable pass against the test Sheet, for after any change to how runs
+are mirrored. Every command here is test mode: it reads the test Sheet and
+uploads to `test_collection` under `zztest-` identifiers, and `--live`
+cannot run at all while `sheet_id` is still a `REPLACE_WITH…` placeholder.
+
+**The first rehearsal on a Sheet is the only one that creates the tabs.**
+Every later one exercises the append path instead. To exercise creation
+again, delete the `Upload Log` and `Sync Log` tabs from the **test** Sheet
+first — never from the real one, where they are the only copy of that
+history outside the machine that ran the jobs.
+
+The upload steps need rows that can actually upload. If every ready row is
+already marked done, clear `ia_identifier`, `ia_uploaded`, `ia_url` and
+`ia_identifier_bib` on two or three of them. Numbers never burn, so this is
+safe for `upload` — but it is exactly wrong for the `sync-metadata` step,
+which needs rows that *are* marked uploaded (see "Seeing the summary work,
+on purpose", above).
+
+1. **One upload, twice.**
+
+   ```bash
+   python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 1
+   ```
+
+   Run it twice. `Upload Log` should hold exactly **one** header row
+   (`when | run | outcome | identifier | detail`), then one `summary` row per
+   run, each `detail` matching the line the console printed. A second header
+   row, or a tab recreated on the second run, is the defect this step exists
+   to catch.
+
+2. **A problem row.** Take a ready row — title and theme filled — and change
+   its filename cell to a file that does not exist on the drive. That makes
+   it ready but invalid, which `upload` holds back rather than sends.
+
+   ```bash
+   python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 2
+   ```
+
+   Expect the `summary` row followed by a `skipped` row naming that row's
+   identifier, with the bad filename in `detail`. Put the cell back.
+
+3. **Sync, then the quiet run.** Edit a Title on one uploaded row, then:
+
+   ```bash
+   python ia_bulk.py sync-metadata --project sarasoldphotos
+   ```
+
+   Expect `Sync Log` to gain a `summary` row. Run the same command again
+   without touching the Sheet: this time **nothing** is appended, because
+   every row now matches its last push. That silence is the rule that keeps
+   an hourly job from writing a row an hour. If the second run *does* append,
+   check first for a leftover staged row — a `DONE` row with a blank
+   `ia_url` is skipped on every run, and a run with a skip is always
+   mirrored.
+
+4. **The tab and the log agree.** Copy the `when` and `run` values from any
+   row, and find that line in the log it names:
+
+   ```bash
+   grep '<when value>' logs/<run value>
+   ```
+
+   It must match the file's closing `run_summary` line.
+
+5. **The metadata tab was not touched.** Open the test Sheet's
+   *File → Version history*. Apart from your own staging edits, the only
+   cells the rehearsal changed on the metadata tab should be the four
+   identifier columns on the rows it uploaded, plus `ia_sync_hash` /
+   `ia_last_synced` on the rows it synced. Anything else there means
+   telemetry reached the metadata, and is worth stopping for.
+
+What a manual pass cannot show:
+
+- **`failures` and `unconfirmed` cannot easily be staged by hand.** The first
+  needs Internet Archive to genuinely refuse a send; the second needs the
+  Sheet's confirm write to fail after an upload succeeded. Both are covered
+  by the test suite. Expect neither on a rehearsal.
+- **A refused mirror is a one-time check, not a rehearsal step.** To see it
+  once, point `upload_log_tab` at another tab of the test Sheet that already
+  holds content and rerun step 1: stderr names the tab and its first row,
+  nothing is appended to it, and the upload still exits `0`. Put the
+  registry back afterward.
 
 ## Development
 

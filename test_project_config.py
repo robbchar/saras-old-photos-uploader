@@ -334,3 +334,49 @@ def test_the_shipped_registry_batches_this_project_by_theme():
     config = load_project_config(registry, "sarasoldphotos")
 
     assert config.batch_column == "theme"
+
+
+def test_log_tabs_are_off_unless_the_registry_names_them():
+    """Absent means off, with no default tab name. A default would make a run
+    create a tab in someone's Sheet they never asked for - and for the older
+    of the two projects this pipeline serves, a Sheet nobody has looked at in
+    months."""
+    registry = _registry()
+
+    config = load_project_config(registry, "p")
+
+    assert config.upload_log_tab is None
+    assert config.sync_log_tab is None
+
+
+def test_log_tabs_are_read_from_the_registry():
+    registry = _registry(upload_log_tab="Upload Log", sync_log_tab="Sync Log")
+
+    config = load_project_config(registry, "p")
+
+    assert config.upload_log_tab == "Upload Log"
+    assert config.sync_log_tab == "Sync Log"
+
+
+def test_a_blank_log_tab_name_is_off_rather_than_a_tab_with_no_name():
+    """Emptying the value is how an operator turns mirroring off without
+    editing the registry's shape. Left as "" it would reach the Sheets API as
+    a request to create a tab called nothing."""
+    registry = _registry(upload_log_tab="   ")
+
+    config = load_project_config(registry, "p")
+
+    assert config.upload_log_tab is None
+
+
+def test_a_log_tab_may_not_collide_with_the_metadata_tab():
+    """The one configuration mistake with a permanent cost: telemetry
+    appended onto the canonical metadata columns. Refused at load, since by
+    the time a run is appending it is far too late."""
+    registry = _registry(upload_log_tab="Sheet1")
+
+    with pytest.raises(ConfigError) as caught:
+        load_project_config(registry, "p")
+
+    assert "upload_log_tab" in str(caught.value)
+    assert "Sheet1" in str(caught.value)

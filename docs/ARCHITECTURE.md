@@ -495,14 +495,23 @@ rather than left to be reconstructed later from a Sheet that has since
 moved on.
 
 ### The `run_summary` record
-Every real `sync-metadata` run — Sheet path and `--csv` alike — ends with
-one more record as the log's **last** line: `{record: "run_summary",
-timestamp, live, checked, pushed, changed, unchanged, already_synced,
-failures, skipped}`. It exists so a scheduled, unattended run produces
-something a program can read without parsing console output or replaying
-every row line above it, and so #26 has something to mirror into the Sheet.
+Every real run of `sync-metadata` **or** `upload` ends with one more record
+as the log's **last** line. It exists so a scheduled, unattended run
+produces something a program can read without parsing console output or
+replaying every row line above it, and so the Sheet's log tabs have
+something to mirror.
 
-The counts mean:
+Both commands write `{record: "run_summary", timestamp, live, …}`; the
+fields after `live` are each command's own, because the two runs do
+different things and a shared vocabulary would have to lie about one of
+them. An upload has no `unchanged` — it either created the item or did
+not — and a sync has no `unconfirmed`, since it writes nothing to the
+Sheet that could fail to land.
+
+#### `sync-metadata` — Sheet path and `--csv` alike
+
+`{… checked, pushed, changed, unchanged, already_synced, failures,
+skipped}`. The counts mean:
 
 | field | meaning |
 | --- | --- |
@@ -513,6 +522,34 @@ The counts mean:
 | `already_synced` | rows the hash gate found already matching their last push and never sent at all — Sheet path only, always `0` on `--csv`, which has no hash gate. On the steady state this is nearly the whole Sheet; see `DECISIONS.md`, "A row pushes only when its content changed". |
 | `failures` | `{identifier, error}` per row IA refused. |
 | `skipped` | `{identifier, error}` per row the run declined to send at all. |
+
+#### `upload` — Sheet path
+
+`{… attempted, succeeded, failures, unconfirmed, not_attempted,
+rate_limited, skipped}`. The counts mean:
+
+| field | meaning |
+| --- | --- |
+| `attempted` | rows actually sent to IA this run, refused or not. Derived: always `succeeded + len(failures)`. |
+| `succeeded` | files that reached Internet Archive. |
+| `failures` | `{identifier, error}` per row IA refused. Nothing was created and the identifier is still free. |
+| `unconfirmed` | `{identifier, error}` per row that IS on Internet Archive but was never marked in the Sheet. |
+| `not_attempted` | rows the run stopped short of. See the overlap note below. |
+| `rate_limited` | `true` when IA said *slow down* and the run stopped early rather than finishing. |
+| `skipped` | `{identifier, error}` per row nothing was sent for — held back by validation, or moved in the Sheet mid-run. |
+
+`unconfirmed` is the one to read first. A refused send is recoverable by
+rerunning; an unconfirmed row is a photograph that exists on Internet
+Archive under a permanent identifier the Sheet does not know about, so the
+next run reads the row as un-uploaded and would upload it *again* under a
+second identifier. Keeping it out of `failures` is the whole reason the
+list is separate.
+
+`not_attempted` is the only number here that **overlaps** the lists rather
+than partitioning against them: it is the console's own "the run stopped
+early" figure, which counts a row this run declined to touch whether or not
+that row also appears under `skipped`. The counts are not a partition and
+must not be summed — `attempted` is the only derived total.
 
 `already_synced` is its own count rather than folded into `checked` or
 `skipped`: unlike `skipped`, nothing was wrong with these rows — the hash
@@ -527,9 +564,13 @@ state I intended" and "this item was not touched", which one flat list
 destroys.
 
 No count is stored beside the list it counts — `failed` and `pushed` are
-derived properties of `SyncSummary` — and `sync_summary_lines()` renders
-the console's closing lines from that same object, so the number a person
-reads and the number a program reads cannot drift apart.
+derived properties of `SyncSummary`, `failed` and `attempted` of
+`UploadSummary` — and `sync_summary_lines()` / `upload_summary_lines()`
+render the console's closing lines from that same object, so the number a
+person reads and the number a program reads cannot drift apart. Upload's
+half of this arrived late: its closing counts lived in a local dict that
+console output alone consumed, which is precisely the drift the pairing
+exists to prevent.
 
 The summary is written by `try_log_run_summary()`, which reports a write
 failure on stderr instead of raising. It is a record *of* the run, not a
@@ -590,6 +631,36 @@ Rows carried over via `--resume-from` also skip re-validation in
 prior run's checks) - `skip_identifiers` short-circuits the per-row
 checks but still records the identifier for duplicate detection, and row
 numbers stay aligned with the full CSV either way.
+
+## The Sheet's log tabs
+The same `run_summary` record is also mirrored into the spreadsheet, so a
+run can be diagnosed months later by anyone who can open the Sheet — the
+JSONL lives on whichever machine ran the job. `upload` writes
+`upload_log_tab`, `sync-metadata` writes `sync_log_tab`; both are optional
+registry keys, and a command whose key is absent writes no tab at all.
+
+`log_tab.py` renders a record as rows — one `summary` row, then one row per
+entry in the record's `failures`, `unconfirmed` and `skipped` lists — and
+appends them through `mirror_run()`. It is fed the record rather than the
+summary object, which keeps it free of any import from `ia_bulk` (which
+imports it) and, more usefully, makes the tab and the JSONL the same data
+rendered twice: `try_log_run_summary()` returns the record it wrote, and
+that same dict is what reaches the Sheet, so the two cannot differ even by a
+timestamp.
+
+`mirror_run_to_log_tab()` in `ia_bulk.py` is the single call site for both
+commands. It reuses the run's own connection one tab over
+(`SheetClient.append_only_tab()`) rather than authenticating again, and what
+it hands the writer is an `AppendOnlyTab` — a type carrying `ensure_tab` and
+`append_rows` and no `write_cells` at all, so the mirror cannot reach the
+metadata columns even by mistake. `mirror_run()` catches everything and reports on
+stderr — by the time it runs, items exist on Internet Archive under
+permanent identifiers, and a telemetry failure reported as a failed run
+would invite the rerun that mints a second identifier.
+
+A sync run that pushed nothing and found nothing wrong is not mirrored
+(`sync_run_is_worth_mirroring()`); see `DECISIONS.md`, "The Sheet's log tabs
+are telemetry, never an input", for that and the rest of the reasoning.
 
 ## `sync-metadata`'s "unchanged" status
 IA's metadata-update endpoint returns an HTTP 400 with

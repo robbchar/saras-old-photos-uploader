@@ -3457,7 +3457,7 @@ def test_cmd_upload_writes_success_log_with_test_prefixed_target_when_not_live(t
     assert exit_code == 0
     log_files = list(log_dir.glob("upload-*.jsonl"))
     assert len(log_files) == 1
-    entry = json.loads(log_files[0].read_text(encoding="utf-8").strip())
+    entry = _row_records(log_files[0])[0]
     assert entry["identifier"] == "lcps-astoriaphotos-00001"
     assert entry["uploaded_as"] == f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"
     assert entry["status"] == "success"
@@ -3530,7 +3530,7 @@ def test_cmd_upload_csv_path_stamps_every_row_with_one_run_stamp_not_a_fresh_one
     assert exit_code == 0
     assert stamp_calls == [0]
     log_files = list(log_dir.glob("upload-*.jsonl"))
-    entries = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").strip().splitlines()]
+    entries = _row_records(log_files[0])
     assert [entry["uploaded_as"] for entry in entries] == [
         "zztest-stamp0-lcps-astoriaphotos-00001",
         "zztest-stamp0-lcps-astoriaphotos-00002",
@@ -3583,7 +3583,7 @@ def test_cmd_upload_uses_real_identifier_as_target_when_live(tmp_path, monkeypat
     exit_code = cmd_upload(args)
 
     assert exit_code == 0
-    entry = json.loads(list(log_dir.glob("upload-*.jsonl"))[0].read_text(encoding="utf-8").strip())
+    entry = _row_records(next(log_dir.glob("upload-*.jsonl")))[0]
     assert entry["uploaded_as"] == "lcps-astoriaphotos-00001"
 
 
@@ -4169,6 +4169,28 @@ class SheetUploadRecorder:
         return [event[1] for event in self.events if event[0] == "upload"]
 
 
+class RecordingLogTab:
+    """A client bound to a log tab. Deliberately has no write_cells: the tab
+    writer is handed one of these, so there is no method by which telemetry
+    could reach the metadata columns even if the code tried."""
+
+    def __init__(self, tab, fails=False):
+        self.tab = tab
+        self.ensured = []
+        self.appended = []
+        self._fails = fails
+
+    def ensure_tab(self, header):
+        if self._fails:
+            raise RuntimeError("Sheets API returned 503")
+        self.ensured.append(header)
+
+    def append_rows(self, rows):
+        if self._fails:
+            raise RuntimeError("Sheets API returned 503")
+        self.appended.extend(rows)
+
+
 class RecordingSheetClient:
     """Stands in for SheetClient on the upload path. Unlike FakeSheetClient it
     also accepts writes, and APPLIES them to its own grid - so the confirm
@@ -4176,14 +4198,31 @@ class RecordingSheetClient:
     would. `before_read` is the hook a mid-run-edit test uses to change the
     grid out from under the run between two reads."""
 
-    def __init__(self, grid, recorder, before_read=None, raise_on_write=None, raise_on_read=None):
+    def __init__(
+        self,
+        grid,
+        recorder,
+        before_read=None,
+        raise_on_write=None,
+        raise_on_read=None,
+        raise_on_log_tab=False,
+    ):
         self.grid = [list(row) for row in grid]
         self._recorder = recorder
         self._before_read = before_read
         self._raise_on_write = raise_on_write
         self._raise_on_read = raise_on_read
+        self._raise_on_log_tab = raise_on_log_tab
         self.read_count = 0
         self.write_count = 0
+        # tab name -> the LogTab handed out for it. Each one records what was
+        # written to that tab, so a test can assert on the log tab separately
+        # from the metadata tab - which is the whole property under test.
+        self.log_tabs = {}
+
+    def append_only_tab(self, tab):
+        self.log_tabs.setdefault(tab, RecordingLogTab(tab, fails=self._raise_on_log_tab))
+        return self.log_tabs[tab]
 
     def read_grid(self):
         self.read_count += 1
@@ -4209,6 +4248,17 @@ class RecordingSheetClient:
             while len(row) <= column:
                 row.append("")
             row[column] = value
+
+
+def _row_records(log_path):
+    """A log's per-row records, without its run-level ones. "record" marks a
+    run-level line - the header, and the closing run summary - and a row
+    carries no such key."""
+    entries = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").strip().splitlines()
+    ]
+    return [entry for entry in entries if "record" not in entry]
 
 
 def make_upload_stub(recorder, fail_for=(), captured=None):
@@ -4258,6 +4308,7 @@ def setup_sheet_upload(
     registry=None,
     raise_on_write=None,
     raise_on_read=None,
+    raise_on_log_tab=False,
     timestamps=None,
 ):
     """Builds the whole Sheet-upload world: files on disk, a registry, a
@@ -4283,6 +4334,7 @@ def setup_sheet_upload(
         before_read=before_read,
         raise_on_write=raise_on_write,
         raise_on_read=raise_on_read,
+        raise_on_log_tab=raise_on_log_tab,
     )
     build_calls = []
 
@@ -4365,7 +4417,8 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     assert len(log_files) == 1
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 2
+    # Header, the one row, then the closing run summary.
+    assert len(lines) == 3
 
     header = json.loads(lines[0])
     assert header["record"] == "run_header"
@@ -4417,11 +4470,13 @@ def test_cmd_upload_survives_a_run_header_write_failure_and_still_uploads(
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
-    # The header failed to write, so the first (and only) line is the row
-    # result, not a run_header record - proving the failure was swallowed
-    # rather than silently retried or masked.
-    assert len(lines) == 1
-    assert json.loads(lines[0])["status"] == "success"
+    # The header failed to write, so no run_header record exists - proving
+    # the failure was swallowed rather than silently retried or masked. The
+    # run's own records are all still there: the row result, then the closing
+    # summary.
+    records = [json.loads(line) for line in lines]
+    assert not any(entry.get("record") == "run_header" for entry in records)
+    assert records[0]["status"] == "success"
 
 
 def test_cmd_upload_with_write_identifier_reserves_then_uploads_then_confirms(
@@ -4848,7 +4903,9 @@ def test_cmd_upload_confirm_skips_a_row_whose_identifier_changed_underneath_it(
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     logged = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-    entries = [entry for entry in logged if entry.get("record") != "run_header"]
+    # Row records only: "record" marks a run-level line (the header, the
+    # closing run summary), and a row carries no such key.
+    entries = [entry for entry in logged if "record" not in entry]
     statuses = {entry["identifier"]: entry["status"] for entry in entries}
     assert statuses["lcps-astoriaphotos-00001"] == "unconfirmed"
     assert statuses["lcps-astoriaphotos-00002"] == "success"
@@ -5473,7 +5530,9 @@ def test_cmd_upload_reports_a_sheets_read_failure_during_verify_instead_of_a_tra
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     logged = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-    entries = [entry for entry in logged if entry.get("record") != "run_header"]
+    # Row records only: "record" marks a run-level line (the header, the
+    # closing run summary), and a row carries no such key.
+    entries = [entry for entry in logged if "record" not in entry]
     assert [entry["status"] for entry in entries] == [
         "success",
         "success",
@@ -5667,7 +5726,9 @@ def test_cmd_upload_reports_a_sheets_write_failure_instead_of_a_traceback(
 
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     logged = [json.loads(line) for line in log_files[0].read_text(encoding="utf-8").splitlines()]
-    entries = [entry for entry in logged if entry.get("record") != "run_header"]
+    # Row records only: "record" marks a run-level line (the header, the
+    # closing run summary), and a row carries no such key.
+    entries = [entry for entry in logged if "record" not in entry]
     assert [entry["status"] for entry in entries] == ["success", "unconfirmed"]
 
 
@@ -8282,7 +8343,7 @@ def _sync_sheet_args(tmp_path, registry_path, **overrides):
     return args
 
 
-def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
+def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None, registry=None):
     """RecordingSheetClient, not FakeSheetClient: sync-metadata now WRITES to
     the Sheet (the hash stamp), and it re-reads before each write for the
     moved-row guard, so the fake has to apply writes to its own grid the way
@@ -8292,7 +8353,7 @@ def _setup_sync_sheet(tmp_path, monkeypatch, grid, sent, client=None):
     sent can ignore the second element."""
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(
-        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+        json.dumps(registry or make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
     if client is None:
         client = RecordingSheetClient(grid, SheetUploadRecorder())
@@ -9983,7 +10044,7 @@ def test_an_unwritable_summary_does_not_fail_a_run_that_reached_the_archive(
 
     registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
 
-    def full_disk(log_path, summary, live):
+    def full_disk(log_path, record):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr("ia_bulk.log_run_summary", full_disk)
@@ -11754,3 +11815,593 @@ def test_a_live_run_header_records_the_registrys_own_collection(tmp_path):
 
     header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
     assert header["collection"] == "lcpsociety"
+
+
+# Issue #26: the upload run's own machine-readable summary (#25 built only
+# sync-metadata's half), and the Sheet log tabs that mirror it.
+
+
+def _upload_log_entries(tmp_path):
+    log_file = next((tmp_path / "logs").glob("upload-*.jsonl"))
+    return [
+        json.loads(line)
+        for line in log_file.read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+
+def test_upload_ends_with_a_machine_readable_summary(tmp_path, monkeypatch):
+    """Upload's closing counts lived only in console output, so an unattended
+    run left nothing a program could read without replaying every per-row
+    record - the gap #25 closed for sync-metadata and not for upload."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["record"] == "run_summary"
+    assert summary["succeeded"] == 2
+    assert summary["attempted"] == 2
+    assert summary["failures"] == []
+    assert summary["unconfirmed"] == []
+    assert summary["skipped"] == []
+    assert summary["not_attempted"] == 0
+    assert summary["rate_limited"] is False
+
+
+def test_the_upload_summary_names_each_failed_row_and_why(tmp_path, monkeypatch):
+    """A summary reporting "1 error(s)" and nothing else sends the reader back
+    to the per-row lines it exists to replace. The identifier recorded is the
+    row's permanent one, matching the per-row records above it."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        fail_for=(f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == [
+        {"identifier": "lcps-astoriaphotos-00002", "error": "boom"}
+    ]
+    assert summary["succeeded"] == 1
+    assert summary["attempted"] == 2
+
+
+def test_the_upload_summary_separates_uploaded_but_unrecorded_from_refused(
+    tmp_path, monkeypatch, capsys
+):
+    """The distinction the summary exists to preserve, and the one that costs
+    the most to get wrong. A refused send created nothing and left the
+    identifier free; an unconfirmed row IS on Internet Archive but unmarked in
+    the Sheet, so a later run reads it as un-uploaded and would send the same
+    photograph again under a second permanent identifier. A flat failure list
+    would flatten the two."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, raise_on_write=2
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == []
+    assert [entry["identifier"] for entry in summary["unconfirmed"]] == [
+        "lcps-astoriaphotos-00001"
+    ]
+    assert summary["succeeded"] == 1
+
+
+def test_a_row_held_back_by_validation_is_skipped_not_failed(tmp_path, monkeypatch, capsys):
+    """A skipped row was never sent, so nothing about the item changed. Folded
+    into `failures` it would read as "Internet Archive refused this", sending
+    a reader months later to look at an item that was never contacted."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    # Only photo2 exists on disk, so row 1 is READY (every required column is
+    # filled) but invalid - which is what `blocked` means. A blank required
+    # column would make it NOT_READY instead, and a not-ready row was never
+    # in this run's scope to skip.
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo2.jpg",)
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["failures"] == []
+    assert len(summary["skipped"]) == 1
+    assert "photo1.jpg" in summary["skipped"][0]["error"]
+    assert summary["succeeded"] == 1
+    assert exit_code == 1
+
+
+def test_a_rate_limited_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys):
+    """An unattended run that stopped early looks, in every count except this
+    flag, like a run that simply had little to do. The reader has to be able
+    to tell "finished" from "stopped, resume tomorrow" without parsing
+    stderr."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [
+        [f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 6)
+    ]
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=tuple(f"photo{n}.jpg" for n in range(1, 6)),
+    )
+
+    def rate_limited_on_the_third(row, target_identifier, collection, files_dir):
+        recorder.events.append(("upload", target_identifier))
+        if target_identifier.endswith("00003"):
+            raise UploadFailed(
+                f"upload of '{target_identifier}' failed with status 503: SlowDown",
+                status_code=503,
+            )
+
+    monkeypatch.setattr("ia_bulk.upload_row", rate_limited_on_the_third)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["rate_limited"] is True
+    assert summary["succeeded"] == 2
+    assert summary["not_attempted"] == 2
+    assert [entry["identifier"] for entry in summary["failures"]] == [
+        "lcps-astoriaphotos-00003"
+    ]
+
+
+def test_the_upload_console_tail_and_the_summary_record_cannot_disagree(
+    tmp_path, monkeypatch, capsys
+):
+    """Both are rendered from one UploadSummary. Pinned end to end because the
+    two used to be computed separately - a counts dict for the console and
+    nothing at all for a program - which is exactly the drift #25 closed for
+    sync-metadata."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        fail_for=(f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert (
+        f"{summary['succeeded']} file(s) uploaded successfully, "
+        f"{len(summary['failures'])} error(s)" in out.splitlines()
+    )
+
+
+def test_an_upload_summary_that_cannot_be_written_does_not_fail_the_run(
+    tmp_path, monkeypatch, capsys
+):
+    """The summary is a record OF the run, not a step IN it, and it is written
+    last - by the time it fails, items already exist on Internet Archive under
+    permanent identifiers. A run reported as failed invites a rerun, which is
+    the one outcome this must never cause."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    def refuse(log_path, record):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("ia_bulk.log_run_summary", refuse)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "disk full" in captured.err
+    assert "1 file(s) uploaded successfully" in captured.out
+
+
+# Issue #26: mirroring a run's summary into the Sheet's own log tab.
+
+
+def _log_tab_registry(tmp_path, **overrides):
+    return make_sheet_registry(files_dir=str(tmp_path), upload_log_tab="Upload Log", **overrides)
+
+
+def test_an_upload_run_appends_its_summary_to_the_configured_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    """The point is remote diagnosis: when someone calls months from now, the
+    Sheet opens from anywhere, and the JSONL on a Mac in the office does
+    not."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=_log_tab_registry(tmp_path)
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    tab = client.log_tabs["Upload Log"]
+    assert tab.ensured == [["when", "run", "outcome", "identifier", "detail"]]
+    assert len(tab.appended) == 1
+    when, run, outcome, identifier, detail = tab.appended[0]
+    assert outcome == "summary"
+    assert identifier == ""
+    # The tab says exactly what the operator saw on screen, and names the
+    # JSONL to go and read for the per-file detail.
+    assert detail in out.splitlines()
+    assert run.startswith("upload-") and run.endswith(".jsonl")
+    # The tab and the JSONL are one record rendered twice, down to the
+    # timestamp: `when` has to find its own line in the file it names. Two
+    # as_record() calls a second apart would leave it naming nothing.
+    assert when == _upload_log_entries(tmp_path)[-1]["timestamp"]
+
+
+def test_each_failed_row_gets_its_own_line_in_the_log_tab(tmp_path, monkeypatch, capsys):
+    """A count alone sends the caller back to the file this tab exists to
+    replace."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        registry=_log_tab_registry(tmp_path),
+        fail_for=(f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",),
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    rows = client.log_tabs["Upload Log"].appended
+    assert [row[2:] for row in rows[1:]] == [
+        ["failure", "lcps-astoriaphotos-00002", "boom"]
+    ]
+
+
+def test_no_log_tab_is_written_when_the_registry_names_none(tmp_path, monkeypatch, capsys):
+    """Absent means off. A default tab name would have every run create a tab
+    in a Sheet whose owner never asked for one."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert client.log_tabs == {}
+
+
+def test_a_dry_run_writes_nothing_to_the_log_tab(tmp_path, monkeypatch, capsys):
+    """A dry run uploads nothing, so it has no run to report. Writing a row
+    saying so would put runs in the tab that never happened."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=_log_tab_registry(tmp_path)
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, dry_run=True))
+    capsys.readouterr()
+
+    assert client.log_tabs == {}
+
+
+def test_a_log_tab_that_cannot_be_written_does_not_fail_the_upload(
+    tmp_path, monkeypatch, capsys
+):
+    """Acceptance criterion 3 of #26, end to end. The files are already on
+    Internet Archive under permanent identifiers by the time this runs; a
+    failed telemetry write reported as a failed upload would invite the one
+    thing that costs something - a rerun."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        registry=_log_tab_registry(tmp_path),
+        raise_on_log_tab=True,
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path=tmp_path / "registry.json"))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "1 file(s) uploaded successfully" in captured.out
+    assert "could not mirror this run into its Sheet log tab" in captured.err
+    assert "Sheets API returned 503" in captured.err
+
+
+def test_the_log_tab_client_cannot_write_to_the_metadata_columns(
+    tmp_path, monkeypatch, capsys
+):
+    """#26's standing constraint - Sheet -> Internet Archive stays
+    one-directional - asserted structurally rather than by inspection: what
+    the mirror is handed has no cell-write method at all."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=_log_tab_registry(tmp_path)
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    captured = capsys.readouterr()
+
+    # Nothing on stderr is what proves the mirror made no call the log tab
+    # could not serve: mirror_run catches everything, so a stray write_cells
+    # would surface here and nowhere else.
+    assert captured.err == ""
+    # Every cell write this run made went to the metadata tab's client; the
+    # log tab saw appends and nothing else.
+    assert client.write_count > 0
+    assert client.log_tabs["Upload Log"].appended
+
+
+def _sync_log_registry(tmp_path):
+    return make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+
+
+def test_a_sync_run_that_changed_something_appends_to_its_own_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    """Sync gets its own tab rather than sharing upload's: an hourly job and
+    a once-a-week upload interleaved in one tab would bury the upload rows
+    someone opened the Sheet to find."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert len(rows) == 1
+    assert rows[0][2] == "summary"
+    assert rows[0][1].startswith("sync-metadata-")
+    assert rows[0][4] in out.splitlines()
+
+
+def test_a_sync_run_with_nothing_to_do_leaves_the_log_tab_alone(
+    tmp_path, monkeypatch, capsys
+):
+    """The steady state of an hourly job, and the reason the tab stays
+    readable. A row every hour saying "4,212 already in sync" would be 9,000
+    rows a year, burying the handful that report an actual problem. The run
+    is still fully recorded in its own JSONL."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    client.log_tabs.clear()
+
+    # Second run: every row now matches its last push, so the hash gate holds
+    # them all back and the run does nothing.
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert "already match their last push" in out
+    assert client.log_tabs.get("Sync Log") is None or client.log_tabs["Sync Log"].appended == []
+
+
+def test_a_sync_run_that_only_failed_still_reaches_the_log_tab(tmp_path, monkeypatch, capsys):
+    """The quiet-run guard must not silence the runs that matter: a run that
+    pushed nothing because everything was refused is precisely what someone
+    opens the Sheet to find."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+
+    def refused(metadata, target):
+        raise RuntimeError("Access Denied - This item has been taken offline")
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", refused)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert [row[2] for row in rows] == ["summary", "failure", "failure"]
+    assert "Access Denied" in rows[1][4]
+
+
+def test_the_csv_upload_path_ends_with_the_same_summary_record(tmp_path, monkeypatch, capsys):
+    """The offline fallback is the path most likely to be run unattended, and
+    a summary only the Sheet path writes makes "read the run summary" advice
+    that silently does not apply half the time - the same reasoning that gave
+    sync-metadata's --csv path one in #25. It writes no log tab: there is no
+    Sheet on this path to write one into."""
+    from ia_bulk import cmd_upload
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    (tmp_path / "photo2.jpg").write_bytes(b"x")
+    csv_path = tmp_path / "rows.csv"
+    write_csv(
+        csv_path,
+        ["identifier", "file", "mediatype", "title"],
+        [
+            {
+                "identifier": "lcps-astoriaphotos-00001",
+                "file": "photo1.jpg",
+                "mediatype": "image",
+                "title": "One",
+            },
+            {
+                "identifier": "lcps-astoriaphotos-00002",
+                "file": "photo2.jpg",
+                "mediatype": "image",
+                "title": "Two",
+            },
+        ],
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
+
+    def fail_the_second(row, target_identifier, collection, files_dir):
+        if target_identifier.endswith("00002"):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("ia_bulk.upload_row", fail_the_second)
+
+    cmd_upload(
+        make_upload_args(
+            tmp_path,
+            registry_path,
+            csv=str(csv_path),
+            files_dir=str(tmp_path),
+            collection="lcps",
+        )
+    )
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert summary["record"] == "run_summary"
+    assert summary["succeeded"] == 1
+    assert [entry["identifier"] for entry in summary["failures"]] == [
+        "lcps-astoriaphotos-00002"
+    ]
+
+
+def test_a_row_moved_mid_run_reaches_the_summary_and_the_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    """Both causes of "nothing was sent for this row" have to survive into the
+    summary: validation held it back, or the Sheet was edited underneath the
+    run. The second is the one someone telephones about - it means a
+    volunteer was editing while the run was going - and it is the one that
+    exists nowhere else at run level, since `not_attempted` is a bare count
+    with no identifier in it.
+
+    Two rows at chunk_size 1: row 1's file cell changes before chunk 1's
+    pre-reserve guard reads it, so the run reports it moved and sends
+    nothing for it.
+    """
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [
+        [f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in (1, 2)
+    ]
+
+    def move_row_1_before_the_first_chunk_verifies(live_grid, read_count):
+        if read_count == 2:
+            live_grid[1][1] = "somethingelse.jpg"
+
+    _, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg"),
+        registry=_log_tab_registry(tmp_path),
+        before_read=move_row_1_before_the_first_chunk_verifies,
+    )
+
+    cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, chunk_size=1)
+    )
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+
+    assert [entry["identifier"] for entry in summary["skipped"]] == [
+        "lcps-astoriaphotos-00001"
+    ]
+    assert "edited while the run was in progress" in summary["skipped"][0]["error"]
+    # and it reaches the tab, which is where it would actually be read
+    rows = client.log_tabs["Upload Log"].appended
+    assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00001"]]
+
+
+def test_a_sync_run_with_only_skips_mirrors_the_line_the_operator_saw(
+    tmp_path, monkeypatch, capsys
+):
+    """The nothing-to-push path prints "nothing to sync - ..." and never the
+    usual "N updated, N unchanged, N error(s)" line. It is still mirrored when
+    a row was skipped, and the tab has to say what the operator saw rather
+    than a count line that appeared nowhere on screen."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_sync_sheet(
+        tmp_path, monkeypatch, _two_synced_rows(), [], registry=_sync_log_registry(tmp_path)
+    )
+    # First run stamps both rows, so the second finds nothing to push.
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    capsys.readouterr()
+    client.log_tabs.clear()
+
+    # Marked uploaded but naming no item: skipped before the hash gate.
+    ia_url_column = client.grid[0].index("ia_url")
+    client.grid[2][ia_url_column] = ""
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert rows[0][2] == "summary"
+    assert rows[0][4].startswith("nothing to sync")
+    assert rows[0][4] in out.splitlines()
+    assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00002"]]
