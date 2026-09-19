@@ -1650,20 +1650,10 @@ def header_validation(fieldnames: list[str]) -> list[RowValidation]:
 
 
 def build_sheet_client(config: ProjectConfig, live: bool) -> SheetClient:
-    """The only place `google_auth.load_credentials` and
-    `googleapiclient.discovery.build` are called. Every Sheet-touching code
-    path (cmd_validate now, upload/sync-metadata in later tasks) goes through
-    this one function, so tests can monkeypatch this single seam and run with
-    no credentials and no network.
-
-    interactive=True whenever a human is at a terminal to see the OAuth
-    consent-flow browser tab; sys.stdin.isatty() is False for anything
-    unattended (cron, CI), where load_credentials fails fast with
-    AuthUnavailable instead of hanging waiting for a browser nobody sees."""
-    credentials = google_auth.load_credentials(
-        google_auth.DEFAULT_TOKEN_PATH,
-        google_auth.DEFAULT_CLIENT_SECRETS_PATH,
-        interactive=sys.stdin.isatty(),
+    """The only place credentials are loaded and `googleapiclient.discovery.build` is
+    called, so tests monkeypatch this one seam."""
+    credentials = google_auth.load_service_account_credentials(
+        google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
     )
     service = googleapiclient.discovery.build("sheets", "v4", credentials=credentials)
     return SheetClient(service, config.sheet_id_for(live), config.sheet_tab)
@@ -2351,6 +2341,14 @@ def sheet_banner(config: ProjectConfig, live: bool) -> str:
     )
 
 
+def sheet_sharing_target() -> str:
+    """Who the Sheet must be shared with, for error messages."""
+    key_path = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
+    return google_auth.service_account_email(key_path) or (
+        f"the service account whose key is at {key_path}"
+    )
+
+
 def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command: str) -> SheetRead:
     """Everything all three Sheet-path commands do between printing their
     banner and starting their own work.
@@ -2376,7 +2374,11 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
         )
         raise SheetSetupFailed
 
-    client = build_sheet_client(config, live)
+    try:
+        client = build_sheet_client(config, live)
+    except google_auth.AuthUnavailable as exc:
+        print(f"could not authenticate to Google Sheets: {exc}", file=sys.stderr)
+        raise SheetSetupFailed from exc
     try:
         grid = client.read_grid()
     except HttpError as exc:
@@ -2384,7 +2386,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
             f"could not read spreadsheet '{sheet_id}' tab '{config.sheet_tab}': {exc}. Check "
             f"that 'sheet_tab' in {args.registry} names the tab exactly (case-sensitive) as it "
             "appears in the Sheet, that the spreadsheet ID is correct, and that the Sheet has "
-            "been shared with the Google account you authorized as.",
+            f"been shared, as Editor, with {sheet_sharing_target()}.",
             file=sys.stderr,
         )
         raise SheetSetupFailed from exc
@@ -2406,7 +2408,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
         # A dedicated branch, not just another row-1 structural error: an
         # empty read is far more likely to mean a wrong tab name, an
         # unpopulated copy of the Sheet, or a Sheet never actually shared
-        # with the account you authorized as than a real project with zero
+        # with the service account than a real project with zero
         # rows, and reporting that as success would defeat the purpose of
         # running the command at all. Handled separately from the normal
         # report (rather than folded into sheet_structure_validation's row-1
@@ -3446,7 +3448,8 @@ class SheetUploadRun:
             print(
                 f"the Sheet {step} write failed: {exc}. Stopping here rather than uploading more "
                 "items this run cannot record. Nothing is lost - rerun once the Sheet is "
-                "reachable and every unrecorded row is picked up from where it stopped.",
+                f"reachable and shared, as Editor, with {sheet_sharing_target()}, and every "
+                "unrecorded row is picked up from where it stopped.",
                 file=sys.stderr,
             )
             return False

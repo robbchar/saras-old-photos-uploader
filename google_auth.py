@@ -1,135 +1,77 @@
-"""OAuth for the Sheets API.
+"""Service-account credentials for the Sheets API.
 
-The Cloud project must sit inside the lcpsociety.org organization with the
-consent screen's user type set to Internal. That combination needs no Google
-verification review and is not subject to the 7-day refresh-token expiry that
-applies to External apps in Testing status. A gmail.com account cannot
-authorize an Internal app - Google returns org_internal."""
+The Sheet must be shared, as Editor, with the key's client_email. See docs/DECISIONS.md,
+"The Sheet is reached as a service account, not as a person"."""
 from __future__ import annotations
 
-import os
-import tempfile
+import json
 from pathlib import Path
-from typing import cast
 
 from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2 import service_account
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
-# Anchored to the project root (this file's own directory, which is where
-# ia_bulk.py also lives) rather than left as bare relative Paths. A relative
-# Path resolves against the process's current working directory at the
-# moment it's opened/checked - not at import time - so running
-# `python ia_bulk.py validate ...` from any directory other than the project
-# root would silently miss an existing cached token and write .ignored/
-# somewhere unintended instead of failing loudly.
+# Anchored to this file's directory so the working directory never changes which key is read.
 _PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_TOKEN_PATH = _PROJECT_ROOT / ".ignored" / "google-token.json"
-DEFAULT_CLIENT_SECRETS_PATH = _PROJECT_ROOT / ".ignored" / "google-client-secret.json"
+DEFAULT_SERVICE_ACCOUNT_KEY_PATH = _PROJECT_ROOT / ".ignored" / "google-service-account.json"
 
 
 class AuthUnavailable(Exception):
     pass
 
 
-def load_credentials(
-    token_path: Path, client_secrets_path: Path, interactive: bool
-) -> Credentials:
-    credentials = None
-    if token_path.exists():
-        try:
-            credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-        except (ValueError, AttributeError) as exc:
-            # ValueError covers both malformed JSON (json.JSONDecodeError is
-            # a ValueError subclass) and valid JSON missing the required
-            # fields; AttributeError covers valid JSON of the wrong shape
-            # entirely, e.g. a JSON list or string instead of an object.
-            raise AuthUnavailable(
-                f"the cached token at {token_path} is unreadable ({exc}). Delete "
-                "it and re-run any command (for example 'python ia_bulk.py validate "
-                "--project <id>') from a terminal to re-authorize."
-            ) from exc
-
-    if credentials and credentials.valid:
-        return credentials
-
-    if credentials and credentials.expired and credentials.refresh_token:
-        try:
-            credentials.refresh(Request())
-        except TransportError as exc:
-            # Google could not be REACHED - a dropped connection, DNS failure,
-            # captive portal, proxy refusing CONNECT. Distinct from a dead
-            # refresh token below and must not be treated as one: the cached
-            # credentials are probably fine, so falling through to the consent
-            # flow would discard a working token and open a browser that
-            # cannot reach Google either. google.auth.transport.requests.Request
-            # wraps every requests-level failure in TransportError, so this one
-            # class covers the whole transport layer.
-            raise AuthUnavailable(
-                f"could not reach Google to refresh the cached token ({exc}). This is a "
-                "network problem, not an authorization one - the cached token at "
-                f"{token_path} is left alone. Check the connection and re-run; there is "
-                "nothing to re-authorize."
-            ) from exc
-        except RefreshError:
-            # The refresh token itself is dead -- revoked, or killed by an
-            # org password change. Treat this exactly like having no cached
-            # credentials at all so the caller can re-consent below, rather
-            # than leaking a raw google.auth exception up to the caller.
-            credentials = None
-        else:
-            _save(credentials, token_path)
-            return credentials
-
-    if not interactive:
+def load_service_account_credentials(key_path: Path) -> service_account.Credentials:
+    """Load the key and fetch a token now, so a bad key fails before any Sheet work."""
+    if not key_path.exists():
         raise AuthUnavailable(
-            "Google authorization is needed but this run is not attached to a "
-            "terminal, so the browser consent flow cannot be shown. Run "
-            "any command (for example 'python ia_bulk.py validate --project <id>') "
-            "from a terminal first to complete it."
+            f"missing service account key at {key_path}. Create a JSON key for the "
+            "service account in the Google Cloud console (IAM & Admin -> Service "
+            "Accounts -> Keys) and save it there."
         )
-
-    if not client_secrets_path.exists():
+    try:
+        credentials = service_account.Credentials.from_service_account_file(
+            str(key_path), scopes=SCOPES
+        )
+    except OSError as exc:
         raise AuthUnavailable(
-            f"missing OAuth client secrets at {client_secrets_path}. Download the "
-            "desktop client credentials from the Google Cloud console (Internal "
-            "user type) and save them there."
-        )
+            f"could not read the service account key at {key_path} ({exc}). Check the "
+            "file's owner and permissions."
+        ) from exc
+    except (ValueError, AttributeError) as exc:
+        # ValueError: bad JSON, missing fields, or a bad PEM; AttributeError: JSON that is not an object.
+        raise AuthUnavailable(
+            f"the file at {key_path} is not a readable service account key ({exc}). "
+            "Replace it with the JSON key downloaded from the Google Cloud console."
+        ) from exc
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets_path), SCOPES)
-    # run_local_server's inferred return type is a union that also covers
-    # workforce-identity-federation credentials; that branch only triggers
-    # for a "3pi" client config, which from_client_secrets_file never
-    # produces, so the runtime value is always oauth2.credentials.Credentials.
-    credentials = cast(Credentials, flow.run_local_server(port=0))
-    _save(credentials, token_path)
+    try:
+        credentials.refresh(Request())
+    except TransportError as exc:
+        raise AuthUnavailable(
+            f"could not reach Google to authenticate ({exc}). This is a network "
+            "problem, not a credential one - check the connection and re-run."
+        ) from exc
+    except RefreshError as exc:
+        if exc.retryable:
+            raise AuthUnavailable(
+                f"Google could not issue a token right now ({exc}). This is a temporary "
+                "problem, not a credential one - re-run in a few minutes."
+            ) from exc
+        raise AuthUnavailable(
+            f"Google rejected the service account key at {key_path} ({exc}). Check that "
+            "this computer's clock is correct; otherwise the key or the service account may "
+            "have been deleted or disabled in the Google Cloud console - create a new key "
+            "and save it there."
+        ) from exc
     return credentials
 
 
-def _save(credentials: Credentials, token_path: Path) -> None:
-    """Write the token atomically.
-
-    This tool runs long unattended batches, so a process killed mid-write
-    must never leave a truncated token file behind -- that would surface
-    later as an opaque corrupt-token failure with no clue what happened.
-    Writing to a temp file in the same directory and then swapping it into
-    place with os.replace() means the on-disk file is always either the old
-    complete token or the new complete token, never a partial one.
-    """
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=token_path.parent, prefix=f".{token_path.name}.", suffix=".tmp"
-    )
+def service_account_email(key_path: Path) -> str | None:
+    """The address the Sheet must be shared with, or None when the key cannot say."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-            tmp_file.write(credentials.to_json())
-        os.replace(tmp_name, token_path)
-    except BaseException:
-        try:
-            os.remove(tmp_name)
-        except OSError:
-            pass
-        raise
+        email = json.loads(key_path.read_text(encoding="utf-8")).get("client_email")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return email if isinstance(email, str) and email else None

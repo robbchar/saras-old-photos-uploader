@@ -17,11 +17,13 @@ it first.
 ## [Foundations](decisions/FOUNDATIONS.md)
 
 The choices everything else rests on: what talks to Internet Archive, what is
-configuration, and what was accepted as a known limit rather than missed.
+configuration, how the Sheet is reached, and what was accepted as a known
+limit rather than missed.
 
 - [Use the `internetarchive` Python library, not `ia upload --spreadsheet`](decisions/FOUNDATIONS.md#use-the-internetarchive-python-library-not-ia-upload---spreadsheet)
 - [Generic to "a project", not hardcoded to photos](decisions/FOUNDATIONS.md#generic-to-a-project-not-hardcoded-to-photos)
 - [Technical configuration lives in the registry, not the command line](decisions/FOUNDATIONS.md#technical-configuration-lives-in-the-registry-not-the-command-line)
+- [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person)
 - [Accepted, not overlooked](decisions/FOUNDATIONS.md#accepted-not-overlooked)
 
 ## [Identifiers](decisions/IDENTIFIERS.md)
@@ -170,10 +172,7 @@ run writes down about itself.
   reserve in the Sheet before uploading, and track completion in an
   `ia_uploaded` column so an interrupted run is recoverable.
 - ~~Which Google credential type the Sheet integration uses~~ **Settled
-  2026-08-08**: OAuth with the **Internal** user type, which requires the Cloud
-  project to sit inside the lcpsociety.org organization and the operator to
-  hold an `@lcpsociety.org` account. An API key was ruled out (read-only, and
-  only reaches publicly shared sheets); a service account was ruled out because
-  it loses per-person attribution in the Sheet's edit history.
+  2026-08-08** as OAuth with the **Internal** user type; **superseded
+  2026-09-18** — see [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person).
 - Automating the Sheet → CSV *export* was raised and deferred pending maintainer
   input. **Superseded 2026-08-08** by reading the Sheet directly (above).

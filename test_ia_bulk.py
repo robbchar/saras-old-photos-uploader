@@ -16,6 +16,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
+import google_auth
 from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
     read_csv,
@@ -1579,7 +1580,9 @@ class _RecordingSheetsService:
 
 def test_build_sheet_client_reads_the_real_sheet_id_when_live(monkeypatch):
     fake_service = _RecordingSheetsService({"values": [["Title"]]})
-    monkeypatch.setattr("ia_bulk.google_auth.load_credentials", lambda *a, **k: "FAKE_CREDS")
+    monkeypatch.setattr(
+        "ia_bulk.google_auth.load_service_account_credentials", lambda key_path: "FAKE_CREDS"
+    )
     monkeypatch.setattr("ia_bulk.googleapiclient.discovery.build", lambda *a, **k: fake_service)
     config = ProjectConfig(
         project_id="astoriaphotos",
@@ -1604,7 +1607,9 @@ def test_build_sheet_client_reads_the_real_sheet_id_when_live(monkeypatch):
 
 def test_build_sheet_client_reads_the_test_sheet_id_when_not_live(monkeypatch):
     fake_service = _RecordingSheetsService({"values": [["Title"]]})
-    monkeypatch.setattr("ia_bulk.google_auth.load_credentials", lambda *a, **k: "FAKE_CREDS")
+    monkeypatch.setattr(
+        "ia_bulk.google_auth.load_service_account_credentials", lambda key_path: "FAKE_CREDS"
+    )
     monkeypatch.setattr("ia_bulk.googleapiclient.discovery.build", lambda *a, **k: fake_service)
     config = ProjectConfig(
         project_id="astoriaphotos",
@@ -1630,10 +1635,8 @@ def test_build_sheet_client_reads_the_test_sheet_id_when_not_live(monkeypatch):
 def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkeypatch):
     captured = {}
 
-    def fake_load_credentials(token_path, client_secrets_path, interactive):
-        captured["token_path"] = token_path
-        captured["client_secrets_path"] = client_secrets_path
-        captured["interactive"] = interactive
+    def fake_load_service_account_credentials(key_path):
+        captured["key_path"] = key_path
         return "FAKE_CREDS"
 
     def fake_build(api, version, credentials):
@@ -1642,7 +1645,10 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
         captured["credentials"] = credentials
         return _RecordingSheetsService({"values": []})
 
-    monkeypatch.setattr("ia_bulk.google_auth.load_credentials", fake_load_credentials)
+    monkeypatch.setattr(
+        "ia_bulk.google_auth.load_service_account_credentials",
+        fake_load_service_account_credentials,
+    )
     monkeypatch.setattr("ia_bulk.googleapiclient.discovery.build", fake_build)
     config = ProjectConfig(
         project_id="astoriaphotos",
@@ -1664,6 +1670,7 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
     assert captured["credentials"] == "FAKE_CREDS"
     assert captured["api"] == "sheets"
     assert captured["version"] == "v4"
+    assert captured["key_path"] == google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
 
 
 def test_cmd_validate_reads_the_sheet_and_injects_mediatype_when_csv_is_omitted(
@@ -2253,6 +2260,76 @@ def test_cmd_validate_turns_an_http_error_reading_the_sheet_into_an_actionable_m
     assert "Sheet1" in err
     assert str(registry_path) in err
     assert "sheet_tab" in err
+
+
+def test_cmd_validate_turns_unavailable_google_credentials_into_a_clean_error(
+    tmp_path, monkeypatch, capsys
+):
+    """A missing or rejected key ends the run with a message, not a traceback."""
+    from ia_bulk import cmd_validate
+
+    def _no_key(key_path):
+        raise google_auth.AuthUnavailable(f"missing service account key at {key_path}.")
+
+    monkeypatch.setattr("ia_bulk.google_auth.load_service_account_credentials", _no_key)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+
+    exit_code = cmd_validate(args)
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "missing service account key" in err
+
+
+def test_sheet_read_error_names_the_service_account_to_share_with(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_validate
+
+    key_path = tmp_path / "key.json"
+    key_path.write_text(
+        json.dumps({"client_email": "sheets-sync@example.iam.gserviceaccount.com"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("ia_bulk.google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH", key_path)
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client",
+        lambda config, live: RaisingSheetClient(
+            make_http_error("The caller does not have permission", status=403)
+        ),
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+
+    exit_code = cmd_validate(args)
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "sheets-sync@example.iam.gserviceaccount.com" in err
+    assert "as Editor" in err
+
+
+def test_sheet_read_error_names_the_key_path_when_the_key_cannot_be_read(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_validate
+
+    key_path = tmp_path / "missing-key.json"
+    monkeypatch.setattr("ia_bulk.google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH", key_path)
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client",
+        lambda config, live: RaisingSheetClient(
+            make_http_error("The caller does not have permission", status=403)
+        ),
+    )
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+
+    cmd_validate(args)
+    err = capsys.readouterr().err
+
+    assert str(key_path) in err
 
 
 def test_cmd_validate_flags_a_header_only_sheet_as_an_error_not_a_false_green(
@@ -5730,6 +5807,32 @@ def test_cmd_upload_reports_a_sheets_write_failure_instead_of_a_traceback(
     # closing run summary), and a row carries no such key.
     entries = [entry for entry in logged if "record" not in entry]
     assert [entry["status"] for entry in entries] == ["success", "unconfirmed"]
+
+
+def test_cmd_upload_write_failure_names_the_service_account_to_share_with(
+    tmp_path, monkeypatch, capsys
+):
+    """The same write failure also has to tell the operator who the Sheet
+    must be shared with, as Editor, so re-sharing is a one-step fix."""
+    from ia_bulk import cmd_upload
+
+    key_path = tmp_path / "key.json"
+    key_path.write_text(
+        json.dumps({"client_email": "sheets-sync@example.iam.gserviceaccount.com"}), encoding="utf-8"
+    )
+    monkeypatch.setattr("ia_bulk.google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH", key_path)
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, raise_on_write=2
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "sheets-sync@example.iam.gserviceaccount.com" in captured.err
+    assert "as Editor" in captured.err
 
 
 # ---------------------------------------------------------------------------

@@ -50,7 +50,7 @@ class SheetClient:
 
         A run that also writes a log tab is still one spreadsheet and one
         authenticated session; rebuilding a client through
-        build_sheet_client() would re-run the OAuth check and build a second
+        build_sheet_client() would re-run the credential check and build a second
         service for no reason.
 
         It is an AppendOnlyTab rather than another SheetClient because a

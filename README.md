@@ -92,7 +92,10 @@ pip install -r requirements.txt
 ```
 
 Requires `internetarchive` to be authenticated against the shared org
-account (`ia configure`) before running `upload` or `sync-metadata`.
+account (`ia configure`) before running `upload` or `sync-metadata`. Sheet
+commands also need the Google service account key saved at
+`.ignored/google-service-account.json` — see
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md), "Google Cloud prerequisites".
 
 ## Commands
 
@@ -120,8 +123,8 @@ python ia_bulk.py validate --project sarasoldphotos --csv items.csv --files-dir 
 so the preview is the run. Sheet path only. See `upload` below for the flag in
 full.
 
-For the Google Cloud setup this requires (OAuth consent screen, the
-`@lcpsociety.org` account requirement, the one-time browser consent) see
+For the Google Cloud setup this requires (the service account, its key file,
+and sharing the Sheet with it) see
 [`docs/OPERATIONS.md`](docs/OPERATIONS.md), "Google Cloud prerequisites"; for
 the reserve/upload/confirm protocol and registry fields in full see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and "Project registry" above.
