@@ -54,6 +54,7 @@ against a Sheet edited mid-run, and how corrections get back out.
 - [`--resume-from` filters on run mode](decisions/SHEET-PROTOCOL.md#--resume-from-filters-on-run-mode)
 - [A fingerprint only proves identity while it is unique](decisions/SHEET-PROTOCOL.md#a-fingerprint-only-proves-identity-while-it-is-unique)
 - [The Sheet's log tabs are telemetry, never an input](decisions/SHEET-PROTOCOL.md#the-sheets-log-tabs-are-telemetry-never-an-input)
+- [The rehearsal reset is a hand edit, not a command](decisions/SHEET-PROTOCOL.md#the-rehearsal-reset-is-a-hand-edit-not-a-command)
 
 ## [Readiness and errors](decisions/READINESS.md)
 

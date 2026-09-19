@@ -197,6 +197,8 @@ nothing. See
 [`README.md`](../README.md#append-rows--add-skeleton-rows-for-files-that-have-no-row)
 for exactly what it writes and refuses.
 
+## 1. Validate (before every upload)
+
 > **Run this before every `upload`, every time.** It is not optional and it is
 > not a first-run-only step. `validate` performs the *same* file resolution
 > `upload` does, but uploads nothing and writes nothing, so every row it
@@ -374,6 +376,57 @@ identifier, and on the Sheet path the row's `ia_url` cell holds the exact
 link once `--write-identifier` (or `--live`) has run. Spot-check a few of
 those URLs in a browser and confirm the metadata fields are the ones you
 meant, with the values you meant.
+
+### Re-rehearsing a row that is already done
+
+The rehearsal above repeats freely only while it writes nothing. Once
+`--write-identifier` (or `--live`) has run, the row carries both a minted
+identifier and an upload timestamp — and `classify_row()` in
+`identifiers.py` reads exactly those two cells. Both filled means `DONE`,
+and `DONE` rows are skipped from then on, so a later run prints
+
+```
+nothing to upload - every valid row is already marked uploaded
+```
+
+and exits having done nothing. **That output is correct behavior, not a
+failure.** It is the same guard that stops a re-run of a `--live` batch
+uploading the collection twice; it is only in the way during a rehearsal.
+
+To make rehearsed rows uploadable again, clear four cells on each of them in
+the **test** Sheet:
+
+| Column | Written by |
+|---|---|
+| `ia_identifier` | the mint, before the upload |
+| `ia_uploaded` | the confirm, after the upload |
+| `ia_url` | the confirm |
+| `ia_identifier_bib` | the confirm |
+
+Clearing `ia_identifier` is what actually returns the row to `UNASSIGNED`.
+The other three go with it so the row never sits in a state where its
+timestamp and URL describe an item it no longer names — the next run
+overwrites all three regardless.
+
+**The numbers are not burned.** The next run re-mints the *same* number, and
+because test mode prepends a fresh `zztest-<stamp>-` per invocation, it
+creates a brand-new sandbox item with no collision (see §2 above). A repeat
+rehearsal costs a four-column delete, never an identifier.
+
+There is no command for this, deliberately — see
+[`docs/DECISIONS.md`](DECISIONS.md), "The rehearsal reset is a hand edit, not
+a command". Do it in the test Sheet only. **Never in the real one**, where
+those four cells are the record that an item exists at all: clearing them
+tells the next run to mint a second identifier for a photograph that is
+already uploaded.
+
+**This is not the `sync-metadata` reset — the two are opposites.**
+`sync-metadata` only targets `DONE` rows, so clearing `ia_identifier` hides a
+row from it entirely. Its reset is a single cell: clear `ia_sync_hash` to
+re-send a row (§4, "Only a changed row is actually sent — and what to do if
+yours isn't"). Doing *this* section's reset before a `sync-metadata` run
+leaves it with no targets at all, and it returns before it even opens a log,
+so there is not even a run record to explain the silence.
 
 ## 3. Live run
 
@@ -575,15 +628,13 @@ substitution, and `tail` then reports `option used in invalid context`.
 
 ### Seeing the summary work, on purpose
 
-**Do not clear `ia_identifier` to set this up.** Clearing
-`ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib` is how an
-already-rehearsed row is made uploadable again, and it does the opposite
-of what is wanted here: a blank `ia_identifier` makes the row
-`UNASSIGNED` (`classify_row()` in `identifiers.py`), `sync-metadata` only
-targets `DONE` rows, and a run with no targets prints `nothing to sync -
-no row is marked uploaded yet` and returns **before** it opens a log — so
-there is no summary to read. `sync-metadata` corrects items that already
-exist; it needs rows that *are* marked uploaded.
+**Do not clear `ia_identifier` to set this up.** Clearing those four cells is
+the *upload* rehearsal reset — §2, ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done) — and it does the
+opposite of what is wanted here. `sync-metadata` corrects items that already
+exist, so it needs rows that *are* marked uploaded: with a blank
+`ia_identifier` every row reads `UNASSIGNED`, the run has no targets, and it
+prints `nothing to sync - no row is marked uploaded yet` and returns
+**before** it opens a log — so there is no summary to read either.
 
 First, clear `ia_sync_hash` on the rows you want in the demo — otherwise the
 hash gate correctly recognizes them as already synced and sends nothing.
@@ -808,11 +859,10 @@ first — never from the real one, where they are the only copy of that
 history outside the machine that ran the jobs.
 
 The upload steps need rows that can actually upload. If every ready row is
-already marked done, clear `ia_identifier`, `ia_uploaded`, `ia_url` and
-`ia_identifier_bib` on two or three of them. Numbers never burn, so this is
-safe for `upload` — but it is exactly wrong for the `sync-metadata` step,
-which needs rows that *are* marked uploaded (see "Seeing the summary work,
-on purpose", above).
+already marked done, reset two or three of them — §2, ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done).
+Numbers never burn, so this is safe for `upload` — but it is exactly wrong
+for the `sync-metadata` step, which needs rows that *are* marked uploaded
+(see "Seeing the summary work, on purpose", above).
 
 1. **One upload, twice.**
 

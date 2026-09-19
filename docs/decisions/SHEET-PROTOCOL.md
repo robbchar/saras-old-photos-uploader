@@ -373,3 +373,31 @@ to, and it means a tab someone deletes or renames repairs itself on the next
 run rather than silently swallowing every run after it. A tab an operator
 creates by hand before the first run is adopted and given its header, so it
 ends up identical to one this created.
+
+## The rehearsal reset is a hand edit, not a command
+
+*Decided 2026-09-19 — issue #37.*
+
+A row that has been rehearsed with `--write-identifier` is `DONE` forever,
+and rehearsing it again means clearing four cells in the test Sheet by hand.
+A `reset-test-sheet` subcommand was considered to do that clearing, and
+rejected.
+
+The work it saves is four cell deletions in a browser, done rarely, by the
+one person who rehearses. What it would cost is a command whose entire job
+is to destroy the tool's own record of what it uploaded — which needs its
+own guards, its own tests, and a refusal path proving it cannot be aimed at
+the real Sheet. `ProjectConfig.sheet_id_for()` already keeps *runs* off the
+real Sheet in test mode, but a reset command is a new way in, and the real
+Sheet is one config value away from the test one.
+
+The deletion being manual is also the point. In the real Sheet those four
+cells are the only local record that an IA item exists; clearing them tells
+the next run to mint a second permanent identifier for a photograph that is
+already uploaded. That is not an action worth making convenient. It is
+written down instead — see `docs/OPERATIONS.md`, §2, "Re-rehearsing a row
+that is already done".
+
+This does not generalize to the `sync-metadata` reset, which is one cell
+(`ia_sync_hash`), is safe by construction — a wrongly cleared row re-sends
+and IA reports it `unchanged` — and needs no command either.
