@@ -51,6 +51,43 @@ every Sheet command stops before doing anything and says which. A Sheet not
 yet shared with the service account fails its first read with a message naming
 the address to share it with.
 
+### Checking the service account
+
+Run this on any new machine (and after replacing the key) before trusting a
+real run. It needs about five minutes and changes nothing. `< /dev/null`
+detaches the command from the terminal, so nothing could stop and wait for a
+sign-in even if it tried.
+
+1. **Read the test Sheet.** Expect the normal readiness report and no sign-in
+   prompt:
+
+   ```bash
+   python ia_bulk.py validate --project sarasoldphotos < /dev/null
+   ```
+
+2. **Preview a sync.** Expect the usual summary line, for example
+   `10 uploaded rows; … 10 already in sync and would not be sent`:
+
+   ```bash
+   python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run < /dev/null
+   ```
+
+3. **See the failure message once.** Move the key aside, run `validate`,
+   and expect a single line starting `could not authenticate to Google
+   Sheets: missing service account key at …` with no traceback. Then put the
+   key back:
+
+   ```bash
+   mv .ignored/google-service-account.json .ignored/google-service-account.json.off
+   python ia_bulk.py validate --project sarasoldphotos
+   mv .ignored/google-service-account.json.off .ignored/google-service-account.json
+   ```
+
+For a full round trip — a real edit reaching Internet Archive, and the Sheet's
+version history showing the service account as its editor — follow
+[4. Corrections](#4-corrections) against the test Sheet: change one uploaded
+row's title, sync, check the item, then change it back and sync again.
+
 ## The pipeline
 
 ```
