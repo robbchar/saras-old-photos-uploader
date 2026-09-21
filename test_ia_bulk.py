@@ -4299,6 +4299,82 @@ def test_cmd_doctor_returns_zero_when_everything_passes(monkeypatch):
     assert ia_bulk.cmd_doctor(args) == 0
 
 
+def test_build_parser_accepts_setup_with_enable_agent():
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo", "--enable-agent"])
+    assert args.command == "setup"
+    assert args.enable_agent is True
+
+
+def test_setup_does_not_enable_the_agent_by_default():
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert args.enable_agent is False
+
+
+def test_main_dispatches_to_cmd_setup(monkeypatch):
+    called = []
+    monkeypatch.setattr(ia_bulk, "cmd_setup", lambda args: called.append(args.command) or 0)
+    assert ia_bulk.main(["setup", "--project", "demo"]) == 0
+    assert called == ["setup"]
+
+
+def test_cmd_setup_without_enable_agent_never_calls_launchctl(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: pytest.fail("setup loaded the agent without --enable-agent"),
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert ia_bulk.cmd_setup(args) == 0
+
+
+def test_cmd_setup_with_enable_agent_bootstraps_it(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    loaded = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: loaded.append(path) or "loaded"
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "sarasoldphotos", "--enable-agent"])
+    ia_bulk.cmd_setup(args)
+    assert len(loaded) == 1
+
+
+def test_cmd_setup_reports_when_it_changed_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="already fine",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
+                remedy="none",
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert ia_bulk.cmd_setup(args) == 0
+    assert "nothing to change" in capsys.readouterr().out
+
+
+def test_cmd_setup_with_enable_agent_announces_before_it_bootstraps(monkeypatch, capsys):
+    """Both risky actions on a shared machine - permission changes and loading
+    the agent - must be announced before they happen, never only after."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: "loaded it")
+    monkeypatch.setattr(ia_bulk.platform_probe, "current_user", lambda: "sarasoldphotos")
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "sarasoldphotos", "--enable-agent"])
+    ia_bulk.cmd_setup(args)
+    out = capsys.readouterr().out
+    assert "starts a live sync run now, and again at every login" in out
+    load_announcement = out.index("loading")
+    bootstrap_result = out.index("loaded it")
+    assert load_announcement < bootstrap_result
+
+
+def test_cmd_setup_reuses_the_same_repo_root_build_deployment_checks_uses():
+    assert ia_bulk.REPO_ROOT == Path(ia_bulk.__file__).resolve().parent
+
+
 # ---------------------------------------------------------------------------
 # Task 10: the Sheet path's reserve -> upload -> confirm protocol.
 #

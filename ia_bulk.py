@@ -29,6 +29,7 @@ import deployment
 import google_auth
 import launch_agent
 import log_tab
+import platform_probe
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -54,6 +55,9 @@ from sync_state import (
     stamp_updates,
     sync_hash,
 )
+
+# Shared by build_deployment_checks and cmd_setup - one computed root, not two.
+REPO_ROOT = Path(__file__).resolve().parent
 
 REQUIRED_UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
 # Deliberately excludes "identifier" only - do not "fix" this back to
@@ -2494,7 +2498,7 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
     live = bool(args.live)
-    repo_root = Path(__file__).resolve().parent
+    repo_root = REPO_ROOT
     key_path = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
 
     checks = [
@@ -2532,6 +2536,34 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
 def cmd_doctor(args) -> int:
     checks = build_deployment_checks(args, include_network=not args.offline)
     results = deployment.run_checks(checks)
+    print(deployment.format_report(results))
+    return deployment.exit_code(results)
+
+
+def cmd_setup(args) -> int:
+    changes: list[str] = []
+
+    def announce(line: str) -> None:
+        changes.append(line)
+        print(line)
+
+    checks = build_deployment_checks(args, include_network=not args.offline)
+    results = deployment.converge(checks, announce)
+
+    if args.enable_agent:
+        registry = load_registry(args.registry)
+        config = load_project_config(registry, args.project)
+        spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id)
+        plist = launch_agent.plist_path(spec, Path.home())
+        # RunAtLoad means bootstrapping starts a live sync immediately, so say so
+        # before acting, not after.
+        announce(f"loading {spec.label} for {platform_probe.current_user()}")
+        announce("  this starts a live sync run now, and again at every login")
+        announce(f"  {platform_probe.launchctl_bootstrap(plist)}")
+        results = deployment.run_checks(checks)
+
+    if not changes:
+        print("nothing to change; this machine already matches the checkout.")
     print(deployment.format_report(results))
     return deployment.exit_code(results)
 
@@ -5762,6 +5794,23 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--live", action="store_true", help="Check the project's real Sheet instead of its test Sheet")
     doctor_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
 
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Bring this machine to the state this checkout needs, then verify. Safe to re-run",
+    )
+    setup_parser.add_argument("--project", required=True, help="Project ID from the registry")
+    setup_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    setup_parser.add_argument("--live", action="store_true", help="Converge against the project's real Sheet instead of its test Sheet")
+    setup_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
+    setup_parser.add_argument(
+        "--enable-agent",
+        action="store_true",
+        help=(
+            "Load the hourly sync LaunchAgent for the account running this. Run it from the "
+            "operating account, after the first live runs have been verified"
+        ),
+    )
+
     return parser
 
 
@@ -5781,6 +5830,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_append_rows(args)
     if args.command == "doctor":
         return cmd_doctor(args)
+    if args.command == "setup":
+        return cmd_setup(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2
