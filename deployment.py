@@ -10,7 +10,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import google_auth
 import platform_probe
+import sync_state
+from column_map import build_column_map
+from googleapiclient.errors import HttpError
 from project_config import ProjectConfig
 
 # Set by google-auth/google-api-core, not by language syntax. macOS ships 3.9.6.
@@ -185,4 +189,63 @@ def drive_check(files_dir: Path) -> Check:
         name="photo drive",
         probe=probe,
         remedy=f"plug in the LaCie drive, or correct files_dir so it points at {files_dir}",
+    )
+
+
+# 403 (not shared) and 404 (wrong ID) are real, actionable misconfiguration; every
+# other HttpError status, and any transport error, means only "could not tell".
+_SHEET_MISCONFIGURED_STATUSES = (403, 404)
+
+SheetProbe = Callable[[], list[list[str]]]
+
+
+def _read_grid_or_outcome(read_grid: SheetProbe) -> tuple[list[list[str]] | None, CheckOutcome | None]:
+    """Shared by both Sheet checks so one read failure is classified one way."""
+    try:
+        return read_grid(), None
+    except google_auth.AuthUnavailable as exc:
+        return None, CheckOutcome(Status.UNKNOWN, f"could not authenticate ({exc})")
+    except HttpError as exc:
+        if exc.resp.status in _SHEET_MISCONFIGURED_STATUSES:
+            return None, CheckOutcome(Status.FAIL, f"the Sheet refused this service account ({exc})")
+        return None, CheckOutcome(Status.UNKNOWN, f"Google Sheets returned an error ({exc})")
+    except OSError as exc:
+        return None, CheckOutcome(Status.UNKNOWN, f"could not reach the Sheet ({exc})")
+
+
+def sheet_reachable_check(read_grid: SheetProbe, sharing_target: str) -> Check:
+    def probe() -> CheckOutcome:
+        grid, failure = _read_grid_or_outcome(read_grid)
+        if failure is not None:
+            return failure
+        assert grid is not None
+        return CheckOutcome(Status.PASS, f"read {len(grid)} rows")
+
+    return Check(
+        name="spreadsheet reachable",
+        probe=probe,
+        remedy=f"share the Sheet as Editor with {sharing_target}",
+    )
+
+
+def sync_columns_check(read_grid: SheetProbe) -> Check:
+    def probe() -> CheckOutcome:
+        grid, failure = _read_grid_or_outcome(read_grid)
+        if failure is not None:
+            return failure
+        assert grid is not None
+        headers = grid[0] if grid else []
+        try:
+            sync_state.locate_sync_columns(build_column_map(headers))
+        except sync_state.MissingSyncColumns as exc:
+            return CheckOutcome(Status.FAIL, str(exc))
+        return CheckOutcome(Status.PASS, "both sync columns present")
+
+    return Check(
+        name="sync state columns",
+        probe=probe,
+        remedy=(
+            f"add the columns {' and '.join(sync_state.SYNC_STATE_COLUMNS)} to the Sheet, "
+            "then hide them - see docs/DEPLOYMENT.md"
+        ),
     )

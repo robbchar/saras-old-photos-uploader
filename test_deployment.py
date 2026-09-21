@@ -218,3 +218,102 @@ def test_python_version_check_passes_at_the_floor():
 
 def test_dependencies_check_passes_in_this_environment():
     assert deployment.dependencies_check().probe().status is Status.PASS
+
+
+import json
+
+import google_auth
+import sync_state
+from googleapiclient.errors import HttpError
+
+
+def grid_with(*headers):
+    return lambda: [list(headers), ["a-value"] * len(headers)]
+
+
+def make_http_error(message="The caller does not have permission", status=403):
+    """A realistic HttpError, as googleapiclient actually raises it: the real .resp
+    needs a .status and .reason, and .content must be the raw JSON error body Google's
+    API returns, not a plain string. Mirrors test_ia_bulk.py's make_http_error."""
+
+    class _FakeHttpResponse:
+        def __init__(self, status, reason):
+            self.status = status
+            self.reason = reason
+
+    content = json.dumps({"error": {"message": message}}).encode("utf-8")
+    return HttpError(
+        _FakeHttpResponse(status, reason="Forbidden"),
+        content,
+        uri="https://sheets.googleapis.com/v4/spreadsheets/TEST_SHEET_ID/values/Sheet1",
+    )
+
+
+def test_sheet_reachable_check_passes_when_the_grid_comes_back():
+    outcome = deployment.sheet_reachable_check(grid_with("identifier", "title"), "sa@x.com").probe()
+    assert outcome.status is Status.PASS
+
+
+def test_sheet_reachable_check_is_unknown_when_the_network_is_down():
+    def offline():
+        raise google_auth.AuthUnavailable("could not reach Google to authenticate")
+
+    outcome = deployment.sheet_reachable_check(offline, "sa@x.com").probe()
+    assert outcome.status is Status.UNKNOWN
+
+
+def test_sheet_reachable_check_fails_when_the_sheet_is_not_shared():
+    def forbidden():
+        raise make_http_error(status=403)
+
+    outcome = deployment.sheet_reachable_check(forbidden, "sa@x.com").probe()
+    assert outcome.status is Status.FAIL
+
+
+def test_sheet_reachable_check_fails_on_a_wrong_sheet_id():
+    def not_found():
+        raise make_http_error(message="Requested entity was not found.", status=404)
+
+    outcome = deployment.sheet_reachable_check(not_found, "sa@x.com").probe()
+    assert outcome.status is Status.FAIL
+
+
+def test_sheet_reachable_check_is_unknown_on_a_transient_google_error():
+    def flaky():
+        raise make_http_error(message="Internal error encountered.", status=500)
+
+    outcome = deployment.sheet_reachable_check(flaky, "sa@x.com").probe()
+    assert outcome.status is Status.UNKNOWN
+
+
+def test_sheet_reachable_check_names_the_address_to_share_with():
+    def forbidden():
+        raise make_http_error(status=403)
+
+    assert "sa@x.com" in deployment.sheet_reachable_check(forbidden, "sa@x.com").remedy
+
+
+def test_sync_columns_check_passes_when_both_columns_are_present():
+    probe = grid_with("identifier", "title", *sync_state.SYNC_STATE_COLUMNS)
+    assert deployment.sync_columns_check(probe).probe().status is Status.PASS
+
+
+def test_sync_columns_check_fails_and_names_the_missing_column():
+    probe = grid_with("identifier", "title", sync_state.IA_SYNC_HASH_COLUMN)
+    outcome = deployment.sync_columns_check(probe).probe()
+    assert outcome.status is Status.FAIL
+    assert sync_state.IA_LAST_SYNCED_COLUMN in outcome.detail
+
+
+def test_sync_columns_check_is_unknown_when_the_sheet_cannot_be_read():
+    def offline():
+        raise google_auth.AuthUnavailable("no network")
+
+    assert deployment.sync_columns_check(offline).probe().status is Status.UNKNOWN
+
+
+def test_sync_columns_check_fails_on_a_wrong_sheet_id():
+    def not_found():
+        raise make_http_error(message="Requested entity was not found.", status=404)
+
+    assert deployment.sync_columns_check(not_found).probe().status is Status.FAIL
