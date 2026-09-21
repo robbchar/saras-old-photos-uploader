@@ -45,7 +45,12 @@ from column_map import (
 )
 from ia_fields import PIPELINE_OWNED_FIELDS, metadata_to_send, suggest_standard_fields
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
-from project_config import ProjectConfig, load_project_config, unregistered_project_error
+from project_config import (
+    ConfigError,
+    ProjectConfig,
+    load_project_config,
+    unregistered_project_error,
+)
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
 from sync_state import (
@@ -2506,6 +2511,8 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
         deployment.dependencies_check(),
         deployment.key_present_check(key_path),
         deployment.key_mode_check(key_path),
+        deployment.ia_credentials_check(),
+        deployment.ia_credentials_mode_check(),
         deployment.sheet_id_check(config, live, args.registry),
         deployment.drive_check(Path(config.files_dir)),
     ]
@@ -2513,8 +2520,14 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     if include_network:
         # A closure, not an import: build_sheet_client stays the only place
         # credentials are loaded, and deployment.py never imports ia_bulk.
+        # Memoized because both Sheet checks share it: two clients meant two
+        # token fetches and two full reads of a 10,000-row Sheet per `doctor`.
+        cached_grid: dict[str, list[list[str]]] = {}
+
         def read_grid() -> list[list[str]]:
-            return build_sheet_client(config, live).read_grid()
+            if "grid" not in cached_grid:
+                cached_grid["grid"] = build_sheet_client(config, live).read_grid()
+            return cached_grid["grid"]
 
         checks.extend(
             [
@@ -2533,14 +2546,84 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     return checks
 
 
+ENABLE_AGENT_COMMAND = "./install.sh --project <project> --live --enable-agent"
+
+ENABLE_AGENT_NEEDS_LIVE = (
+    "--enable-agent loads an agent that runs `sync-metadata --live`, so it refuses to run "
+    "without --live: without it setup would verify the TEST Sheet and then start an hourly "
+    "live sync against a real Sheet whose ID, sharing and sync columns were never checked. "
+    f"Run: {ENABLE_AGENT_COMMAND}"
+)
+
+ENABLE_AGENT_NEEDS_NETWORK = (
+    "--enable-agent cannot be combined with --offline: the Sheet checks --offline skips are "
+    "exactly the ones that gate enabling a live agent. Re-run on a machine with network. "
+    f"Run: {ENABLE_AGENT_COMMAND}"
+)
+
+AGENT_NOT_ENABLED = (
+    "checks failed - the hourly sync agent was NOT enabled and nothing was loaded. Fix every "
+    f"[FAIL] line above, then re-run: {ENABLE_AGENT_COMMAND}"
+)
+
+AGENT_NOT_LOADED = "the hourly sync agent was not loaded - see the launchctl message above."
+
+
+def enable_agent_refusal(args) -> str | None:
+    """`--enable-agent` is the one flag that starts unattended live traffic, so
+    it refuses rather than infers what the operator meant."""
+    if not args.enable_agent:
+        return None
+    if not args.live:
+        return ENABLE_AGENT_NEEDS_LIVE
+    if args.offline:
+        return ENABLE_AGENT_NEEDS_NETWORK
+    return None
+
+
+def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
+    """Load the hourly agent, replacing an already-loaded one. True when launchd
+    took it. Bootout first because launchd holds its own copy of the plist from
+    bootstrap time, so a rewritten plist otherwise never takes effect."""
+    registry = load_registry(args.registry)
+    config = load_project_config(registry, args.project)
+    spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id)
+    plist = launch_agent.plist_path(spec, Path.home())
+
+    # RunAtLoad means bootstrapping starts a live sync immediately, so say so
+    # before acting, not after.
+    announce(f"loading {spec.label} for {platform_probe.current_user()}")
+    announce("  this starts a live sync run now, and again at every login")
+
+    if platform_probe.launchctl_print(spec.label) is not None:
+        announce("  it is already loaded - unloading it first so the new plist takes effect")
+        _unloaded, bootout_message = platform_probe.launchctl_bootout(spec.label)
+        announce(f"  {bootout_message}")
+
+    loaded, bootstrap_message = platform_probe.launchctl_bootstrap(plist)
+    announce(f"  {bootstrap_message}")
+    return loaded
+
+
 def cmd_doctor(args) -> int:
-    checks = build_deployment_checks(args, include_network=not args.offline)
+    try:
+        checks = build_deployment_checks(args, include_network=not args.offline)
+    except (ConfigError, json.JSONDecodeError, OSError) as exc:
+        # `doctor` is the command you talk someone through over the phone; a
+        # traceback is the one output that helps nobody.
+        print(f"could not read the project registry {args.registry}: {exc}", file=sys.stderr)
+        return 1
     results = deployment.run_checks(checks)
     print(deployment.format_report(results))
     return deployment.exit_code(results)
 
 
 def cmd_setup(args) -> int:
+    refusal = enable_agent_refusal(args)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 1
+
     changes: list[str] = []
 
     def announce(line: str) -> None:
@@ -2549,22 +2632,24 @@ def cmd_setup(args) -> int:
 
     checks = build_deployment_checks(args, include_network=not args.offline)
     results = deployment.converge(checks, announce)
+    agent_failed = False
 
     if args.enable_agent:
-        registry = load_registry(args.registry)
-        config = load_project_config(registry, args.project)
-        spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id)
-        plist = launch_agent.plist_path(spec, Path.home())
-        # RunAtLoad means bootstrapping starts a live sync immediately, so say so
-        # before acting, not after.
-        announce(f"loading {spec.label} for {platform_probe.current_user()}")
-        announce("  this starts a live sync run now, and again at every login")
-        announce(f"  {platform_probe.launchctl_bootstrap(plist)}")
+        # "Verify first, then enable" is the whole reason --enable-agent is a
+        # separate flag, so it consults the verification it just performed.
+        if deployment.exit_code(results) != 0:
+            print(deployment.format_report(results))
+            print(AGENT_NOT_ENABLED, file=sys.stderr)
+            return deployment.exit_code(results)
+        agent_failed = not load_sync_agent(args, announce)
         results = deployment.run_checks(checks)
 
     if not changes:
         print("nothing to change; this machine already matches the checkout.")
     print(deployment.format_report(results))
+    if agent_failed:
+        print(AGENT_NOT_LOADED, file=sys.stderr)
+        return 1
     return deployment.exit_code(results)
 
 
