@@ -165,8 +165,8 @@ def key_mode_check(key_path: Path) -> Check:
                 Status.UNKNOWN, "POSIX permissions cannot be checked on this platform"
             )
         owner = platform_probe.file_owner(key_path) or "unknown"
-        # Owner is reported, never asserted: the checkout is chowned to the shared
-        # account at handover, so a mismatch is news rather than an error.
+        # Owner is reported, never asserted: install and operation share one
+        # account, so an owner that is not the caller is worth seeing, not guessing at.
         if mode != KEY_MODE:
             return CheckOutcome(Status.FAIL, f"mode {mode:04o}, owner {owner}, want {KEY_MODE:04o}")
         return CheckOutcome(Status.PASS, f"mode {mode:04o}, owner {owner}")

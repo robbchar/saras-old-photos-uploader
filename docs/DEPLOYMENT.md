@@ -19,43 +19,46 @@ uploads. For that, start at [`docs/OPERATIONS.md`](OPERATIONS.md). You should
 only need this document on install day, when replacing a credential, or when
 upgrading the checkout.
 
-## 2. The two accounts
+## 2. Which account to do all of this from
 
-Two macOS accounts are involved, and they play different roles:
+**Do every step in this document while logged in as the shared operating
+account** — the one the pipeline runs under day to day. That means the clone,
+the service-account key, `ia configure`, `./install.sh`, `--enable-agent`, and
+every later upgrade.
 
-- **The installing account** — whoever sets the machine up (Robb, on-site).
-  This account runs `./install.sh`, creates the service-account key, and
-  authenticates `ia`.
-- **The operating account** — the shared account the pipeline actually runs
-  under day to day. At handover, the installer `chown`s the checkout to this
-  account so its ownership matches who runs it.
+The Mac also has an admin account for development. It is not used for any step
+here. Keeping installation and operation in one account is what makes this
+simple: one owner, one plist, no ownership to transfer, and nothing to get
+backwards later.
 
-> **The single easiest thing to get wrong on install day:** a macOS
-> LaunchAgent is per-user. A plist placed in `~/Library/LaunchAgents` only
-> loads for the account it belongs to, and it only fires while that account
-> has an active login session — not merely while the Mac is powered on. That
-> means:
+> **Why it has to be this account and not another:** a macOS LaunchAgent is
+> per-user. A plist in `~/Library/LaunchAgents` loads only for the account it
+> belongs to, and fires only while that account has an active login session —
+> not merely while the Mac is powered on. So:
 >
-> - `--enable-agent` (§12) must be run **from the operating account**, after
->   logging in as it — not from the installing account, and not by `sudo`-ing
->   into it.
+> - The account that installs must be the account that runs. That is the whole
+>   reason for the rule above.
 > - The operating account needs **auto-login enabled** in System Settings, and
->   needs to **stay logged in** (fast user switching away from it is fine;
->   logging all the way out is not).
+>   needs to **stay logged in**. Fast user switching away from it is fine;
+>   logging all the way out is not.
 >
-> Get this wrong and `doctor` will report the agent as `UNKNOWN` or missing
-> even though everything else converged correctly — see §15.
+> Get this wrong and `doctor` reports the agent as `UNKNOWN` or missing even
+> though everything else converged correctly — see §15.
 
-**Both `setup` and `doctor` resolve `~` to the account running them.** That is
-correct — a LaunchAgent belongs to one account — but it has two consequences
-worth knowing before install day:
+**Doing development later.** If you need to change code, do it in your own
+clone, in your own home directory or on another machine, then `git pull` here
+as the operating account (§14). Do not edit this checkout from the admin
+account: it is owned by the operating account, so git will refuse it as
+"dubious ownership" and the key is mode 600 and unreadable to you anyway. That
+refusal is the system working — it means the checkout and the account that
+runs it have not drifted apart.
 
-- `./install.sh --project <project>` run from the **installing** account writes
-  a plist into *that* account's `~/Library/LaunchAgents`. Nothing ever loads
-  it, and §13's uninstall removes only the one it is run for, so remove both.
-- `doctor` run from the wrong account reports `[PASS] launch agent plist`
-  about a file that has nothing to do with the agent actually running. Check
-  the agent from the operating account, or the report is about the wrong home.
+**Both `setup` and `doctor` resolve `~` to the account running them.** Follow
+§2 and that is invisible. If you ever do run `./install.sh` from the admin
+account by mistake, two things happen: a second plist lands in *that* account's
+`~/Library/LaunchAgents` where nothing will ever load it (§13 says how to
+remove it), and `doctor` run from there reports `[PASS] launch agent plist`
+about a file that has nothing to do with the running agent.
 
 ## 3. Python
 
@@ -370,16 +373,16 @@ the `launch agent loaded` check as `UNKNOWN` (not loaded, or no session for
 this account — it can't tell which) and `launch agent plist` as `FAIL` until
 `./install.sh` (§10) writes the plist again.
 
-**Check the installing account too.** Every `./install.sh` writes a plist into
-the home of whichever account ran it (§2), so if the machine was set up from
-one account and operated from another, there is a second, never-loaded plist:
+**If `./install.sh` was ever run from another account**, that account has its
+own never-loaded plist, because every run writes one into the home of whoever
+ran it (§2). Log in there and remove it:
 
 ```bash
 rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist
 ```
 
-Run that from the installing account as well. Only the operating account's copy
-was ever loaded, so only that one needs `launchctl bootout`.
+No `launchctl bootout` is needed for that copy — it was never loaded. Follow
+§2 and this situation does not arise.
 
 ## 14. Upgrading
 
@@ -453,14 +456,14 @@ In order of likelihood:
 
 2. **The file exists but does not match this checkout** — a `git pull` changed
    what the agent should run and `./install.sh` has not been run since. Run §14.
-3. **You are looking at the wrong home** (§2). `doctor` from the installing
-   account reports on a plist nothing loads.
+3. **You are looking at the wrong home** (§2). `doctor` run from the admin
+   account reports on a plist nothing loads. Log in as the operating account
+   and check again.
 4. **The write was tried and failed.** This one applies only after
    `./install.sh` (which converges the plist) has just run and the check still
    says `FAIL` — usually `~/Library/LaunchAgents` is not writable by the
-   account running it, because the checkout was chowned to the operating
-   account (§2) and the installing one is running the script, or the reverse.
-   Log in as the operating account and re-run §10.
+   account running the script. Confirm you are the operating account (§2) and
+   re-run §10.
 
 Whatever the cause, the plist is regenerated from the checkout every time, so
 deleting it is safe: `rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist`

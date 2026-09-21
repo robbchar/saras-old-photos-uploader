@@ -163,7 +163,7 @@ def test_key_mode_check_is_unknown_when_the_key_is_absent(tmp_path):
     assert deployment.key_mode_check(tmp_path / "k.json").probe().status is Status.UNKNOWN
 
 
-def test_key_mode_check_reports_the_owner_so_a_handover_mismatch_is_visible(tmp_path, monkeypatch):
+def test_key_mode_check_reports_the_owner_so_a_wrong_account_is_visible(tmp_path, monkeypatch):
     key = tmp_path / "k.json"
     key.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
@@ -404,9 +404,9 @@ def test_install_sh_does_not_install_an_interpreter():
 
 
 def test_converge_records_a_fail_when_fix_raises_and_keeps_going():
-    """The real case on the target: the checkout is chowned to the operating
-    account at handover, so a later os.chmod from the installing account raises
-    PermissionError mid-convergence. Every later check used to be abandoned."""
+    """The real case on the target: a key placed by another account makes
+    os.chmod raise PermissionError mid-convergence. Every later check used to
+    be abandoned."""
 
     def exploding_fix() -> str:
         raise PermissionError("Operation not permitted")
