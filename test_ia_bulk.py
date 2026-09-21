@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import dataclasses
 import io
@@ -16,7 +17,9 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
+import deployment
 import google_auth
+import ia_bulk
 from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
     read_csv,
@@ -4200,6 +4203,68 @@ def test_main_dispatches_to_cmd_validate(monkeypatch, tmp_path):
 
     assert exit_code == 0
     assert calls == [str(csv_path)]
+
+
+def test_build_parser_accepts_doctor():
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert args.command == "doctor"
+
+
+def test_doctor_defaults_to_test_mode_like_every_other_command():
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert args.live is False
+
+
+def test_main_dispatches_to_cmd_doctor(monkeypatch):
+    called = []
+    monkeypatch.setattr(ia_bulk, "cmd_doctor", lambda args: called.append(args.command) or 0)
+    assert ia_bulk.main(["doctor", "--project", "demo"]) == 0
+    assert called == ["doctor"]
+
+
+def test_doctor_has_no_flag_that_would_let_it_mutate():
+    parser = ia_bulk.build_parser()
+    doctor = next(
+        action.choices["doctor"]
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    flags = {action.dest for action in doctor._actions}
+    assert "enable_agent" not in flags
+    assert "fix" not in flags
+
+
+def test_cmd_doctor_returns_one_when_a_check_fails(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="invented",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "nope"),
+                remedy="do the thing",
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert ia_bulk.cmd_doctor(args) == 1
+    assert "do the thing" in capsys.readouterr().out
+
+
+def test_cmd_doctor_returns_zero_when_everything_passes(monkeypatch):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="invented",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
+                remedy="none",
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert ia_bulk.cmd_doctor(args) == 0
 
 
 # ---------------------------------------------------------------------------

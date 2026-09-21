@@ -25,7 +25,9 @@ import requests
 from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
+import deployment
 import google_auth
+import launch_agent
 import log_tab
 from column_map import (
     ColumnMap,
@@ -2485,6 +2487,53 @@ def validate_sheet_content(
     return validate_sheet_grid(
         sheet.rows, sheet.registry, sheet.config, sheet.structure_results, file_outcomes
     )
+
+
+def build_deployment_checks(args, *, include_network: bool) -> list[deployment.Check]:
+    """The one check list. `doctor` runs it; `setup` runs it and applies fix()."""
+    registry = load_registry(args.registry)
+    config = load_project_config(registry, args.project)
+    live = bool(args.live)
+    repo_root = Path(__file__).resolve().parent
+    key_path = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
+
+    checks = [
+        deployment.python_version_check(sys.version_info[:2]),
+        deployment.dependencies_check(),
+        deployment.key_present_check(key_path),
+        deployment.key_mode_check(key_path),
+        deployment.sheet_id_check(config, live, args.registry),
+        deployment.drive_check(Path(config.files_dir)),
+    ]
+
+    if include_network:
+        # A closure, not an import: build_sheet_client stays the only place
+        # credentials are loaded, and deployment.py never imports ia_bulk.
+        def read_grid() -> list[list[str]]:
+            return build_sheet_client(config, live).read_grid()
+
+        checks.extend(
+            [
+                deployment.sheet_reachable_check(read_grid, sheet_sharing_target()),
+                deployment.sync_columns_check(read_grid),
+            ]
+        )
+
+    spec = launch_agent.sync_agent_spec(repo_root, config.project_id)
+    checks.extend(
+        [
+            deployment.agent_plist_check(spec, Path.home()),
+            deployment.agent_loaded_check(spec),
+        ]
+    )
+    return checks
+
+
+def cmd_doctor(args) -> int:
+    checks = build_deployment_checks(args, include_network=not args.offline)
+    results = deployment.run_checks(checks)
+    print(deployment.format_report(results))
+    return deployment.exit_code(results)
 
 
 def cmd_validate(args) -> int:
@@ -5704,6 +5753,15 @@ def build_parser() -> argparse.ArgumentParser:
     append_parser.add_argument("--dry-run", action="store_true", help="Print the rows that would be appended and write nothing")
     append_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check that this machine is set up to run the pipeline. Reads only; changes nothing",
+    )
+    doctor_parser.add_argument("--project", required=True, help="Project ID from the registry")
+    doctor_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    doctor_parser.add_argument("--live", action="store_true", help="Check the project's real Sheet instead of its test Sheet")
+    doctor_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
+
     return parser
 
 
@@ -5721,6 +5779,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_reconcile_files(args)
     if args.command == "append-rows":
         return cmd_append_rows(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2
