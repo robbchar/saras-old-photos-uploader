@@ -1,9 +1,17 @@
 """The deployment check list, shared by `ia_bulk.py doctor` and `ia_bulk.py setup`.
 
 A check that can be converged on-machine carries a fix(); one that cannot carries
-only a remedy and points at docs/DEPLOYMENT.md."""
+only a remedy and points at docs/DEPLOYMENT.md.
+
+Neither `setup` nor `doctor` reads a secret out of a credential: they check
+placement and permissions, and read the service-account key's own
+`client_email` so a remedy can name the address to share the Sheet with. No
+private key, no access key, no token is ever read or printed.
+
+This module must never import ia_bulk."""
 from __future__ import annotations
 
+import configparser
 import enum
 import importlib
 from collections.abc import Callable
@@ -14,7 +22,7 @@ import google_auth
 import launch_agent
 import platform_probe
 import sync_state
-from column_map import build_column_map
+from column_map import build_column_map, check_column_map
 from googleapiclient.errors import HttpError
 from project_config import ProjectConfig
 
@@ -61,7 +69,12 @@ def converge(checks: list[Check], announce: Callable[[str], None]) -> list[tuple
         outcome = _probe(check)
         if outcome.status is Status.FAIL and check.fix is not None:
             announce(f"{check.name}: {outcome.detail} - fixing")
-            announce(f"  {check.fix()}")
+            try:
+                announce(f"  {check.fix()}")
+            except Exception as exc:  # noqa: BLE001 - one unfixable check must not abandon the rest
+                announce(f"  could not fix: {exc}")
+                results.append((check, CheckOutcome(Status.FAIL, f"could not fix ({exc})")))
+                continue
             outcome = _probe(check)
         results.append((check, outcome))
     return results
@@ -91,6 +104,11 @@ _REQUIRED_MODULES = (
 
 
 def dependencies_check() -> Check:
+    """A statement of what this pipeline needs importable, not a live gate on the
+    CLI: ia_bulk.py imports all three at module scope, so a CLI run that reaches
+    this probe has already proved them present. It is meaningful to a caller that
+    imports deployment on its own, and it keeps the requirement in the report."""
+
     def probe() -> CheckOutcome:
         missing = []
         for name in _REQUIRED_MODULES:
@@ -165,6 +183,71 @@ def key_mode_check(key_path: Path) -> Check:
     )
 
 
+# The two keys `ia` needs to write to Internet Archive. Their presence is checked;
+# their values are never read, printed or logged.
+_IA_S3_KEYS = ("access", "secret")
+
+IA_CONFIGURE_REMEDY = (
+    "run `ia configure` as the account that runs the pipeline - see docs/DEPLOYMENT.md, "
+    'section "`ia configure`"'
+)
+
+
+def _resolve_ia_config(config_file: str | None) -> tuple[Path, configparser.RawConfigParser]:
+    """Where `internetarchive` itself would look, and what it parsed there.
+
+    Imported inside the call, not at module scope: dependencies_check exists to
+    report a missing `internetarchive`, so this module has to import without it."""
+    from internetarchive.config import parse_config_file
+
+    resolved, _is_xdg, parser = parse_config_file(config_file)
+    return Path(resolved), parser
+
+
+def ia_credentials_check(config_file: str | None = None) -> Check:
+    """The credential that grants write on the shared org account - the one thing
+    the hourly agent needs to do its actual job, and the only credential nothing
+    else here covers. Local and offline: no call to Internet Archive is made."""
+
+    def probe() -> CheckOutcome:
+        try:
+            path, parser = _resolve_ia_config(config_file)
+        except configparser.Error as exc:
+            return CheckOutcome(Status.FAIL, f"the ia config file is not parseable ({exc})")
+        if not path.is_file():
+            return CheckOutcome(Status.FAIL, f"no ia credentials at {path}")
+        missing = [key for key in _IA_S3_KEYS if not parser.get("s3", key, fallback=None)]
+        if missing:
+            return CheckOutcome(Status.FAIL, f"{path} has no s3 {', '.join(missing)}")
+        return CheckOutcome(Status.PASS, str(path))
+
+    # No fix(): a human types those credentials into an interactive prompt.
+    return Check(name="ia credentials", probe=probe, remedy=IA_CONFIGURE_REMEDY)
+
+
+def ia_credentials_mode_check(config_file: str | None = None) -> Check:
+    def probe() -> CheckOutcome:
+        path, _parser = _resolve_ia_config(config_file)
+        mode = platform_probe.file_mode(path)
+        if mode is None:
+            return CheckOutcome(Status.UNKNOWN, f"no ia config at {path} to check")
+        if not platform_probe.has_posix_permissions():
+            return CheckOutcome(
+                Status.UNKNOWN, "POSIX permissions cannot be checked on this platform"
+            )
+        if mode != KEY_MODE:
+            return CheckOutcome(Status.FAIL, f"{path}: mode {mode:04o}, want {KEY_MODE:04o}")
+        return CheckOutcome(Status.PASS, f"mode {mode:04o}")
+
+    # No fix(), unlike the service-account key: this file lives outside the
+    # checkout, so setup reports on it rather than chmodding someone's home.
+    return Check(
+        name="ia credentials permissions",
+        probe=probe,
+        remedy="chmod 600 the ia config file named above - see docs/DEPLOYMENT.md",
+    )
+
+
 def sheet_id_check(config: ProjectConfig, live: bool, registry_path: str) -> Check:
     mode = "live" if live else "test"
 
@@ -204,6 +287,12 @@ _SHEET_MISCONFIGURED_STATUSES = (403, 404)
 SheetProbe = Callable[[], list[list[str]]]
 
 
+def _names_a_sync_column(error: str) -> bool:
+    """A collision among the Sheet's own columns is not this check's business;
+    one that lands on a column `sync-metadata` writes is."""
+    return any(name in error for name in sync_state.SYNC_STATE_COLUMNS)
+
+
 def _read_grid_or_outcome(read_grid: SheetProbe) -> tuple[list[list[str]] | None, CheckOutcome | None]:
     """Shared by both Sheet checks so one read failure is classified one way."""
     try:
@@ -241,7 +330,16 @@ def sync_columns_check(read_grid: SheetProbe) -> Check:
         assert grid is not None
         headers = grid[0] if grid else []
         try:
-            sync_state.locate_sync_columns(build_column_map(headers))
+            column_map = build_column_map(headers)
+        except Exception as exc:  # noqa: BLE001 - see the FAIL below; not _probe's UNKNOWN
+            # A header row that will not map is confirmed-broken. Letting _probe's
+            # blanket handler call it UNKNOWN would hide a duplicated header.
+            return CheckOutcome(Status.FAIL, f"the Sheet's header row cannot be read ({exc})")
+        collisions = [error for error in check_column_map(column_map) if _names_a_sync_column(error)]
+        if collisions:
+            return CheckOutcome(Status.FAIL, "; ".join(collisions))
+        try:
+            sync_state.locate_sync_columns(column_map)
         except sync_state.MissingSyncColumns as exc:
             return CheckOutcome(Status.FAIL, str(exc))
         return CheckOutcome(Status.PASS, "both sync columns present")
@@ -250,8 +348,9 @@ def sync_columns_check(read_grid: SheetProbe) -> Check:
         name="sync state columns",
         probe=probe,
         remedy=(
-            f"add the columns {' and '.join(sync_state.SYNC_STATE_COLUMNS)} to the Sheet, "
-            "then hide them - see docs/DEPLOYMENT.md"
+            f"give the Sheet exactly one header each named "
+            f"{' and '.join(sync_state.SYNC_STATE_COLUMNS)}, then hide them "
+            "- see docs/DEPLOYMENT.md"
         ),
     )
 
@@ -268,7 +367,10 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
     return Check(
         name="launch agent plist",
         probe=probe,
-        remedy="./install.sh --project <project>",
+        remedy=(
+            "the plist could not be written - see docs/DEPLOYMENT.md, "
+            'section "Checking a machine later"'
+        ),
         fix=lambda: launch_agent.write_plist(spec, home),
     )
 

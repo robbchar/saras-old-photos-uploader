@@ -2,6 +2,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 from googleapiclient.errors import HttpError
 
 import deployment
@@ -243,7 +244,9 @@ def test_python_version_check_passes_at_the_floor():
     assert deployment.python_version_check((3, 10)).probe().status is Status.PASS
 
 
-def test_dependencies_check_passes_in_this_environment():
+def test_dependencies_check_passes_because_the_test_run_already_imported_them():
+    """Not a live gate: importing deployment imports all three, so this probe
+    can only ever see them present. It documents the requirement."""
     assert deployment.dependencies_check().probe().status is Status.PASS
 
 
@@ -398,3 +401,182 @@ def test_install_sh_does_not_install_an_interpreter():
     # line that runs it.
     script = Path("install.sh").read_text(encoding="utf-8")
     assert not re.search(r"^\s*brew\s+install", script, re.MULTILINE)
+
+
+def test_converge_records_a_fail_when_fix_raises_and_keeps_going():
+    """The real case on the target: the checkout is chowned to the operating
+    account at handover, so a later os.chmod from the installing account raises
+    PermissionError mid-convergence. Every later check used to be abandoned."""
+
+    def exploding_fix() -> str:
+        raise PermissionError("Operation not permitted")
+
+    checks = [failing("unfixable", fix=exploding_fix), failing("later")]
+    results = deployment.converge(checks, announce=lambda _: None)
+
+    assert [check.name for check, _ in results] == ["unfixable", "later"]
+    assert results[0][1].status is Status.FAIL
+    assert "Operation not permitted" in results[0][1].detail
+
+
+def test_converge_report_carries_both_the_error_and_the_remedy():
+    def exploding_fix() -> str:
+        raise OSError("read-only file system")
+
+    results = deployment.converge([failing("unfixable", fix=exploding_fix)], announce=lambda _: None)
+    report = deployment.format_report(results)
+    assert "read-only file system" in report
+    assert "run the thing" in report
+
+
+def test_converge_announces_that_the_fix_failed():
+    announced = []
+
+    def exploding_fix() -> str:
+        raise OSError("nope")
+
+    deployment.converge([failing("unfixable", fix=exploding_fix)], announce=announced.append)
+    assert any("could not fix" in line for line in announced)
+
+
+def test_converge_leaves_a_failing_check_with_no_fix_untouched():
+    """key_present_check and dependencies_check are both FAIL-with-no-fix, so
+    dropping converge's `is not None` guard would TypeError on a new Mac."""
+    check = failing("no fix here", fix=None)
+    (returned, outcome), = deployment.converge([check], announce=lambda _: None)
+    assert returned is check
+    assert outcome.status is Status.FAIL
+    assert outcome.detail == "broken"
+
+
+def test_sync_columns_check_fails_rather_than_unknown_when_the_header_row_will_not_map():
+    """_probe's blanket handler would call this UNKNOWN. A header row this tool
+    cannot map is confirmed-broken, not unknowable."""
+
+    def unmappable():
+        return [[None], ["a-value"]]
+
+    outcome = deployment.sync_columns_check(unmappable).probe()
+    assert outcome.status is Status.FAIL
+
+
+def test_sync_columns_check_fails_on_a_duplicated_sync_column():
+    probe = grid_with(
+        "identifier",
+        sync_state.IA_SYNC_HASH_COLUMN,
+        sync_state.IA_SYNC_HASH_COLUMN.replace("_", " ").title(),
+        sync_state.IA_LAST_SYNCED_COLUMN,
+    )
+    outcome = deployment.sync_columns_check(probe).probe()
+    assert outcome.status is Status.FAIL
+    assert sync_state.IA_SYNC_HASH_COLUMN in outcome.detail
+
+
+def test_sync_columns_check_ignores_a_collision_among_the_sheets_own_columns():
+    probe = grid_with("Title", "title", *sync_state.SYNC_STATE_COLUMNS)
+    assert deployment.sync_columns_check(probe).probe().status is Status.PASS
+
+
+def test_agent_plist_check_remedy_does_not_point_back_at_the_command_that_just_failed(tmp_path):
+    """It only prints after converge ran fix() and the re-probe still failed -
+    i.e. after ./install.sh just tried. Telling the operator to run it again is
+    no remedy at all."""
+    remedy = deployment.agent_plist_check(
+        launch_agent.sync_agent_spec(tmp_path / "repo", "demo"), tmp_path / "home"
+    ).remedy
+    assert "install.sh" not in remedy
+    assert "DEPLOYMENT.md" in remedy
+
+
+IA_CONFIG_WITH_KEYS = "[s3]\naccess = AAAA\nsecret = BBBB\n"
+
+
+def test_ia_credentials_check_fails_when_there_is_no_config(tmp_path):
+    missing = tmp_path / "ia.ini"
+    outcome = deployment.ia_credentials_check(str(missing)).probe()
+    assert outcome.status is Status.FAIL
+    assert str(missing) in outcome.detail
+
+
+def test_ia_credentials_check_remedy_is_ia_configure(tmp_path):
+    assert "ia configure" in deployment.ia_credentials_check(str(tmp_path / "ia.ini")).remedy
+
+
+def test_ia_credentials_check_has_no_fix_because_a_human_types_them(tmp_path):
+    assert deployment.ia_credentials_check(str(tmp_path / "ia.ini")).fix is None
+
+
+def test_ia_credentials_check_passes_on_a_config_with_both_s3_keys(tmp_path):
+    config = tmp_path / "ia.ini"
+    config.write_text(IA_CONFIG_WITH_KEYS, encoding="utf-8")
+    outcome = deployment.ia_credentials_check(str(config)).probe()
+    assert outcome.status is Status.PASS
+    assert str(config) in outcome.detail
+
+
+def test_ia_credentials_check_never_reports_the_secret_values(tmp_path):
+    config = tmp_path / "ia.ini"
+    config.write_text(IA_CONFIG_WITH_KEYS, encoding="utf-8")
+    outcome = deployment.ia_credentials_check(str(config)).probe()
+    assert "AAAA" not in outcome.detail
+    assert "BBBB" not in outcome.detail
+
+
+def test_ia_credentials_check_fails_on_a_config_missing_the_s3_keys(tmp_path):
+    config = tmp_path / "ia.ini"
+    config.write_text("[general]\nscreenname = someone\n", encoding="utf-8")
+    outcome = deployment.ia_credentials_check(str(config)).probe()
+    assert outcome.status is Status.FAIL
+    assert "secret" in outcome.detail
+
+
+def test_ia_credentials_check_fails_on_an_unparseable_config(tmp_path):
+    config = tmp_path / "ia.ini"
+    config.write_text("this is not an ini file\n", encoding="utf-8")
+    assert deployment.ia_credentials_check(str(config)).probe().status is Status.FAIL
+
+
+def test_ia_credentials_check_makes_no_network_call(tmp_path, monkeypatch):
+    """Presence and location only - `doctor` stays usable with no network, and
+    never spends a write credential to prove it works."""
+    import socket
+
+    monkeypatch.setattr(
+        socket, "socket", lambda *a, **k: pytest.fail("ia credentials check opened a socket")
+    )
+    config = tmp_path / "ia.ini"
+    config.write_text(IA_CONFIG_WITH_KEYS, encoding="utf-8")
+    assert deployment.ia_credentials_check(str(config)).probe().status is Status.PASS
+
+
+def test_ia_credentials_mode_check_is_unknown_when_the_config_is_absent(tmp_path):
+    check = deployment.ia_credentials_mode_check(str(tmp_path / "ia.ini"))
+    assert check.probe().status is Status.UNKNOWN
+
+
+def test_ia_credentials_mode_check_fails_on_a_group_readable_config(tmp_path, monkeypatch):
+    config = tmp_path / "ia.ini"
+    config.write_text(IA_CONFIG_WITH_KEYS, encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o644)
+    assert deployment.ia_credentials_mode_check(str(config)).probe().status is Status.FAIL
+
+
+def test_ia_credentials_mode_check_passes_on_0o600(tmp_path, monkeypatch):
+    config = tmp_path / "ia.ini"
+    config.write_text(IA_CONFIG_WITH_KEYS, encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o600)
+    assert deployment.ia_credentials_mode_check(str(config)).probe().status is Status.PASS
+
+
+def test_ia_credentials_mode_check_is_unknown_where_posix_permissions_do_not_apply(tmp_path, monkeypatch):
+    config = tmp_path / "ia.ini"
+    config.write_text(IA_CONFIG_WITH_KEYS, encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: False)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o666)
+    assert deployment.ia_credentials_mode_check(str(config)).probe().status is Status.UNKNOWN
+
+
+def test_ia_credentials_mode_check_has_no_fix_outside_the_checkout(tmp_path):
+    assert deployment.ia_credentials_mode_check(str(tmp_path / "ia.ini")).fix is None
