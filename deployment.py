@@ -370,8 +370,8 @@ def sync_columns_check(read_grid: SheetProbe) -> Check:
         probe=probe,
         remedy=(
             f"give the Sheet exactly one header each named "
-            f"{' and '.join(sync_state.SYNC_STATE_COLUMNS)}, then hide them "
-            "- see docs/DEPLOYMENT.md"
+            f"{' and '.join(sync_state.SYNC_STATE_COLUMNS)}, left visible with a red "
+            "background - see docs/DEPLOYMENT.md"
         ),
     )
 

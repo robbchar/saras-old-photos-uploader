@@ -6,10 +6,24 @@ service-account credentials, `ia` authentication, the hourly sync agent, and
 judgment call — anything a script could converge on its own lives in
 `ia_bulk.py setup` instead, not here.
 
-`<project>` throughout means the registry project id from
-`projects_registry.json` — currently `sarasoldphotos` (see the "Project
-registry" section of [`README.md`](../README.md)). Substitute it literally
-when you type a command.
+**`<project>` throughout means the registry project id** from
+`projects_registry.json` — for this collection that is **`sarasoldphotos`**
+(see the "Project registry" section of [`README.md`](../README.md)).
+Substitute it literally every time. So where a command below reads:
+
+```bash
+./install.sh --project <project>
+```
+
+what you actually type is:
+
+```bash
+./install.sh --project sarasoldphotos
+```
+
+The same goes for every `doctor` and `setup` command here. It is the project
+id, not the macOS account name and not the Internet Archive collection —
+those happen to share the word.
 
 ## 1. Who this is for
 
@@ -21,15 +35,19 @@ upgrading the checkout.
 
 ## 2. Which account to do all of this from
 
-**Do every step in this document while logged in as the shared operating
-account** — the one the pipeline runs under day to day. That means the clone,
-the service-account key, `ia configure`, `./install.sh`, `--enable-agent`, and
-every later upgrade.
+**Do every step in this document while logged in as the `sarasoldphotos`
+account** — the shared account the pipeline runs under day to day. That means
+the clone, the service-account key, `ia configure`, `./install.sh`,
+`--enable-agent`, and every later upgrade. This document calls it *the
+operating account*.
 
-The Mac also has an admin account for development. It is not used for any step
-here. Keeping installation and operation in one account is what makes this
-simple: one owner, one plist, no ownership to transfer, and nothing to get
-backwards later.
+The Mac has a second account, the one Robb uses for development. Both are
+admins — "operating" and "development" here describe what each account is
+*for*, not what privileges it has, so being an admin on the box is not a
+reason to install from the other one. No step in this document is performed
+from the development account. Keeping installation and operation in one
+account is what makes this simple: one owner, one plist, no ownership to
+transfer, and nothing to get backwards later.
 
 > **Why it has to be this account and not another:** a macOS LaunchAgent is
 > per-user. A plist in `~/Library/LaunchAgents` loads only for the account it
@@ -45,20 +63,22 @@ backwards later.
 > Get this wrong and `doctor` reports the agent as `UNKNOWN` or missing even
 > though everything else converged correctly — see §15.
 
-**Doing development later.** If you need to change code, do it in your own
-clone, in your own home directory or on another machine, then `git pull` here
-as the operating account (§14). Do not edit this checkout from the admin
-account: it is owned by the operating account, so git will refuse it as
-"dubious ownership" and the key is mode 600 and unreadable to you anyway. That
-refusal is the system working — it means the checkout and the account that
-runs it have not drifted apart.
+**Doing development later.** Change code in a separate clone — the development
+account's own home, or another machine — then `git pull` here as the operating
+account (§14). Do not edit *this* checkout from the development account: it
+belongs to `sarasoldphotos`, so git refuses it as "dubious ownership", and the
+service-account key is mode `0600` and unreadable from there regardless. Being
+an admin does not change either — it means you *could* `sudo` your way in, not
+that you should. That refusal is the system working: it keeps the checkout and
+the account that runs it from drifting apart.
 
 **Both `setup` and `doctor` resolve `~` to the account running them.** Follow
-§2 and that is invisible. If you ever do run `./install.sh` from the admin
-account by mistake, two things happen: a second plist lands in *that* account's
-`~/Library/LaunchAgents` where nothing will ever load it (§13 says how to
-remove it), and `doctor` run from there reports `[PASS] launch agent plist`
-about a file that has nothing to do with the running agent.
+§2 and that is invisible. If you ever do run `./install.sh` from the
+development account by mistake, two things happen: a second plist lands in
+*that* account's `~/Library/LaunchAgents` where nothing will ever load it (§13
+says how to remove it), and `doctor` run from there reports
+`[PASS] launch agent plist` about a file that has nothing to do with the
+running agent.
 
 ## 3. Python
 
@@ -142,16 +162,49 @@ can see or fix.
 
 ## 6. `ia configure`
 
-The `ia` CLI needs to be authenticated, once, against the shared org account
+The `ia` credentials need to be created once, against the shared org account
 (`admin@lcpsociety.org`) — no environment variables, no per-user credentials.
+
+**First, find an `ia` to run.** There are two possibilities and it does not
+matter which you use:
+
+```bash
+command -v ia
+```
+
+- **If that prints a path**, the machine already has `ia` installed globally.
+  Use it.
+- **If it prints nothing**, the Mac does not have it — and you do not need to
+  install it separately. `ia` is a command-line script that ships inside the
+  `internetarchive` Python package, which is one of this pipeline's own
+  dependencies. Run §10's `./install.sh` first and it arrives at
+  `./.venv/bin/ia`.
+
+Either copy writes to and reads from the same per-user config file, so they
+are interchangeable for this step.
+
+> **If you are installing in order, this is the one step that runs out of
+> sequence.** With no global `ia`, do §10 before this section. That first
+> `./install.sh` will report `ia credentials` as `FAIL` and exit non-zero —
+> that is correct and expected, because you have not created them yet. Come
+> back here, then re-run `./install.sh` and watch that check go green.
+
+Then, whichever `ia` you found:
 
 ```bash
 ia configure
+# or, if it came from the pipeline's own dependencies:
+./.venv/bin/ia configure
 ```
 
 This is interactive: it prompts for the org account's email and password
 (and, if the account has one, a 2FA code) and writes them to a config file. Do
-this once, as whichever account will run the pipeline day to day.
+this once, as the operating account (§2).
+
+**The pipeline itself never runs the `ia` command.** `ia_bulk.py` imports the
+`internetarchive` library directly and calls it in-process. The CLI matters
+here only because `ia configure` is the supported way to create the
+credentials file that the library then reads.
 
 **Where it writes.** Reading `internetarchive`'s own source
 (`internetarchive/config.py`, `parse_config_file()` — this repo pins
@@ -228,8 +281,22 @@ nothing at all about the real Sheet.
 
 `sync-metadata` needs two tool-owned columns on the real Sheet beyond
 `upload`'s own four: **`ia_sync_hash`** and **`ia_last_synced`**. Add both as
-headers on the Sheet, then hide both columns — they're bookkeeping, not
-something a cataloguer should be editing by hand.
+headers on the Sheet. Spelling must match exactly; position does not matter.
+
+**Leave them visible, and give both columns a red background.** They are
+tool-owned, so nobody should be typing in them casually — but hiding them
+would throw away the two things they are good for:
+
+- **`ia_last_synced`** records when a row last went out. That is genuinely
+  useful to glance at, and you cannot glance at a hidden column.
+- **`ia_sync_hash`** is how a re-sync gets forced. `sync-metadata` sends a row
+  only when its content hashes differently from what this cell records, so
+  **clearing the cell makes the row send again on the next run** — a row whose
+  item on archive.org looks wrong, even though the Sheet says it synced. That
+  is the manual override, and it needs a cell you can select.
+
+The red background is the signal: *the tool owns this, don't type here unless
+you know why.* A cataloguer never needs to touch either column.
 
 ```bash
 python ia_bulk.py doctor --project <project> --live
@@ -456,9 +523,9 @@ In order of likelihood:
 
 2. **The file exists but does not match this checkout** — a `git pull` changed
    what the agent should run and `./install.sh` has not been run since. Run §14.
-3. **You are looking at the wrong home** (§2). `doctor` run from the admin
-   account reports on a plist nothing loads. Log in as the operating account
-   and check again.
+3. **You are looking at the wrong home** (§2). `doctor` run from the
+   development account reports on a plist nothing loads. Log in as
+   `sarasoldphotos` and check again.
 4. **The write was tried and failed.** This one applies only after
    `./install.sh` (which converges the plist) has just run and the check still
    says `FAIL` — usually `~/Library/LaunchAgents` is not writable by the

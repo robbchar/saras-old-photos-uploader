@@ -471,11 +471,13 @@ every run, whether it changed or not, would be pointless and would bury the
 one real edit anybody cares about under a wall of "nothing changed" lines.
 
 To know whether a row changed, the tool keeps two columns of its own on the
-far right of the Sheet: **`ia_sync_hash`** and **`ia_last_synced`**. Like the
-other columns the tool owns, they are hidden — you don't need to look at
-them, and you can leave them hidden. `ia_last_synced` just records when a row
-last went out, for a human to glance at. `ia_sync_hash` is what the tool
-actually checks; it isn't meant to be read, only cleared.
+far right of the Sheet: **`ia_sync_hash`** and **`ia_last_synced`**. Unlike
+the other columns the tool owns, these two stay **visible, with a red
+background** — the red means "the tool owns this, don't type here", and both
+earn their place on screen. `ia_last_synced` records when a row last went out,
+for a human to glance at. `ia_sync_hash` is what the tool actually checks; it
+isn't meant to be read, only cleared — and clearing it is how you force a row
+to send again (see the carve-out below).
 
 **The rule about the tool's own columns hasn't changed, except for one
 carve-out:**
