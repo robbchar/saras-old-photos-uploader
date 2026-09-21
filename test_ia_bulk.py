@@ -4418,6 +4418,26 @@ def test_cmd_setup_reuses_the_same_repo_root_build_deployment_checks_uses():
     assert ia_bulk.REPO_ROOT == Path(ia_bulk.__file__).resolve().parent
 
 
+def test_every_install_sh_remedy_names_the_required_project_flag(tmp_path):
+    """setup's --project is required (build_parser), and install.sh execs
+    `ia_bulk.py setup "$@"` verbatim - so a remedy that tells the operator to
+    run ./install.sh (with or without --enable-agent) but leaves out
+    --project hands them a command argparse rejects before anything runs.
+    Built through the real build_deployment_checks(), not hand-made Check
+    objects, so this sees the actual remedy strings doctor/setup print."""
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    checks = ia_bulk.build_deployment_checks(args, include_network=False)
+    install_sh_remedies = [check.remedy for check in checks if "install.sh" in check.remedy]
+
+    assert install_sh_remedies, "expected at least one check to remedy via install.sh"
+    for remedy in install_sh_remedies:
+        assert "--project" in remedy, f"remedy names install.sh but not --project: {remedy!r}"
+
+
 # ---------------------------------------------------------------------------
 # Task 10: the Sheet path's reserve -> upload -> confirm protocol.
 #

@@ -105,7 +105,7 @@ def dependencies_check() -> Check:
     return Check(
         name="dependencies",
         probe=probe,
-        remedy="./install.sh (or: .venv/bin/pip install -r requirements.txt)",
+        remedy="./install.sh --project <project> (or: .venv/bin/pip install -r requirements.txt)",
     )
 
 
@@ -120,7 +120,7 @@ def python_version_check(version: tuple[int, int]) -> Check:
     return Check(
         name="python version",
         probe=probe,
-        remedy="install Python 3.10+ and re-run ./install.sh - see docs/DEPLOYMENT.md",
+        remedy="install Python 3.10+ and re-run ./install.sh --project <project> - see docs/DEPLOYMENT.md",
     )
 
 
@@ -268,7 +268,7 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
     return Check(
         name="launch agent plist",
         probe=probe,
-        remedy="./install.sh",
+        remedy="./install.sh --project <project>",
         fix=lambda: launch_agent.write_plist(spec, home),
     )
 
@@ -293,7 +293,8 @@ def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
         name="launch agent loaded",
         probe=probe,
         remedy=(
-            "log in as the operating account and run ./install.sh --enable-agent, "
+            "log in as the operating account and run "
+            "./install.sh --project <project> --enable-agent, "
             "then check logs/launchagent-*.err"
         ),
     )

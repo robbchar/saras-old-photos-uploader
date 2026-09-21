@@ -73,13 +73,23 @@ than a person's sign-in — see
 [`docs/decisions/FOUNDATIONS.md`](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person)
 for why.
 
-1. In the Google Cloud console, under **IAM & Admin → Service Accounts**,
-   create the service account (or reuse the existing one) in the project's
-   Google Cloud project. It needs no project roles — all of its access comes
-   from Sheet sharing (§5).
-2. On its **Keys** tab, create a new JSON key. It downloads once and cannot
+1. In the Google Cloud console, confirm the **Google Sheets API** is enabled
+   for the project (**APIs & Services → Library**) — reading or writing the
+   Sheet fails until it is, and this is easy to miss on a project that has
+   never used the Sheets API before.
+2. Under **IAM & Admin → Service Accounts**, create the service account (or
+   reuse the existing one) in the project's Google Cloud project. It needs no
+   project roles — all of its access comes from Sheet sharing (§5).
+3. On its **Keys** tab, create a new JSON key. It downloads once and cannot
    be re-downloaded, so save it immediately.
-3. Save it as `.ignored/google-service-account.json`, relative to the repo
+
+   If key creation is refused outright, the likely cause is the
+   organization policy **"Disable service account key creation"**
+   (`iam.disableServiceAccountKeyCreation`), which Google turns on by default
+   for newer organizations. Only an org-policy administrator can disable it
+   for this project — this is a judgment call above the installer's pay
+   grade, not something to work around.
+4. Save it as `.ignored/google-service-account.json`, relative to the repo
    root. Everything under `.ignored/` is gitignored — never move it anywhere
    under the tracked tree.
 
@@ -102,6 +112,13 @@ Share both the project's real Sheet and its test Sheet (both ids live in
 `projects_registry.json`) with the address from §4, as **Editor**, with
 "Notify people" unchecked. Read-only is not enough — `upload` and
 `sync-metadata` write back to the Sheet even in test mode.
+
+If the Google Workspace that owns the Sheet restricts sharing outside its own
+domain, this share is blocked until a Workspace admin allows it
+(admin.google.com → Apps → Google Workspace → Drive and Docs → Sharing
+settings) — the service account's address is, by definition, outside the
+Workspace's domain. Another admin-console blocker, not something `doctor`
+can see or fix.
 
 ## 6. `ia configure`
 
@@ -214,6 +231,11 @@ rm -rf .venv
 Neither credential ever belongs in the git checkout's tracked tree or in
 chat/email — both are gitignored or live outside the repo entirely.
 
+Every edit the tool makes to the Sheet shows up in the Sheet's own **File →
+Version history** as the service account, not as whichever person or account
+actually ran the command — worth knowing before you go looking for a human
+name there.
+
 ## 12. Enabling the hourly sync
 
 Once — and only once — the first live runs (`upload --live`, `sync-metadata
@@ -231,7 +253,8 @@ then, and again at every future login of the operating account. That's
 deliberate — waiting up to an hour to discover the agent doesn't work is
 worse — and it's safe because a sync only pushes rows whose content actually
 changed since the last push; a run with nothing changed prints `nothing to
-sync` and writes nothing (§4 of `OPERATIONS.md`). This is exactly why
+sync - all N uploaded rows already match their last push` and sends no
+corrections to the Sheet or Internet Archive (§4 of `OPERATIONS.md`). This is exactly why
 `--enable-agent` must wait until *after* the first live runs are verified by
 hand: the first thing it does is run for real.
 
