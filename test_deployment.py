@@ -112,3 +112,109 @@ def test_converge_does_not_call_fix_for_an_unknown_check():
 
 def test_minimum_python_is_three_ten():
     assert deployment.MINIMUM_PYTHON == (3, 10)
+
+
+from pathlib import Path
+
+import project_config
+
+
+def a_config(sheet_id="1realsheetid", test_sheet_id="1testsheetid"):
+    """Mirrors project_config.ProjectConfig's required fields - read project_config.py:63-86
+    and match it exactly; that dataclass is the source of truth, not this plan."""
+    return project_config.ProjectConfig(
+        project_id="demo",
+        collection_key="lcps",
+        mediatype="image",
+        ia_collection="demo",
+        sheet_id=sheet_id,
+        test_sheet_id=test_sheet_id,
+        sheet_tab="Sheet1",
+        files_dir="./data",
+        file_template="{file_name}",
+        required_for_upload=("title",),
+        photo_extensions=(".jpg",),
+        batch_column=None,
+    )
+
+
+def test_key_present_check_fails_when_the_key_is_absent(tmp_path):
+    outcome = deployment.key_present_check(tmp_path / "google-service-account.json").probe()
+    assert outcome.status is Status.FAIL
+
+
+def test_key_present_check_passes_when_the_key_is_there(tmp_path):
+    key = tmp_path / "google-service-account.json"
+    key.write_text('{"client_email": "x@y.iam.gserviceaccount.com"}', encoding="utf-8")
+    assert deployment.key_present_check(key).probe().status is Status.PASS
+
+
+def test_key_present_check_has_no_fix_because_a_key_cannot_be_conjured(tmp_path):
+    assert deployment.key_present_check(tmp_path / "k.json").fix is None
+
+
+def test_key_mode_check_is_unknown_when_the_key_is_absent(tmp_path):
+    assert deployment.key_mode_check(tmp_path / "k.json").probe().status is Status.UNKNOWN
+
+
+def test_key_mode_check_reports_the_owner_so_a_handover_mismatch_is_visible(tmp_path, monkeypatch):
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "file_owner", lambda _: "shared")
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o600)
+    assert "shared" in deployment.key_mode_check(key).probe().detail
+
+
+def test_key_mode_check_fails_on_a_group_readable_key(tmp_path, monkeypatch):
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o644)
+    assert deployment.key_mode_check(key).probe().status is Status.FAIL
+
+
+def test_key_mode_check_fix_chmods_to_600(tmp_path, monkeypatch):
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    chmodded = []
+    monkeypatch.setattr(deployment.platform_probe, "set_file_mode", lambda p, m: chmodded.append((p, m)))
+    deployment.key_mode_check(key).fix()
+    assert chmodded == [(key, 0o600)]
+
+
+def test_sheet_id_check_fails_on_the_placeholder():
+    config = a_config(sheet_id="REPLACE_WITH_REAL_SHEET_ID")
+    check = deployment.sheet_id_check(config, live=True, registry_path="projects_registry.json")
+    assert check.probe().status is Status.FAIL
+    assert "projects_registry.json" in check.remedy
+
+
+def test_sheet_id_check_passes_on_a_real_id():
+    outcome = deployment.sheet_id_check(a_config(), live=True, registry_path="r.json").probe()
+    assert outcome.status is Status.PASS
+
+
+def test_sheet_id_check_looks_at_the_mode_it_was_given():
+    config = a_config(sheet_id="1real", test_sheet_id="REPLACE_WITH_TEST_SHEET_ID")
+    assert deployment.sheet_id_check(config, live=True, registry_path="r.json").probe().status is Status.PASS
+    assert deployment.sheet_id_check(config, live=False, registry_path="r.json").probe().status is Status.FAIL
+
+
+def test_drive_check_is_unknown_when_the_directory_is_absent(tmp_path):
+    outcome = deployment.drive_check(tmp_path / "LaCie").probe()
+    assert outcome.status is Status.UNKNOWN
+
+
+def test_drive_check_passes_for_a_readable_directory(tmp_path):
+    assert deployment.drive_check(tmp_path).probe().status is Status.PASS
+
+
+def test_python_version_check_fails_below_the_floor():
+    assert deployment.python_version_check((3, 9)).probe().status is Status.FAIL
+
+
+def test_python_version_check_passes_at_the_floor():
+    assert deployment.python_version_check((3, 10)).probe().status is Status.PASS
+
+
+def test_dependencies_check_passes_in_this_environment():
+    assert deployment.dependencies_check().probe().status is Status.PASS
