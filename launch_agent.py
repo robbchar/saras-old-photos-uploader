@@ -64,6 +64,10 @@ def plist_path(spec: AgentSpec, home: Path) -> Path:
 def write_plist(spec: AgentSpec, home: Path) -> str:
     target = plist_path(spec, home)
     target.parent.mkdir(parents=True, exist_ok=True)
+    # launchd does not create intermediate directories for stdio redirection, and
+    # logs/ is gitignored - absent on a fresh clone, so the job would not spawn.
+    for stdio_path in (spec.stdout_path, spec.stderr_path):
+        stdio_path.parent.mkdir(parents=True, exist_ok=True)
     # newline="\n": text mode would emit CRLF on Windows, so plist_is_current
     # would never match what render_plist produces.
     target.write_text(render_plist(spec), encoding="utf-8", newline="\n")

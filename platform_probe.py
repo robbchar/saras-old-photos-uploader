@@ -61,24 +61,54 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+NO_LAUNCHCTL = "launchctl is not available on this platform"
+
+
+def _gui_domain() -> str | None:
+    """The per-user launchd domain, or None where there is no getuid (Windows).
+    One place, so all three launchctl calls behave the same off macOS."""
+    try:
+        return f"gui/{os.getuid()}"
+    except AttributeError:
+        return None
+
+
 def launchctl_print(label: str) -> str | None:
     """None means not loaded, or no launchctl at all - the caller reports UNKNOWN."""
+    domain = _gui_domain()
+    if domain is None:
+        return None
     try:
-        result = _launchctl("print", f"gui/{os.getuid()}/{label}")
-    except (OSError, AttributeError):
+        result = _launchctl("print", f"{domain}/{label}")
+    except OSError:
         return None
     return result.stdout if result.returncode == 0 else None
 
 
-def launchctl_bootstrap(plist_path: Path) -> str:
-    result = _launchctl("bootstrap", f"gui/{os.getuid()}", str(plist_path))
+def launchctl_bootstrap(plist_path: Path) -> tuple[bool, str]:
+    """(loaded, message). Structural, not a message the caller has to read: the
+    one command whose purpose is to load the agent has to be able to fail."""
+    domain = _gui_domain()
+    if domain is None:
+        return False, NO_LAUNCHCTL
+    try:
+        result = _launchctl("bootstrap", domain, str(plist_path))
+    except OSError as exc:
+        return False, f"could not run launchctl ({exc})"
     if result.returncode == 0:
-        return f"loaded {plist_path.name}"
-    return f"launchctl bootstrap failed: {result.stderr.strip()}"
+        return True, f"loaded {plist_path.name}"
+    return False, f"launchctl bootstrap failed: {result.stderr.strip()}"
 
 
-def launchctl_bootout(label: str) -> str:
-    result = _launchctl("bootout", f"gui/{os.getuid()}/{label}")
+def launchctl_bootout(label: str) -> tuple[bool, str]:
+    """(unloaded, message), for the same reason launchctl_bootstrap returns one."""
+    domain = _gui_domain()
+    if domain is None:
+        return False, NO_LAUNCHCTL
+    try:
+        result = _launchctl("bootout", f"{domain}/{label}")
+    except OSError as exc:
+        return False, f"could not run launchctl ({exc})"
     if result.returncode == 0:
-        return f"unloaded {label}"
-    return f"launchctl bootout failed: {result.stderr.strip()}"
+        return True, f"unloaded {label}"
+    return False, f"launchctl bootout failed: {result.stderr.strip()}"

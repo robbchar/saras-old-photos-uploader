@@ -86,3 +86,14 @@ def test_write_plist_puts_lf_line_endings_on_disk_not_crlf(tmp_path):
     launch_agent.write_plist(spec, home)
     on_disk = launch_agent.plist_path(spec, home).read_bytes()
     assert b"\r\n" not in on_disk
+
+
+def test_write_plist_creates_the_stdio_directory_launchd_will_not(tmp_path):
+    """logs/ is gitignored, so a fresh clone has none. launchd creates no
+    intermediate directories for StandardOutPath/StandardErrorPath, so the job
+    either fails to spawn or its output vanishes."""
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert not spec.stderr_path.parent.exists()
+    launch_agent.write_plist(spec, tmp_path / "home")
+    assert spec.stdout_path.parent.is_dir()
+    assert spec.stderr_path.parent.is_dir()

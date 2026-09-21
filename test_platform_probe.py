@@ -1,3 +1,5 @@
+import pytest
+
 import platform_probe
 
 
@@ -73,3 +75,64 @@ def test_has_posix_permissions_is_true_on_posix(monkeypatch):
 def test_has_posix_permissions_is_false_elsewhere(monkeypatch):
     monkeypatch.setattr(platform_probe.os, "name", "nt")
     assert platform_probe.has_posix_permissions() is False
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _with_uid(monkeypatch, uid=501):
+    monkeypatch.setattr(platform_probe.os, "getuid", lambda: uid, raising=False)
+
+
+def test_launchctl_bootstrap_reports_success_structurally(tmp_path, monkeypatch):
+    _with_uid(monkeypatch)
+    monkeypatch.setattr(platform_probe, "_launchctl", lambda *a: _FakeCompleted())
+    loaded, message = platform_probe.launchctl_bootstrap(tmp_path / "a.plist")
+    assert loaded is True
+    assert "a.plist" in message
+
+
+def test_launchctl_bootstrap_reports_failure_structurally(tmp_path, monkeypatch):
+    """A failed bootstrap used to be a string the caller printed and ignored, so
+    the one command whose job is loading the agent could not fail."""
+    _with_uid(monkeypatch)
+    monkeypatch.setattr(
+        platform_probe, "_launchctl", lambda *a: _FakeCompleted(returncode=5, stderr="Bootstrap failed: 5")
+    )
+    loaded, message = platform_probe.launchctl_bootstrap(tmp_path / "a.plist")
+    assert loaded is False
+    assert "Bootstrap failed: 5" in message
+
+
+def test_launchctl_bootout_reports_success_structurally(monkeypatch):
+    _with_uid(monkeypatch)
+    monkeypatch.setattr(platform_probe, "_launchctl", lambda *a: _FakeCompleted())
+    unloaded, message = platform_probe.launchctl_bootout("org.example.job")
+    assert unloaded is True
+    assert "org.example.job" in message
+
+
+def test_launchctl_bootout_reports_failure_structurally(monkeypatch):
+    _with_uid(monkeypatch)
+    monkeypatch.setattr(
+        platform_probe, "_launchctl", lambda *a: _FakeCompleted(returncode=3, stderr="No such process")
+    )
+    unloaded, message = platform_probe.launchctl_bootout("org.example.job")
+    assert unloaded is False
+    assert "No such process" in message
+
+
+def test_bootstrap_and_bootout_refuse_where_there_is_no_getuid(tmp_path, monkeypatch):
+    """launchctl_print already guarded os.getuid(); these two did not, so
+    `setup --enable-agent` raised AttributeError off macOS instead of refusing."""
+    monkeypatch.delattr(platform_probe.os, "getuid", raising=False)
+    monkeypatch.setattr(
+        platform_probe, "_launchctl", lambda *a: pytest.fail("ran launchctl without a uid")
+    )
+    assert platform_probe.launchctl_bootstrap(tmp_path / "a.plist") == (False, platform_probe.NO_LAUNCHCTL)
+    assert platform_probe.launchctl_bootout("org.example.job") == (False, platform_probe.NO_LAUNCHCTL)
+    assert platform_probe.launchctl_print("org.example.job") is None
