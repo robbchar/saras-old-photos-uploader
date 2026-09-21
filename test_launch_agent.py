@@ -76,3 +76,13 @@ def test_plist_is_current_is_false_once_the_repo_moves(tmp_path):
     launch_agent.write_plist(a_spec(tmp_path), home)
     moved = launch_agent.sync_agent_spec(tmp_path / "elsewhere", "demo")
     assert launch_agent.plist_is_current(moved, home) is False
+
+
+def test_write_plist_puts_lf_line_endings_on_disk_not_crlf(tmp_path):
+    # read_text() universal-newline-decodes \r\n back to \n, so comparing decoded
+    # text (as plist_is_current does) can't catch a write that used CRLF on disk.
+    home = tmp_path / "home"
+    spec = a_spec(tmp_path)
+    launch_agent.write_plist(spec, home)
+    on_disk = launch_agent.plist_path(spec, home).read_bytes()
+    assert b"\r\n" not in on_disk
