@@ -477,15 +477,48 @@ def test_sync_columns_check_ignores_a_collision_among_the_sheets_own_columns():
     assert deployment.sync_columns_check(probe).probe().status is Status.PASS
 
 
-def test_agent_plist_check_remedy_does_not_point_back_at_the_command_that_just_failed(tmp_path):
-    """It only prints after converge ran fix() and the re-probe still failed -
-    i.e. after ./install.sh just tried. Telling the operator to run it again is
-    no remedy at all."""
+def test_agent_plist_check_remedy_leads_with_install_sh_then_the_runbook(tmp_path):
+    """On the `doctor` path no fix() ran, so the likeliest cause is simply that
+    ./install.sh was never run for this account - that has to come first. The
+    write-failure case only applies on the `setup` path, and stays secondary."""
     remedy = deployment.agent_plist_check(
         launch_agent.sync_agent_spec(tmp_path / "repo", "demo"), tmp_path / "home"
     ).remedy
-    assert "install.sh" not in remedy
+    assert remedy.startswith("./install.sh --project")
+    assert remedy.index("install.sh") < remedy.index("could not be written")
     assert "DEPLOYMENT.md" in remedy
+
+
+def test_unverified_sheet_checks_names_an_unknown_sheet_check():
+    """UNKNOWN counts as unverified here, and only here: exit_code still ignores
+    it, so `doctor` keeps exiting 0 on a machine that is merely offline."""
+    results = [
+        (passing("python version"), CheckOutcome(Status.PASS, "3.12")),
+        (
+            passing(deployment.SHEET_REACHABLE_CHECK),
+            CheckOutcome(Status.UNKNOWN, "could not authenticate"),
+        ),
+        (passing(deployment.SYNC_COLUMNS_CHECK), CheckOutcome(Status.PASS, "both present")),
+    ]
+    assert deployment.unverified_sheet_checks(results) == [deployment.SHEET_REACHABLE_CHECK]
+    assert deployment.exit_code(results) == 0
+
+
+def test_unverified_sheet_checks_is_empty_when_both_sheet_checks_pass():
+    results = [
+        (passing(deployment.SHEET_REACHABLE_CHECK), CheckOutcome(Status.PASS, "read 10 rows")),
+        (passing(deployment.SYNC_COLUMNS_CHECK), CheckOutcome(Status.PASS, "both present")),
+        (passing("photo drive"), CheckOutcome(Status.UNKNOWN, "unplugged?")),
+    ]
+    assert deployment.unverified_sheet_checks(results) == []
+
+
+def test_the_sheet_checks_carry_the_names_the_agent_gate_looks_for():
+    """The gate matches by name, so a renamed check would silently stop blocking."""
+    reachable = deployment.sheet_reachable_check(grid_with("title"), "sa@x.com")
+    columns = deployment.sync_columns_check(grid_with("title"))
+    assert reachable.name in deployment.LIVE_SHEET_CHECKS
+    assert columns.name in deployment.LIVE_SHEET_CHECKS
 
 
 IA_CONFIG_WITH_KEYS = "[s3]\naccess = AAAA\nsecret = BBBB\n"

@@ -2566,6 +2566,22 @@ AGENT_NOT_ENABLED = (
     f"[FAIL] line above, then re-run: {ENABLE_AGENT_COMMAND}"
 )
 
+AGENT_NOT_ENABLED_UNVERIFIED = (
+    "the live Sheet could not be verified ({names} came back UNKNOWN, not PASS) - the hourly "
+    "sync agent was NOT enabled and nothing was loaded. It would run `sync-metadata --live` "
+    "unattended against a Sheet whose sharing and sync columns were never confirmed. Get this "
+    f"machine onto a network that can reach Google Sheets, then re-run: {ENABLE_AGENT_COMMAND}"
+)
+
+
+def agent_not_enabled_message(unverified: list[str]) -> str:
+    """A machine that is merely offline reaches the same reduced assurance
+    --offline is refused for, so --enable-agent treats UNKNOWN on the two Sheet
+    checks as blocking. This rule lives here, not in deployment.exit_code."""
+    if unverified:
+        return AGENT_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified))
+    return AGENT_NOT_ENABLED
+
 AGENT_NOT_LOADED = "the hourly sync agent was not loaded - see the launchctl message above."
 
 
@@ -2637,10 +2653,11 @@ def cmd_setup(args) -> int:
     if args.enable_agent:
         # "Verify first, then enable" is the whole reason --enable-agent is a
         # separate flag, so it consults the verification it just performed.
-        if deployment.exit_code(results) != 0:
+        unverified = deployment.unverified_sheet_checks(results)
+        if deployment.exit_code(results) != 0 or unverified:
             print(deployment.format_report(results))
-            print(AGENT_NOT_ENABLED, file=sys.stderr)
-            return deployment.exit_code(results)
+            print(agent_not_enabled_message(unverified), file=sys.stderr)
+            return 1
         agent_failed = not load_sync_agent(args, announce)
         results = deployment.run_checks(checks)
 

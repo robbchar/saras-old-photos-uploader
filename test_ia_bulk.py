@@ -4512,7 +4512,8 @@ def test_cmd_setup_enables_the_agent_when_every_check_passes(monkeypatch):
                 name="fine",
                 probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
                 remedy="none",
-            )
+            ),
+            *_sheet_checks_that(deployment.Status.PASS),
         ],
     )
     loaded = []
@@ -4527,9 +4528,62 @@ def test_cmd_setup_enables_the_agent_when_every_check_passes(monkeypatch):
     assert len(loaded) == 1
 
 
+def _sheet_checks_that(status, detail="fine"):
+    return [
+        deployment.Check(
+            name=name,
+            probe=lambda _status=status, _detail=detail: deployment.CheckOutcome(_status, _detail),
+            remedy="check the Sheet",
+        )
+        for name in deployment.LIVE_SHEET_CHECKS
+    ]
+
+
+def test_cmd_setup_does_not_enable_the_agent_when_the_live_sheet_is_unverified(monkeypatch, capsys):
+    """An install-day machine on someone else's wifi: both Sheet probes raise,
+    _probe turns each into UNKNOWN, exit_code stays 0 - and a RunAtLoad --live
+    agent used to bootstrap without the sheet_id, the sharing or the sync
+    columns ever having been confirmed. Same hole as the two Criticals, reached
+    by a different route, and the reason --offline is refused."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="python version",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "3.12"),
+                remedy="none",
+            ),
+            *_sheet_checks_that(deployment.Status.UNKNOWN, "could not reach the Sheet"),
+        ],
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    err = capsys.readouterr().err
+    assert "could not be verified" in err
+    assert "NOT enabled" in err
+    for name in deployment.LIVE_SHEET_CHECKS:
+        assert name in err
+
+
+def test_doctor_still_exits_zero_on_the_same_unverified_sheet(monkeypatch):
+    """The stricter rule is the --enable-agent gate's alone. UNKNOWN keeps its
+    meaning everywhere else, doctor included."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: _sheet_checks_that(
+            deployment.Status.UNKNOWN, "could not reach the Sheet"
+        ),
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "sarasoldphotos", "--live"])
+    assert ia_bulk.cmd_doctor(args) == 0
+
+
 def test_cmd_setup_enables_the_agent_when_a_check_is_only_unknown(monkeypatch):
-    """UNKNOWN is "could not tell", not broken - the drive being unplugged must
-    not block enabling the agent."""
+    """UNKNOWN outside the two Sheet checks still does not block - the LaCie
+    drive being unplugged is no reason to refuse to enable the agent."""
     monkeypatch.setattr(
         ia_bulk,
         "build_deployment_checks",
@@ -4538,7 +4592,8 @@ def test_cmd_setup_enables_the_agent_when_a_check_is_only_unknown(monkeypatch):
                 name="photo drive",
                 probe=lambda: deployment.CheckOutcome(deployment.Status.UNKNOWN, "unplugged?"),
                 remedy="plug it in",
-            )
+            ),
+            *_sheet_checks_that(deployment.Status.PASS),
         ],
     )
     loaded = []

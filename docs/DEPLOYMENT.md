@@ -312,8 +312,20 @@ are exactly the ones that gate enabling a live agent.
 **It enables nothing if any check failed.** `setup` converges, re-checks, and
 only then loads the agent. A single `[FAIL]` line — a missing key, a
 placeholder sheet id, absent sync columns — prints the report, says the agent
-was **not** enabled, and exits non-zero. `UNKNOWN` does not block it: the LaCie
-drive being unplugged is not a reason to refuse. There is no `--force`.
+was **not** enabled, and exits non-zero. There is no `--force`.
+
+**And nothing if the live Sheet could not be checked.** `spreadsheet
+reachable` and `sync state columns` must come back `PASS` here, not `UNKNOWN`.
+A machine that simply has no working network — install day on someone else's
+wifi — turns both into "could not tell", which everywhere else is not a
+failure. For this one command it is: enabling on it would start an hourly live
+sync against a Sheet whose id, sharing and sync columns were never confirmed,
+which is exactly what refusing `--offline` is for. `setup` says which check
+could not be verified and loads nothing.
+
+`UNKNOWN` on any **other** check still does not block — the LaCie drive being
+unplugged is not a reason to refuse. And this stricter rule is this gate's
+alone: `doctor` still exits **0** on an `UNKNOWN` Sheet check (§15).
 
 **This starts a live sync immediately.** `--enable-agent` loads a LaunchAgent
 with `RunAtLoad` set, so bootstrapping it runs `sync-metadata --live` right
@@ -429,17 +441,26 @@ happens to be offline right now.
 
 ### If `launch agent plist` still says FAIL
 
-`setup` writes that file itself, so a `FAIL` here means the write was tried and
-did not work. In order of likelihood:
+In order of likelihood:
 
-1. **`~/Library/LaunchAgents` is not writable by this account.** Usually the
-   checkout was chowned to the operating account (§2) and `./install.sh` is
-   being run from the installing one, or the reverse. Log in as the operating
-   account and re-run §10.
+1. **`./install.sh` has never been run for this account.** `doctor` only
+   reports; it never writes the plist. This is the ordinary first-run state,
+   and §10 is the whole answer:
+
+   ```bash
+   ./install.sh --project <project>
+   ```
+
 2. **The file exists but does not match this checkout** — a `git pull` changed
    what the agent should run and `./install.sh` has not been run since. Run §14.
 3. **You are looking at the wrong home** (§2). `doctor` from the installing
    account reports on a plist nothing loads.
+4. **The write was tried and failed.** This one applies only after
+   `./install.sh` (which converges the plist) has just run and the check still
+   says `FAIL` — usually `~/Library/LaunchAgents` is not writable by the
+   account running it, because the checkout was chowned to the operating
+   account (§2) and the installing one is running the script, or the reverse.
+   Log in as the operating account and re-run §10.
 
 Whatever the cause, the plist is regenerated from the checkout every time, so
 deleting it is safe: `rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist`

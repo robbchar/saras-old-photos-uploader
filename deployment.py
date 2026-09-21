@@ -307,6 +307,27 @@ def _read_grid_or_outcome(read_grid: SheetProbe) -> tuple[list[list[str]] | None
         return None, CheckOutcome(Status.UNKNOWN, f"could not reach the Sheet ({exc})")
 
 
+# Named so a caller can single these two out without re-spelling them. They are
+# the only checks that need the network, hence the only ones a de-facto offline
+# machine turns into UNKNOWN.
+SHEET_REACHABLE_CHECK = "spreadsheet reachable"
+SYNC_COLUMNS_CHECK = "sync state columns"
+LIVE_SHEET_CHECKS = (SHEET_REACHABLE_CHECK, SYNC_COLUMNS_CHECK)
+
+
+def unverified_sheet_checks(results: list[tuple[Check, CheckOutcome]]) -> list[str]:
+    """Sheet checks that did not come back PASS, UNKNOWN included.
+
+    For a caller about to start unattended live traffic, "could not tell" is not
+    good enough. Deliberately separate from exit_code(), which is unchanged:
+    `doctor` still exits 0 on UNKNOWN, and every other caller keeps that rule."""
+    return [
+        check.name
+        for check, outcome in results
+        if check.name in LIVE_SHEET_CHECKS and outcome.status is not Status.PASS
+    ]
+
+
 def sheet_reachable_check(read_grid: SheetProbe, sharing_target: str) -> Check:
     def probe() -> CheckOutcome:
         grid, failure = _read_grid_or_outcome(read_grid)
@@ -316,7 +337,7 @@ def sheet_reachable_check(read_grid: SheetProbe, sharing_target: str) -> Check:
         return CheckOutcome(Status.PASS, f"read {len(grid)} rows")
 
     return Check(
-        name="spreadsheet reachable",
+        name=SHEET_REACHABLE_CHECK,
         probe=probe,
         remedy=f"share the Sheet as Editor with {sharing_target}",
     )
@@ -345,7 +366,7 @@ def sync_columns_check(read_grid: SheetProbe) -> Check:
         return CheckOutcome(Status.PASS, "both sync columns present")
 
     return Check(
-        name="sync state columns",
+        name=SYNC_COLUMNS_CHECK,
         probe=probe,
         remedy=(
             f"give the Sheet exactly one header each named "
@@ -368,8 +389,9 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
         name="launch agent plist",
         probe=probe,
         remedy=(
-            "the plist could not be written - see docs/DEPLOYMENT.md, "
-            'section "Checking a machine later"'
+            "./install.sh --project <project>, from the account that runs the agent; "
+            "if that was just run and this still fails, the plist could not be written "
+            '- see docs/DEPLOYMENT.md, section "Checking a machine later"'
         ),
         fix=lambda: launch_agent.write_plist(spec, home),
     )
