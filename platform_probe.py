@@ -35,6 +35,12 @@ def set_file_mode(path: Path, mode: int) -> None:
     os.chmod(path, mode)
 
 
+def has_posix_permissions() -> bool:
+    """Windows os.stat reports a fixed mode for every file, so a chmod-style
+    check is meaningless there - only a POSIX platform can answer it."""
+    return os.name == "posix"
+
+
 def is_readable_directory(path: Path) -> bool:
     return path.is_dir() and os.access(path, os.R_OK)
 

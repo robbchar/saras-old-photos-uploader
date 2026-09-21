@@ -63,3 +63,13 @@ def test_is_readable_directory_is_false_for_a_file(tmp_path):
 
 def test_is_readable_directory_is_true_for_a_real_directory(tmp_path):
     assert platform_probe.is_readable_directory(tmp_path) is True
+
+
+def test_has_posix_permissions_is_true_on_posix(monkeypatch):
+    monkeypatch.setattr(platform_probe.os, "name", "posix")
+    assert platform_probe.has_posix_permissions() is True
+
+
+def test_has_posix_permissions_is_false_elsewhere(monkeypatch):
+    monkeypatch.setattr(platform_probe.os, "name", "nt")
+    assert platform_probe.has_posix_permissions() is False

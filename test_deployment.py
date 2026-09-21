@@ -162,16 +162,38 @@ def test_key_mode_check_is_unknown_when_the_key_is_absent(tmp_path):
 def test_key_mode_check_reports_the_owner_so_a_handover_mismatch_is_visible(tmp_path, monkeypatch):
     key = tmp_path / "k.json"
     key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
     monkeypatch.setattr(deployment.platform_probe, "file_owner", lambda _: "shared")
     monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o600)
     assert "shared" in deployment.key_mode_check(key).probe().detail
 
 
+def test_key_mode_check_passes_on_0o600_when_the_platform_has_posix_permissions(tmp_path, monkeypatch):
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o600)
+    assert deployment.key_mode_check(key).probe().status is Status.PASS
+
+
 def test_key_mode_check_fails_on_a_group_readable_key(tmp_path, monkeypatch):
     key = tmp_path / "k.json"
     key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
     monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o644)
     assert deployment.key_mode_check(key).probe().status is Status.FAIL
+
+
+def test_key_mode_check_is_unknown_when_the_platform_lacks_posix_permissions(tmp_path, monkeypatch):
+    """Windows os.stat reports 0o666 for every file, so a mode comparison there
+    would be a meaningless FAIL rather than an honest "can't tell"."""
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: False)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o666)
+    outcome = deployment.key_mode_check(key).probe()
+    assert outcome.status is Status.UNKNOWN
+    assert "posix" in outcome.detail.lower()
 
 
 def test_key_mode_check_fix_chmods_to_600(tmp_path, monkeypatch):

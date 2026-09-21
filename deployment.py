@@ -142,6 +142,10 @@ def key_mode_check(key_path: Path) -> Check:
         mode = platform_probe.file_mode(key_path)
         if mode is None:
             return CheckOutcome(Status.UNKNOWN, f"no key at {key_path} to check")
+        if not platform_probe.has_posix_permissions():
+            return CheckOutcome(
+                Status.UNKNOWN, "POSIX permissions cannot be checked on this platform"
+            )
         owner = platform_probe.file_owner(key_path) or "unknown"
         # Owner is reported, never asserted: the checkout is chowned to the shared
         # account at handover, so a mismatch is news rather than an error.
