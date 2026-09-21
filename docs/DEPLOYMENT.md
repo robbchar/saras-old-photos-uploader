@@ -46,6 +46,17 @@ Two macOS accounts are involved, and they play different roles:
 > Get this wrong and `doctor` will report the agent as `UNKNOWN` or missing
 > even though everything else converged correctly — see §15.
 
+**Both `setup` and `doctor` resolve `~` to the account running them.** That is
+correct — a LaunchAgent belongs to one account — but it has two consequences
+worth knowing before install day:
+
+- `./install.sh --project <project>` run from the **installing** account writes
+  a plist into *that* account's `~/Library/LaunchAgents`. Nothing ever loads
+  it, and §13's uninstall removes only the one it is run for, so remove both.
+- `doctor` run from the wrong account reports `[PASS] launch agent plist`
+  about a file that has nothing to do with the agent actually running. Check
+  the agent from the operating account, or the report is about the wrong home.
+
 ## 3. Python
 
 The pipeline needs **Python 3.10 or newer**. This isn't a language-syntax
@@ -106,6 +117,12 @@ With the key present but the Sheet not yet shared, the `spreadsheet
 reachable` check fails and its remedy line prints the exact address to
 share with — read from the key file, never hardcoded.
 
+**That printed line contains the real service-account address.** It is the one
+place the tool deliberately reads a credential's contents, and it reads only
+the key's own `client_email` — never a private key, never a token. Treat the
+output accordingly: do not paste a `doctor` report into a public issue, a pull
+request, or anywhere else in this repo without removing that address first.
+
 ## 5. Sharing the Sheet
 
 Share both the project's real Sheet and its test Sheet (both ids live in
@@ -156,6 +173,21 @@ ls -la ~/.config/internetarchive/ia.ini
 
 If nothing is there, `ia whoami` will tell you where it actually looked.
 
+`doctor` covers this from Python's side with two checks, using
+`internetarchive`'s own path-precedence logic rather than a second copy of the
+list above:
+
+- **`ia credentials`** — `PASS` naming the resolved path when the file is there
+  and carries both S3 keys; `FAIL` with `ia configure` as the remedy when it is
+  absent, unparseable, or missing a key. It reads presence only: the key values
+  are never printed, logged, or sent anywhere, and no call is made to Internet
+  Archive. A credential that exists but has been revoked at archive.org still
+  reports `PASS` — only a real run can tell you that.
+- **`ia credentials permissions`** — the same `0600` scrutiny the Google key
+  gets, `UNKNOWN` where the platform has no POSIX permissions. It has no
+  automatic fix: the file lives outside the checkout, so `setup` reports on it
+  rather than chmodding someone's home directory.
+
 ## 7. `files_dir` and the LaCie drive
 
 `files_dir` in `projects_registry.json` must point at wherever the project's
@@ -177,16 +209,34 @@ photos actually live on this machine.
 ```
 
 Replace it with the real Sheet's id (from its URL) for `<project>`. Every
-`--live` command is refused while this is still a placeholder — `doctor`'s
-`live spreadsheet ID` check fails until it's set.
+`--live` command is refused while this is still a placeholder.
+
+`doctor` checks whichever mode you ask it for, so the `live spreadsheet ID`
+check only exists on a run that passes `--live`:
+
+```bash
+python ia_bulk.py doctor --project <project> --live
+```
+
+Without `--live` the same run checks `test spreadsheet ID` instead and says
+nothing at all about the real Sheet.
 
 ## 9. The sync columns
 
 `sync-metadata` needs two tool-owned columns on the real Sheet beyond
 `upload`'s own four: **`ia_sync_hash`** and **`ia_last_synced`**. Add both as
 headers on the Sheet, then hide both columns — they're bookkeeping, not
-something a cataloguer should be editing by hand. `doctor`'s `sync state
-columns` check fails, naming both, until they exist.
+something a cataloguer should be editing by hand.
+
+```bash
+python ia_bulk.py doctor --project <project> --live
+```
+
+`doctor`'s `sync state columns` check fails, naming whichever is missing, until
+both exist — and fails again if a Sheet ends up with two headers that both
+normalize to one of these names, since the second would be silently ignored.
+As in §8, this check reads the Sheet the run names: **without `--live` it reads
+the test Sheet**, and a `PASS` there says nothing about the real one.
 
 ## 10. Install
 
@@ -208,6 +258,10 @@ first run on an empty Mac or the twentieth. In order, it:
 **Safe to re-run.** Running it again on a machine that already matches the
 checkout prints `nothing to change; this machine already matches the
 checkout.` and the same report — it does not undo or duplicate anything.
+
+`setup` refuses outright, before running any check, if `--enable-agent` is
+passed without `--live` or together with `--offline` (§12). Both refusals print
+the command to run instead. There is no override flag.
 
 ### If it fails partway
 
@@ -244,8 +298,22 @@ Once — and only once — the first live runs (`upload --live`, `sync-metadata
 account** (§2) and run:
 
 ```bash
-./install.sh --project <project> --enable-agent
+./install.sh --project <project> --live --enable-agent
 ```
+
+**`--live` is required here, and is not implied.** The agent it installs runs
+`sync-metadata --live` on the *real* Sheet. Without `--live`, `setup` would
+verify the *test* Sheet — its id, its sharing, its sync columns — and then
+start an hourly live sync against a real Sheet nothing had checked. Rather than
+infer what you meant, `setup` refuses and names this command. `--offline` is
+refused with `--enable-agent` for the same reason: the Sheet checks it skips
+are exactly the ones that gate enabling a live agent.
+
+**It enables nothing if any check failed.** `setup` converges, re-checks, and
+only then loads the agent. A single `[FAIL]` line — a missing key, a
+placeholder sheet id, absent sync columns — prints the report, says the agent
+was **not** enabled, and exits non-zero. `UNKNOWN` does not block it: the LaCie
+drive being unplugged is not a reason to refuse. There is no `--force`.
 
 **This starts a live sync immediately.** `--enable-agent` loads a LaunchAgent
 with `RunAtLoad` set, so bootstrapping it runs `sync-metadata --live` right
@@ -262,10 +330,19 @@ The agent fires hourly (`StartInterval` = 3600 seconds) after that. If the
 Mac is asleep when one or more intervals would have fired, launchd runs it
 **once** on wake, not once per missed hour.
 
-To check it after enabling:
+**Re-running it after an upgrade re-loads the agent.** launchd keeps its own
+copy of the plist from the moment it was bootstrapped, so rewriting the file
+alone changes nothing about the running job. When the agent is already loaded,
+`--enable-agent` says so, boots it out, and bootstraps the new definition —
+which means another immediate live sync. If `launchctl` refuses either step,
+`setup` exits non-zero and says the agent was not loaded, rather than reporting
+success it cannot confirm.
+
+To check it after enabling — `--live`, because that is the Sheet the agent
+you just started is syncing:
 
 ```bash
-python ia_bulk.py doctor --project <project>
+python ia_bulk.py doctor --project <project> --live
 tail -20 logs/launchagent-<project>.err
 ```
 
@@ -281,6 +358,17 @@ the `launch agent loaded` check as `UNKNOWN` (not loaded, or no session for
 this account — it can't tell which) and `launch agent plist` as `FAIL` until
 `./install.sh` (§10) writes the plist again.
 
+**Check the installing account too.** Every `./install.sh` writes a plist into
+the home of whichever account ran it (§2), so if the machine was set up from
+one account and operated from another, there is a second, never-loaded plist:
+
+```bash
+rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist
+```
+
+Run that from the installing account as well. Only the operating account's copy
+was ever loaded, so only that one needs `launchctl bootout`.
+
 ## 14. Upgrading
 
 ```bash
@@ -291,6 +379,19 @@ git pull
 The same command as install day — there is no separate upgrade path. It
 converges whatever the new checkout needs (new dependencies, a changed plist
 if `launch_agent.py` changed) and leaves an already-loaded agent loaded.
+
+**If the plist changed, the running agent is still the old one.** launchd holds
+its own copy from the moment it was bootstrapped; rewriting the file does not
+reach it, and `doctor` will report both `launch agent plist` and `launch agent
+loaded` as `PASS` while the job on the machine executes the previous command.
+To make a changed plist take effect, re-run §12 from the operating account —
+it boots the agent out and bootstraps the new definition:
+
+```bash
+./install.sh --project <project> --live --enable-agent
+```
+
+That starts another live sync immediately, the same as the first time.
 
 ## 15. Checking a machine later
 
@@ -314,6 +415,72 @@ Each check reports one of three states, never just pass/fail:
   "broken" would make the report untrustworthy on exactly the days (no
   network, drive unplugged) when you most need to trust it.
 
+`doctor` checks the mode it is given, so on a machine that is running live
+traffic, check the live side too — without `--live` it reports on the test
+Sheet and the test sheet id:
+
+```bash
+python ia_bulk.py doctor --project <project> --live
+```
+
 Pass `--offline` to skip the checks that need the network (`spreadsheet
 reachable`, `sync state columns`) entirely, e.g. when checking a machine that
 happens to be offline right now.
+
+### If `launch agent plist` still says FAIL
+
+`setup` writes that file itself, so a `FAIL` here means the write was tried and
+did not work. In order of likelihood:
+
+1. **`~/Library/LaunchAgents` is not writable by this account.** Usually the
+   checkout was chowned to the operating account (§2) and `./install.sh` is
+   being run from the installing one, or the reverse. Log in as the operating
+   account and re-run §10.
+2. **The file exists but does not match this checkout** — a `git pull` changed
+   what the agent should run and `./install.sh` has not been run since. Run §14.
+3. **You are looking at the wrong home** (§2). `doctor` from the installing
+   account reports on a plist nothing loads.
+
+Whatever the cause, the plist is regenerated from the checkout every time, so
+deleting it is safe: `rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist`
+and re-run §10.
+
+## 16. Verifying the service account by hand
+
+`doctor` covers placement, permissions and whether the Sheet answers. It does
+not exercise a real read through the whole stack, does not preview a sync, and
+never shows you the failure message you will see when the key is gone. Run
+these three on a new machine, and after replacing the key, before trusting a
+real run. They need about five minutes and change nothing. `< /dev/null`
+detaches each command from the terminal, so nothing could stop and wait for a
+sign-in even if it tried.
+
+1. **Read the test Sheet.** Expect the normal readiness report and no sign-in
+   prompt:
+
+   ```bash
+   python ia_bulk.py validate --project <project> < /dev/null
+   ```
+
+2. **Preview a sync.** Expect the usual summary line, for example
+   `10 uploaded rows; … 10 already in sync and would not be sent`:
+
+   ```bash
+   python ia_bulk.py sync-metadata --project <project> --dry-run < /dev/null
+   ```
+
+3. **See the failure message once.** Move the key aside, run `validate`, and
+   expect a single line starting `could not authenticate to Google Sheets:
+   missing service account key at …` with no traceback. Then put the key back:
+
+   ```bash
+   mv .ignored/google-service-account.json .ignored/google-service-account.json.off
+   python ia_bulk.py validate --project <project>
+   mv .ignored/google-service-account.json.off .ignored/google-service-account.json
+   ```
+
+For a full round trip — a real edit reaching Internet Archive, and the Sheet's
+version history showing the service account as its editor — follow
+[4. Corrections](OPERATIONS.md#4-corrections) against the test Sheet: change
+one uploaded row's title, sync, check the item, then change it back and sync
+again.

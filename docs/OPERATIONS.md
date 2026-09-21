@@ -11,10 +11,12 @@ and several things below have never been exercised against production.
 
 ## Google Cloud prerequisites
 
-Provisioning the service account, its key, sharing the Sheet, and verifying
-all of it on a machine now lives in
+Provisioning the service account, its key, and sharing the Sheet now lives in
 [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — that's a one-time, per-machine setup
-step, not part of running a batch.
+step, not part of running a batch. The five-minute check that the service
+account actually works end to end is
+[§16 of that document](DEPLOYMENT.md#16-verifying-the-service-account-by-hand);
+run it on a new machine and after replacing the key.
 
 ## The pipeline
 
