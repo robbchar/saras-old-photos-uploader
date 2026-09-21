@@ -1,3 +1,5 @@
+import launch_agent
+
 import deployment
 from deployment import Check, CheckOutcome, Status
 
@@ -317,3 +319,45 @@ def test_sync_columns_check_fails_on_a_wrong_sheet_id():
         raise make_http_error(message="Requested entity was not found.", status=404)
 
     assert deployment.sync_columns_check(not_found).probe().status is Status.FAIL
+
+
+def test_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert deployment.agent_plist_check(spec, tmp_path / "home").probe().status is Status.FAIL
+
+
+def test_agent_plist_check_fix_writes_the_plist(tmp_path):
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    home = tmp_path / "home"
+    deployment.agent_plist_check(spec, home).fix()
+    assert launch_agent.plist_is_current(spec, home) is True
+
+
+def test_agent_loaded_check_is_unknown_when_launchctl_says_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(deployment.platform_probe, "launchctl_print", lambda _: None)
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert deployment.agent_loaded_check(spec).probe().status is Status.UNKNOWN
+
+
+def test_agent_loaded_check_passes_and_reports_the_last_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 0\n"
+    )
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    outcome = deployment.agent_loaded_check(spec).probe()
+    assert outcome.status is Status.PASS
+    assert "0" in outcome.detail
+
+
+def test_agent_loaded_check_fails_when_the_last_run_errored(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 1\n"
+    )
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert deployment.agent_loaded_check(spec).probe().status is Status.FAIL
+
+
+def test_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_path):
+    # Loading is gated on --enable-agent, which setup does explicitly.
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert deployment.agent_loaded_check(spec).fix is None

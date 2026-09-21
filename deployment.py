@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import google_auth
+import launch_agent
 import platform_probe
 import sync_state
 from column_map import build_column_map
@@ -247,5 +248,48 @@ def sync_columns_check(read_grid: SheetProbe) -> Check:
         remedy=(
             f"add the columns {' and '.join(sync_state.SYNC_STATE_COLUMNS)} to the Sheet, "
             "then hide them - see docs/DEPLOYMENT.md"
+        ),
+    )
+
+
+def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
+    def probe() -> CheckOutcome:
+        target = launch_agent.plist_path(spec, home)
+        if launch_agent.plist_is_current(spec, home):
+            return CheckOutcome(Status.PASS, str(target))
+        if target.exists():
+            return CheckOutcome(Status.FAIL, f"{target} does not match this checkout")
+        return CheckOutcome(Status.FAIL, f"no plist at {target}")
+
+    return Check(
+        name="launch agent plist",
+        probe=probe,
+        remedy="./install.sh",
+        fix=lambda: launch_agent.write_plist(spec, home),
+    )
+
+
+def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
+    def probe() -> CheckOutcome:
+        output = platform_probe.launchctl_print(spec.label)
+        if output is None:
+            # Not loaded, no launchctl, or a different account's session - all
+            # "could not tell", and loading is --enable-agent's job, never a fix().
+            return CheckOutcome(Status.UNKNOWN, f"{spec.label} is not loaded for this account")
+        last_exit = platform_probe.parse_last_exit(output)
+        pid = platform_probe.parse_pid(output)
+        running = f", running as pid {pid}" if pid is not None else ""
+        if last_exit is None:
+            return CheckOutcome(Status.PASS, f"loaded, has not run yet{running}")
+        if last_exit != 0:
+            return CheckOutcome(Status.FAIL, f"loaded, last run exited {last_exit}{running}")
+        return CheckOutcome(Status.PASS, f"loaded, last run exited 0{running}")
+
+    return Check(
+        name="launch agent loaded",
+        probe=probe,
+        remedy=(
+            "log in as the operating account and run ./install.sh --enable-agent, "
+            "then check logs/launchagent-*.err"
         ),
     )
