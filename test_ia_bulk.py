@@ -4222,7 +4222,10 @@ def test_main_dispatches_to_cmd_doctor(monkeypatch):
     assert called == ["doctor"]
 
 
-def test_doctor_has_no_flag_that_would_let_it_mutate():
+def test_doctor_subparser_exposes_no_mutating_flags():
+    """Documents the parser surface only - does not by itself prove `doctor`
+    never mutates. See test_cmd_doctor_never_calls_a_failing_checks_fix for
+    the behavioral guarantee."""
     parser = ia_bulk.build_parser()
     doctor = next(
         action.choices["doctor"]
@@ -4232,6 +4235,35 @@ def test_doctor_has_no_flag_that_would_let_it_mutate():
     flags = {action.dest for action in doctor._actions}
     assert "enable_agent" not in flags
     assert "fix" not in flags
+
+
+def test_cmd_doctor_never_calls_a_failing_checks_fix(monkeypatch):
+    """The property that actually matters: cmd_doctor must call run_checks,
+    never converge, so a FAIL never triggers that check's fix(). A FAIL with
+    a fix is the only shape where the two implementations differ."""
+    fix_calls = []
+
+    def fix() -> str:
+        fix_calls.append(True)
+        return "fixed"
+
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="invented",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "nope"),
+                remedy="do the thing",
+                fix=fix,
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    exit_code = ia_bulk.cmd_doctor(args)
+
+    assert fix_calls == []
+    assert exit_code == 1
 
 
 def test_cmd_doctor_returns_one_when_a_check_fails(monkeypatch, capsys):
