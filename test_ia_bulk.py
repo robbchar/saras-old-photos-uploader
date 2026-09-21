@@ -4356,19 +4356,62 @@ def test_cmd_setup_reports_when_it_changed_nothing(monkeypatch, capsys):
     assert "nothing to change" in capsys.readouterr().out
 
 
+def test_cmd_setup_converges_and_reports_what_it_fixed(monkeypatch, capsys):
+    """Companion to the quiet-path test above: a check that starts FAIL and has
+    a fix() that clears it. This is the only case that exercises cmd_setup's
+    own `changes` bookkeeping - the quiet-path test's single PASSing check
+    never calls announce() at all, so it can't tell a working closure from a
+    broken one."""
+    fixed_calls = []
+
+    def fix() -> str:
+        fixed_calls.append(True)
+        return "fixed it"
+
+    attempts = []
+
+    def probe() -> deployment.CheckOutcome:
+        attempts.append(True)
+        if len(attempts) == 1:
+            return deployment.CheckOutcome(deployment.Status.FAIL, "not yet")
+        return deployment.CheckOutcome(deployment.Status.PASS, "fine now")
+
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(name="needs a fix", probe=probe, remedy="do the thing", fix=fix)
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert ia_bulk.cmd_setup(args) == 0
+    out = capsys.readouterr().out
+    assert fixed_calls == [True]
+    assert "nothing to change" not in out
+    assert "fixing" in out
+    assert "fixed it" in out
+
+
 def test_cmd_setup_with_enable_agent_announces_before_it_bootstraps(monkeypatch, capsys):
     """Both risky actions on a shared machine - permission changes and loading
-    the agent - must be announced before they happen, never only after."""
+    the agent - must be announced before they happen, never only after. The
+    fake bootstrap asserts at call time (not on final stdout order), so it
+    catches a version that hoists launchctl_bootstrap(plist) into a variable
+    assigned before the two announce() calls: the real side effect would fire
+    before anything is printed, even though the final stdout text order would
+    look identical."""
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
-    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: "loaded it")
+
+    def fake_bootstrap(path):
+        already_printed = capsys.readouterr().out
+        assert "loading" in already_printed
+        assert "starts a live sync run now, and again at every login" in already_printed
+        return "loaded it"
+
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", fake_bootstrap)
     monkeypatch.setattr(ia_bulk.platform_probe, "current_user", lambda: "sarasoldphotos")
     args = ia_bulk.build_parser().parse_args(["setup", "--project", "sarasoldphotos", "--enable-agent"])
     ia_bulk.cmd_setup(args)
-    out = capsys.readouterr().out
-    assert "starts a live sync run now, and again at every login" in out
-    load_announcement = out.index("loading")
-    bootstrap_result = out.index("loaded it")
-    assert load_announcement < bootstrap_result
 
 
 def test_cmd_setup_reuses_the_same_repo_root_build_deployment_checks_uses():
