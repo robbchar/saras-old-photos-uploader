@@ -1,6 +1,14 @@
-import launch_agent
+import json
+import re
+from pathlib import Path
+
+from googleapiclient.errors import HttpError
 
 import deployment
+import google_auth
+import launch_agent
+import project_config
+import sync_state
 from deployment import Check, CheckOutcome, Status
 
 
@@ -114,11 +122,6 @@ def test_converge_does_not_call_fix_for_an_unknown_check():
 
 def test_minimum_python_is_three_ten():
     assert deployment.MINIMUM_PYTHON == (3, 10)
-
-
-from pathlib import Path
-
-import project_config
 
 
 def a_config(sheet_id="1realsheetid", test_sheet_id="1testsheetid"):
@@ -242,13 +245,6 @@ def test_python_version_check_passes_at_the_floor():
 
 def test_dependencies_check_passes_in_this_environment():
     assert deployment.dependencies_check().probe().status is Status.PASS
-
-
-import json
-
-import google_auth
-import sync_state
-from googleapiclient.errors import HttpError
 
 
 def grid_with(*headers):
@@ -383,9 +379,6 @@ def test_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_pa
     # Loading is gated on --enable-agent, which setup does explicitly.
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
     assert deployment.agent_loaded_check(spec).fix is None
-
-
-import re
 
 
 def test_install_sh_python_floor_matches_the_one_python_enforces():
