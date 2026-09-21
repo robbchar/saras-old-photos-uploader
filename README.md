@@ -12,6 +12,8 @@ hand-prepared CSV export remains a deliberate offline/dry-run fallback for
 
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — runbook: how to run a batch,
   pre-live checklist, resuming, batch limits. **Start here to run something.**
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — provisioning and upgrading the
+  Mac that runs this: Python, credentials, the hourly sync agent, `./install.sh`.
 - [`docs/CSV-PREPARATION.md`](docs/CSV-PREPARATION.md) — the offline `--csv`
   path only: turning a raw Sheet export into the required schema, and the
   traps that don't fail loudly.
@@ -95,7 +97,7 @@ Requires `internetarchive` to be authenticated against the shared org
 account (`ia configure`) before running `upload` or `sync-metadata`. Sheet
 commands also need the Google service account key saved at
 `.ignored/google-service-account.json` — see
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md), "Google Cloud prerequisites".
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), "Service account".
 
 ## Commands
 
@@ -125,7 +127,8 @@ full.
 
 For the Google Cloud setup this requires (the service account, its key file,
 and sharing the Sheet with it) see
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md), "Google Cloud prerequisites"; for
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), sections "Service account" and
+"Sharing the Sheet"; for
 the reserve/upload/confirm protocol and registry fields in full see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and "Project registry" above.
 

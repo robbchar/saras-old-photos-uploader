@@ -9,84 +9,12 @@ a run's output.
 a `test_collection` run (`"live": false`). The first real run is still ahead,
 and several things below have never been exercised against production.
 
-## Google Cloud prerequisites (one-time)
+## Google Cloud prerequisites
 
-Reading and writing the Sheet uses a Google Cloud **service account**: no
-browser sign-in and no expiring token. See [`docs/DECISIONS.md`](DECISIONS.md),
-"The Sheet is reached as a service account, not as a person". Before the first
-run on a machine:
-
-- The service account is in the project's Google Cloud project, under IAM &
-  Admin → Service Accounts. It has no project roles; all of its access comes
-  from Sheet sharing.
-- Its JSON key must be saved to `.ignored/google-service-account.json`
-  (relative to the project root; never committed — everything under
-  `.ignored/` is gitignored). The key never expires, so treat it as a
-  password: never email it, and never put it in Drive or chat. To replace it,
-  create a new key on the service account's **Keys** tab, then delete the old
-  one there.
-- The target Sheet (both the real one and the test one named in the
-  project's registry entry) must be shared with the service account's address
-  as **Editor**, with "Notify people" unchecked. The address is the
-  `client_email` in the key file, and is also listed under Service Accounts.
-  `upload` writes `ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib`
-  back to the Sheet, so read-only sharing is not enough, even in test mode
-  with `--write-identifier`.
-- The **Google Sheets API** must be enabled in the Cloud project (APIs &
-  Services → Library).
-- Creating a key can be refused by the organization policy "Disable service
-  account key creation" (`iam.disableServiceAccountKeyCreation`), which
-  Google enforces by default on newer organizations; an organization-policy
-  administrator can turn it off for this one project.
-- If the Google Workspace that owns the Sheet restricts sharing outside its
-  domain, sharing with the service account's address (which is outside the
-  domain) is blocked until an admin allows it (admin.google.com → Apps →
-  Google Workspace → Drive and Docs → Sharing settings).
-
-Every edit the tool makes appears in the Sheet's version history as the
-service account, whoever ran the command.
-
-If the key is missing, unreadable, or deleted or disabled in the console,
-every Sheet command stops before doing anything and says which. A Sheet not
-yet shared with the service account fails its first read with a message naming
-the address to share it with.
-
-### Checking the service account
-
-Run this on any new machine (and after replacing the key) before trusting a
-real run. It needs about five minutes and changes nothing. `< /dev/null`
-detaches the command from the terminal, so nothing could stop and wait for a
-sign-in even if it tried.
-
-1. **Read the test Sheet.** Expect the normal readiness report and no sign-in
-   prompt:
-
-   ```bash
-   python ia_bulk.py validate --project sarasoldphotos < /dev/null
-   ```
-
-2. **Preview a sync.** Expect the usual summary line, for example
-   `10 uploaded rows; … 10 already in sync and would not be sent`:
-
-   ```bash
-   python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run < /dev/null
-   ```
-
-3. **See the failure message once.** Move the key aside, run `validate`,
-   and expect a single line starting `could not authenticate to Google
-   Sheets: missing service account key at …` with no traceback. Then put the
-   key back:
-
-   ```bash
-   mv .ignored/google-service-account.json .ignored/google-service-account.json.off
-   python ia_bulk.py validate --project sarasoldphotos
-   mv .ignored/google-service-account.json.off .ignored/google-service-account.json
-   ```
-
-For a full round trip — a real edit reaching Internet Archive, and the Sheet's
-version history showing the service account as its editor — follow
-[4. Corrections](#4-corrections) against the test Sheet: change one uploaded
-row's title, sync, check the item, then change it back and sync again.
+Provisioning the service account, its key, sharing the Sheet, and verifying
+all of it on a machine now lives in
+[`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — that's a one-time, per-machine setup
+step, not part of running a batch.
 
 ## The pipeline
 
