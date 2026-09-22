@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 _LAST_EXIT = re.compile(r"last exit code\s*=\s*(\d+)")
@@ -112,3 +113,19 @@ def launchctl_bootout(label: str) -> tuple[bool, str]:
     if result.returncode == 0:
         return True, f"unloaded {label}"
     return False, f"launchctl bootout failed: {result.stderr.strip()}"
+
+
+# Above launchd's default 20s ExitTimeOut, after which it SIGKILLs the job.
+UNLOAD_TIMEOUT_SECONDS = 30.0
+_UNLOAD_POLL_SECONDS = 0.5
+
+
+def wait_until_unloaded(label: str, timeout: float = UNLOAD_TIMEOUT_SECONDS) -> bool:
+    """True once launchctl no longer lists label. bootout can return while a
+    running job is still exiting, and a bootstrap over it fails."""
+    deadline = time.monotonic() + timeout
+    while launchctl_print(label) is not None:
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_UNLOAD_POLL_SECONDS)
+    return True

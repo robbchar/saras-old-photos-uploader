@@ -19,7 +19,11 @@ DEFAULT_SERVICE_ACCOUNT_KEY_PATH = _PROJECT_ROOT / ".ignored" / "google-service-
 
 
 class AuthUnavailable(Exception):
-    pass
+    """`transient` is True only when a retry could succeed unchanged (network, Google busy)."""
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 def load_service_account_credentials(key_path: Path) -> service_account.Credentials:
@@ -51,13 +55,15 @@ def load_service_account_credentials(key_path: Path) -> service_account.Credenti
     except TransportError as exc:
         raise AuthUnavailable(
             f"could not reach Google to authenticate ({exc}). This is a network "
-            "problem, not a credential one - check the connection and re-run."
+            "problem, not a credential one - check the connection and re-run.",
+            transient=True,
         ) from exc
     except RefreshError as exc:
         if exc.retryable:
             raise AuthUnavailable(
                 f"Google could not issue a token right now ({exc}). This is a temporary "
-                "problem, not a credential one - re-run in a few minutes."
+                "problem, not a credential one - re-run in a few minutes.",
+                transient=True,
             ) from exc
         raise AuthUnavailable(
             f"Google rejected the service account key at {key_path} ({exc}). Check that "

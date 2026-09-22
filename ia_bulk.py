@@ -2360,6 +2360,13 @@ def sheet_sharing_target() -> str:
     )
 
 
+NO_DATA_ROWS = (
+    "the Sheet has no data rows (only a header, or nothing at all) - check that "
+    "'sheet_tab' in the project's registry entry names the right tab, and that "
+    "the Sheet has actually been populated and shared"
+)
+
+
 def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command: str) -> SheetRead:
     """Everything all three Sheet-path commands do between printing their
     banner and starting their own work.
@@ -2429,11 +2436,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
         if structure_results:
             print("\n".join(_format_result_lines(structure_results)))
             print()
-        print(
-            "the Sheet has no data rows (only a header, or nothing at all) - check that "
-            "'sheet_tab' in the project's registry entry names the right tab, and that "
-            "the Sheet has actually been populated and shared"
-        )
+        print(NO_DATA_ROWS)
         raise SheetSetupFailed
 
     return SheetRead(
@@ -2525,14 +2528,29 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
         cached_grid: dict[str, list[list[str]]] = {}
 
         def read_grid() -> list[list[str]]:
+            # Reading a placeholder ID only earns a 404 and a misleading "share it" remedy.
+            if config.sheet_id_for(live).startswith(PLACEHOLDER_SHEET_ID_PREFIX):
+                mode = "live" if live else "test"
+                raise deployment.SheetNotChecked(f"the {mode}-mode sheet_id is still a placeholder")
             if "grid" not in cached_grid:
                 cached_grid["grid"] = build_sheet_client(config, live).read_grid()
             return cached_grid["grid"]
 
+        def sync_refusal(grid: list[list[str]]) -> str | None:
+            # read_sheet's refusal first, then sync_from_sheet's, in the order the agent meets them.
+            column_map, rows = grid_to_rows(grid)
+            if not rows:
+                return NO_DATA_ROWS
+            refusal = sync_header_refusal(column_map, config, args.registry)
+            if refusal is None:
+                return None
+            message, details = refusal
+            return "; ".join([message, *details])
+
         checks.extend(
             [
                 deployment.sheet_reachable_check(read_grid, sheet_sharing_target()),
-                deployment.sync_columns_check(read_grid),
+                deployment.sync_columns_check(read_grid, sync_refusal),
             ]
         )
 
@@ -2562,27 +2580,39 @@ ENABLE_AGENT_NEEDS_NETWORK = (
 )
 
 AGENT_NOT_ENABLED = (
-    "checks failed - the hourly sync agent was NOT enabled and nothing was loaded. Fix every "
-    f"[FAIL] line above, then re-run: {ENABLE_AGENT_COMMAND}"
+    "{names} failed - the hourly sync agent was NOT enabled and nothing was loaded. Fix those "
+    "[FAIL] lines above, then re-run: " + ENABLE_AGENT_COMMAND
 )
 
 AGENT_NOT_ENABLED_UNVERIFIED = (
     "the live Sheet could not be verified ({names} came back UNKNOWN, not PASS) - the hourly "
     "sync agent was NOT enabled and nothing was loaded. It would run `sync-metadata --live` "
-    "unattended against a Sheet whose sharing and sync columns were never confirmed. Get this "
-    f"machine onto a network that can reach Google Sheets, then re-run: {ENABLE_AGENT_COMMAND}"
+    "unattended against a Sheet whose sharing and sync columns were never confirmed. Each "
+    "UNKNOWN line above says why - most often no network, or Google briefly unavailable. "
+    "Resolve that, then re-run: " + ENABLE_AGENT_COMMAND
 )
 
 
-def agent_not_enabled_message(unverified: list[str]) -> str:
-    """A machine that is merely offline reaches the same reduced assurance
-    --offline is refused for, so --enable-agent treats UNKNOWN on the two Sheet
-    checks as blocking. This rule lives here, not in deployment.exit_code."""
-    if unverified:
+def agent_not_enabled_message(blocking: list[str], unverified: list[str]) -> str:
+    """FAILs are named first: an UNKNOWN Sheet check is often only their
+    consequence. A merely offline machine reaches the same reduced assurance
+    --offline is refused for, so UNKNOWN on the two Sheet checks blocks too.
+    This rule lives here, not in deployment.exit_code."""
+    if not blocking:
         return AGENT_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified))
-    return AGENT_NOT_ENABLED
+    message = AGENT_NOT_ENABLED.format(names=", ".join(blocking))
+    if unverified:
+        message += f" ({' and '.join(unverified)} came back UNKNOWN too, and must PASS as well.)"
+    return message
 
-AGENT_NOT_LOADED = "the hourly sync agent was not loaded - see the launchctl message above."
+AGENT_NOT_LOADED = (
+    "the hourly sync agent was not loaded - see the message above. A plist written above still "
+    "loads at this account's next login; `doctor --live` shows what is loaded now."
+)
+
+AGENT_ENABLED_DESPITE_FAILS = (
+    "the hourly sync agent IS enabled: the [FAIL] lines above are for other work, not for it."
+)
 
 
 def enable_agent_refusal(args) -> str | None:
@@ -2598,9 +2628,10 @@ def enable_agent_refusal(args) -> str | None:
 
 
 def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
-    """Load the hourly agent, replacing an already-loaded one. True when launchd
-    took it. Bootout first because launchd holds its own copy of the plist from
-    bootstrap time, so a rewritten plist otherwise never takes effect."""
+    """Write the plist and load the hourly agent, replacing an already-loaded
+    one. True when launchd took it. Bootout first because launchd holds its own
+    copy of the plist from bootstrap time, so a rewritten plist otherwise never
+    takes effect."""
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
     spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id)
@@ -2611,24 +2642,51 @@ def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
     announce(f"loading {spec.label} for {platform_probe.current_user()}")
     announce("  this starts a live sync run now, and again at every login")
 
+    # Written here and nowhere else: launchd loads every plist in LaunchAgents at login.
+    try:
+        announce(f"  {launch_agent.write_plist(spec, Path.home())}")
+    except OSError as exc:
+        announce(f"  could not write {plist} ({exc})")
+        return False
+
     if platform_probe.launchctl_print(spec.label) is not None:
-        announce("  it is already loaded - unloading it first so the new plist takes effect")
+        announce(
+            "  it is already loaded - unloading it first so the new plist takes effect; "
+            "a sync running right now is stopped"
+        )
+        # Waited on even when bootout reports failure: it exits 36 ("in progress")
+        # while a running job is still stopping. Only a job still listed is fatal.
         _unloaded, bootout_message = platform_probe.launchctl_bootout(spec.label)
         announce(f"  {bootout_message}")
+        if not platform_probe.wait_until_unloaded(spec.label):
+            announce(
+                f"  {spec.label} was still registered "
+                f"{platform_probe.UNLOAD_TIMEOUT_SECONDS:.0f}s after bootout - not loading over it"
+            )
+            return False
 
     loaded, bootstrap_message = platform_probe.launchctl_bootstrap(plist)
     announce(f"  {bootstrap_message}")
     return loaded
 
 
+# What reading the registry can raise in `doctor` and `setup`.
+# ValueError covers malformed JSON and a registry that is not UTF-8.
+REGISTRY_READ_ERRORS = (ConfigError, ValueError, OSError)
+
+
+def report_unreadable_registry(args, exc: Exception) -> int:
+    # `doctor` and `setup` are the commands you talk someone through over the
+    # phone; a traceback is the one output that helps nobody.
+    print(f"could not read the project registry {args.registry}: {exc}", file=sys.stderr)
+    return 1
+
+
 def cmd_doctor(args) -> int:
     try:
         checks = build_deployment_checks(args, include_network=not args.offline)
-    except (ConfigError, json.JSONDecodeError, OSError) as exc:
-        # `doctor` is the command you talk someone through over the phone; a
-        # traceback is the one output that helps nobody.
-        print(f"could not read the project registry {args.registry}: {exc}", file=sys.stderr)
-        return 1
+    except REGISTRY_READ_ERRORS as exc:
+        return report_unreadable_registry(args, exc)
     results = deployment.run_checks(checks)
     print(deployment.format_report(results))
     return deployment.exit_code(results)
@@ -2646,27 +2704,39 @@ def cmd_setup(args) -> int:
         changes.append(line)
         print(line)
 
-    checks = build_deployment_checks(args, include_network=not args.offline)
+    try:
+        checks = build_deployment_checks(args, include_network=not args.offline)
+    except REGISTRY_READ_ERRORS as exc:
+        return report_unreadable_registry(args, exc)
     results = deployment.converge(checks, announce)
     agent_failed = False
 
     if args.enable_agent:
         # "Verify first, then enable" is the whole reason --enable-agent is a
         # separate flag, so it consults the verification it just performed.
+        blocking = deployment.agent_blocking_failures(results)
         unverified = deployment.unverified_sheet_checks(results)
-        if deployment.exit_code(results) != 0 or unverified:
+        if blocking or unverified:
             print(deployment.format_report(results))
-            print(agent_not_enabled_message(unverified), file=sys.stderr)
+            print(agent_not_enabled_message(blocking, unverified), file=sys.stderr)
             return 1
-        agent_failed = not load_sync_agent(args, announce)
+        try:
+            agent_failed = not load_sync_agent(args, announce)
+        except REGISTRY_READ_ERRORS as exc:
+            return report_unreadable_registry(args, exc)
         results = deployment.run_checks(checks)
 
     if not changes:
-        print("nothing to change; this machine already matches the checkout.")
+        if deployment.exit_code(results) == 0:
+            print("nothing to change; this machine already matches the checkout.")
+        else:
+            print("nothing setup can change on its own; each [FAIL] below says what to do.")
     print(deployment.format_report(results))
     if agent_failed:
         print(AGENT_NOT_LOADED, file=sys.stderr)
         return 1
+    if args.enable_agent and deployment.exit_code(results) != 0:
+        print(AGENT_ENABLED_DESPITE_FAILS, file=sys.stderr)
     return deployment.exit_code(results)
 
 
@@ -4996,6 +5066,58 @@ def cmd_sync_metadata(args) -> int:
     return sync_from_sheet(args)
 
 
+def sync_header_refusal(
+    column_map: ColumnMap, config: ProjectConfig, registry_path: str
+) -> tuple[str, list[str]] | None:
+    """(message, detail lines) for the first header-row reason sync-metadata
+    refuses a Sheet, or None. The `sync state columns` deployment check runs it
+    too, after read_sheet's no-data-rows refusal, so --enable-agent refuses the
+    Sheets the agent would."""
+    # A header defect corrupts every row's field names identically, and unlike
+    # upload there is no per-row way around it.
+    header_errors = check_column_map(column_map)
+    if header_errors:
+        return (
+            "the Sheet's header row has problems that affect every row - refusing to send "
+            "metadata until they are fixed",
+            header_errors,
+        )
+
+    # All three checks are before anything is sent, and all three apply in
+    # test mode as well as live: a rehearsal that passes where the real run
+    # refuses is a false negative on the one run an operator trusts.
+    try:
+        locate_sync_columns(column_map)
+    except MissingSyncColumns as exc:
+        return str(exc), []
+
+    # _verified() re-checks this same thing before every stamp write, because
+    # a column can vanish mid-run - but relying on that alone lets a Sheet
+    # that never had ia_identifier_bib through the front door: ia_identifier
+    # and ia_uploaded absent means no row classifies DONE (refused in
+    # sync_from_sheet, at "no row is marked uploaded yet"), and ia_url absent
+    # means every row is a reported problem, but ia_identifier_bib absent is
+    # invisible there - rows plan, hash-gate, and push, and only then does
+    # _verified() catch it, per chunk, forever, stamping nothing while
+    # permanent metadata keeps going out. Checked here for the same reason
+    # check_file_template is.
+    try:
+        locate_write_back_columns(column_map)
+    except MissingWriteBackColumns as exc:
+        return f"project '{config.project_id}': {exc}", []
+
+    # The moved-row guard fingerprints a row by its file_template columns.
+    # A template naming a column the Sheet lacks fingerprints EVERY row as
+    # "", which never matches - so nothing would ever be stamped and every
+    # row would re-push forever, silently. Header check only; no disk access.
+    try:
+        check_file_template(config.file_template, column_map)
+    except TemplateError as exc:
+        return f"project '{config.project_id}': {exc} - fix 'file_template' in {registry_path}", []
+
+    return None
+
+
 def sync_from_sheet(args) -> int:
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
@@ -5046,54 +5168,14 @@ def sync_from_sheet(args) -> int:
 
     column_map, rows = sheet.column_map, sheet.rows
 
-    # A header defect corrupts every row's field names identically, and unlike
-    # upload there is no per-row way around it.
-    header_errors = check_column_map(column_map)
-    if header_errors:
-        print("\n".join(f"    - {error}" for error in header_errors))
-        print(
-            "the Sheet's header row has problems that affect every row - refusing to send "
-            "metadata until they are fixed",
-            file=sys.stderr,
-        )
+    refusal = sync_header_refusal(column_map, config, args.registry)
+    if refusal is not None:
+        message, details = refusal
+        if details:
+            print("\n".join(f"    - {detail}" for detail in details))
+        print(message, file=sys.stderr)
         return 1
-
-    # All three checks are before anything is sent, and all three apply in
-    # test mode as well as live: a rehearsal that passes where the real run
-    # refuses is a false negative on the one run an operator trusts.
-    try:
-        sync_columns = locate_sync_columns(column_map)
-    except MissingSyncColumns as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
-    # _verified() re-checks this same thing before every stamp write, because
-    # a column can vanish mid-run - but relying on that alone lets a Sheet
-    # that never had ia_identifier_bib through the front door: ia_identifier
-    # and ia_uploaded absent means no row classifies DONE (refused above, at
-    # "no row is marked uploaded yet"), and ia_url absent means every row is
-    # a reported problem, but ia_identifier_bib absent is invisible here -
-    # rows plan, hash-gate, and push, and only then does _verified() catch
-    # it, per chunk, forever, stamping nothing while permanent metadata keeps
-    # going out. Checked here for the same reason check_file_template is.
-    try:
-        locate_write_back_columns(column_map)
-    except MissingWriteBackColumns as exc:
-        print(f"project '{config.project_id}': {exc}", file=sys.stderr)
-        return 1
-
-    # The moved-row guard fingerprints a row by its file_template columns.
-    # A template naming a column the Sheet lacks fingerprints EVERY row as
-    # "", which never matches - so nothing would ever be stamped and every
-    # row would re-push forever, silently. Header check only; no disk access.
-    try:
-        check_file_template(config.file_template, column_map)
-    except TemplateError as exc:
-        print(
-            f"project '{config.project_id}': {exc} - fix 'file_template' in {args.registry}",
-            file=sys.stderr,
-        )
-        return 1
+    sync_columns = locate_sync_columns(column_map)
 
     targets, problems = plan_sync_targets(
         rows, column_map, live, config.project_id, config.file_template

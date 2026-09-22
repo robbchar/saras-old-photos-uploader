@@ -28,6 +28,12 @@ if [ -z "$PYTHON" ]; then
   exit 1
 fi
 
+# A venv whose interpreter is gone or too old would otherwise be reused forever.
+if [ -d .venv ] && ! qualifies ./.venv/bin/python; then
+  echo "rebuilding .venv: its Python is missing or older than ${MIN_PY_MAJOR}.${MIN_PY_MINOR}"
+  rm -rf .venv
+fi
+
 if [ ! -d .venv ]; then
   echo "creating .venv with $PYTHON"
   "$PYTHON" -m venv .venv

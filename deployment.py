@@ -22,7 +22,6 @@ import google_auth
 import launch_agent
 import platform_probe
 import sync_state
-from column_map import build_column_map, check_column_map
 from googleapiclient.errors import HttpError
 from project_config import ProjectConfig
 
@@ -40,6 +39,8 @@ class Status(enum.Enum):
 class CheckOutcome:
     status: Status
     detail: str
+    # Replaces Check.remedy when this particular failure needs a different fix.
+    remedy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,8 @@ class Check:
     probe: Callable[[], CheckOutcome]
     remedy: str
     fix: Callable[[], str] | None = None
+    # False for checks the hourly sync does not depend on; their FAIL does not block --enable-agent.
+    needed_by_agent: bool = True
 
 
 def _probe(check: Check) -> CheckOutcome:
@@ -85,7 +88,7 @@ def format_report(results: list[tuple[Check, CheckOutcome]]) -> str:
     for check, outcome in results:
         lines.append(f"[{outcome.status.value}] {check.name}: {outcome.detail}")
         if outcome.status is Status.FAIL:
-            lines.append(f"    fix: {check.remedy}")
+            lines.append(f"    fix: {outcome.remedy or check.remedy}")
     return "\n".join(lines)
 
 
@@ -93,8 +96,23 @@ def exit_code(results: list[tuple[Check, CheckOutcome]]) -> int:
     return 1 if any(outcome.status is Status.FAIL for _, outcome in results) else 0
 
 
+def agent_blocking_failures(results: list[tuple[Check, CheckOutcome]]) -> list[str]:
+    """FAILing checks the hourly sync depends on. The agent's own checks are
+    excluded because enabling is what fixes them."""
+    return [
+        check.name
+        for check, outcome in results
+        if check.needed_by_agent and outcome.status is Status.FAIL
+    ]
+
+
 KEY_MODE = 0o600
 PLACEHOLDER_PREFIX = "REPLACE_WITH"
+
+
+def _is_private(mode: int) -> bool:
+    """Owner can read, group and other get nothing: 0600, or the stricter 0400."""
+    return mode & 0o077 == 0 and mode & 0o400 != 0
 
 _REQUIRED_MODULES = (
     "internetarchive",
@@ -167,8 +185,10 @@ def key_mode_check(key_path: Path) -> Check:
         owner = platform_probe.file_owner(key_path) or "unknown"
         # Owner is reported, never asserted: install and operation share one
         # account, so an owner that is not the caller is worth seeing, not guessing at.
-        if mode != KEY_MODE:
-            return CheckOutcome(Status.FAIL, f"mode {mode:04o}, owner {owner}, want {KEY_MODE:04o}")
+        if not _is_private(mode):
+            return CheckOutcome(
+                Status.FAIL, f"mode {mode:04o}, owner {owner}, want {KEY_MODE:04o} or 0400"
+            )
         return CheckOutcome(Status.PASS, f"mode {mode:04o}, owner {owner}")
 
     def fix() -> str:
@@ -235,8 +255,8 @@ def ia_credentials_mode_check(config_file: str | None = None) -> Check:
             return CheckOutcome(
                 Status.UNKNOWN, "POSIX permissions cannot be checked on this platform"
             )
-        if mode != KEY_MODE:
-            return CheckOutcome(Status.FAIL, f"{path}: mode {mode:04o}, want {KEY_MODE:04o}")
+        if not _is_private(mode):
+            return CheckOutcome(Status.FAIL, f"{path}: mode {mode:04o}, want {KEY_MODE:04o} or 0400")
         return CheckOutcome(Status.PASS, f"mode {mode:04o}")
 
     # No fix(), unlike the service-account key: this file lives outside the
@@ -273,35 +293,69 @@ def drive_check(files_dir: Path) -> Check:
             return CheckOutcome(Status.FAIL, f"{files_dir} is not a readable directory")
         return CheckOutcome(Status.PASS, str(files_dir))
 
+    # sync-metadata never reads the drive, so this does not gate the agent.
     return Check(
-        name="photo drive",
+        name="files drive",
         probe=probe,
-        remedy=f"plug in the LaCie drive, or correct files_dir so it points at {files_dir}",
+        # FAIL only when the path exists, so the drive is attached; access or the path is wrong.
+        remedy=(
+            "give this account read access to it, or correct files_dir in the project's "
+            f"registry entry (currently {files_dir})"
+        ),
+        needed_by_agent=False,
     )
 
 
-# 403 (not shared) and 404 (wrong ID) are real, actionable misconfiguration; every
-# other HttpError status, and any transport error, means only "could not tell".
+# 403 (not shared) and 404 (wrong ID) are real, actionable misconfiguration, as is
+# 400 (a range naming no tab, or an ID naming no native Sheet); every other
+# HttpError status, and any transport error, means only "could not tell".
 _SHEET_MISCONFIGURED_STATUSES = (403, 404)
+_SHEET_BAD_REQUEST_STATUS = 400
 
 SheetProbe = Callable[[], list[list[str]]]
+# sync-metadata's own pre-send gate over the grid: None when it would proceed, else why not.
+SheetRefusal = Callable[[list[list[str]]], "str | None"]
+
+AUTH_REMEDY = (
+    'fix the service account key as the line above says - see docs/DEPLOYMENT.md, section '
+    '"Service account"'
+)
+BAD_REQUEST_REMEDY = (
+    "check that sheet_id names a native Google Sheet (not an uploaded Excel file) and that "
+    "sheet_tab names its tab exactly as the Sheet shows it (case-sensitive), in the "
+    "project's registry entry"
+)
+SHEET_REFUSED_REMEDY = (
+    "see the `spreadsheet reachable` line: share the Sheet as Editor with the address it "
+    "names, or correct the sheet_id"
+)
 
 
-def _names_a_sync_column(error: str) -> bool:
-    """A collision among the Sheet's own columns is not this check's business;
-    one that lands on a column `sync-metadata` writes is."""
-    return any(name in error for name in sync_state.SYNC_STATE_COLUMNS)
+class SheetNotChecked(Exception):
+    """Raised by a SheetProbe that knows a read would prove nothing, e.g. a placeholder sheet ID."""
 
 
-def _read_grid_or_outcome(read_grid: SheetProbe) -> tuple[list[list[str]] | None, CheckOutcome | None]:
+def _read_grid_or_outcome(
+    read_grid: SheetProbe, refused_remedy: str | None = None
+) -> tuple[list[list[str]] | None, CheckOutcome | None]:
     """Shared by both Sheet checks so one read failure is classified one way."""
     try:
         return read_grid(), None
+    except SheetNotChecked as exc:
+        return None, CheckOutcome(Status.UNKNOWN, f"not checked - {exc}")
     except google_auth.AuthUnavailable as exc:
-        return None, CheckOutcome(Status.UNKNOWN, f"could not authenticate ({exc})")
+        if exc.transient:
+            return None, CheckOutcome(Status.UNKNOWN, f"could not authenticate ({exc})")
+        return None, CheckOutcome(Status.FAIL, f"could not authenticate ({exc})", AUTH_REMEDY)
     except HttpError as exc:
         if exc.resp.status in _SHEET_MISCONFIGURED_STATUSES:
-            return None, CheckOutcome(Status.FAIL, f"the Sheet refused this service account ({exc})")
+            return None, CheckOutcome(
+                Status.FAIL, f"the Sheet refused this service account ({exc})", refused_remedy
+            )
+        if exc.resp.status == _SHEET_BAD_REQUEST_STATUS:
+            return None, CheckOutcome(
+                Status.FAIL, f"Google Sheets rejected the request ({exc})", BAD_REQUEST_REMEDY
+            )
         return None, CheckOutcome(Status.UNKNOWN, f"Google Sheets returned an error ({exc})")
     except OSError as exc:
         return None, CheckOutcome(Status.UNKNOWN, f"could not reach the Sheet ({exc})")
@@ -334,7 +388,8 @@ def sheet_reachable_check(read_grid: SheetProbe, sharing_target: str) -> Check:
         if failure is not None:
             return failure
         assert grid is not None
-        return CheckOutcome(Status.PASS, f"read {len(grid)} rows")
+        # A Viewer share reads fine; Sheets offers no read-only way to confirm Editor.
+        return CheckOutcome(Status.PASS, f"read {len(grid)} rows (edit access is not checked)")
 
     return Check(
         name=SHEET_REACHABLE_CHECK,
@@ -343,57 +398,60 @@ def sheet_reachable_check(read_grid: SheetProbe, sharing_target: str) -> Check:
     )
 
 
-def sync_columns_check(read_grid: SheetProbe) -> Check:
+def sync_columns_check(read_grid: SheetProbe, sync_refusal: SheetRefusal) -> Check:
+    """sync_refusal is passed in, not imported, because this module never
+    imports ia_bulk; it keeps the gate and the agent refusing the same Sheets."""
+
     def probe() -> CheckOutcome:
-        grid, failure = _read_grid_or_outcome(read_grid)
+        grid, failure = _read_grid_or_outcome(read_grid, SHEET_REFUSED_REMEDY)
         if failure is not None:
             return failure
         assert grid is not None
-        headers = grid[0] if grid else []
         try:
-            column_map = build_column_map(headers)
+            refusal = sync_refusal(grid)
         except Exception as exc:  # noqa: BLE001 - see the FAIL below; not _probe's UNKNOWN
             # A header row that will not map is confirmed-broken. Letting _probe's
             # blanket handler call it UNKNOWN would hide a duplicated header.
-            return CheckOutcome(Status.FAIL, f"the Sheet's header row cannot be read ({exc})")
-        collisions = [error for error in check_column_map(column_map) if _names_a_sync_column(error)]
-        if collisions:
-            return CheckOutcome(Status.FAIL, "; ".join(collisions))
-        try:
-            sync_state.locate_sync_columns(column_map)
-        except sync_state.MissingSyncColumns as exc:
-            return CheckOutcome(Status.FAIL, str(exc))
-        return CheckOutcome(Status.PASS, "both sync columns present")
+            return CheckOutcome(Status.FAIL, f"could not check the Sheet for sync-metadata ({exc})")
+        if refusal is not None:
+            return CheckOutcome(Status.FAIL, refusal)
+        return CheckOutcome(Status.PASS, "passes every check sync-metadata makes before sending")
 
     return Check(
         name=SYNC_COLUMNS_CHECK,
         probe=probe,
         remedy=(
-            f"give the Sheet exactly one header each named "
-            f"{' and '.join(sync_state.SYNC_STATE_COLUMNS)}, left visible with a red "
-            "background - see docs/DEPLOYMENT.md"
+            "fix the Sheet as the line above says. The sync columns are "
+            f"{' and '.join(sync_state.SYNC_STATE_COLUMNS)}, one header each, left visible "
+            "with a red background - see docs/DEPLOYMENT.md"
         ),
     )
 
 
 def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
+    """No fix(): launchd loads every plist in LaunchAgents at login, and a rewrite
+    alone never reaches the loaded job, so only --enable-agent writes it and reloads."""
+
     def probe() -> CheckOutcome:
         target = launch_agent.plist_path(spec, home)
         if launch_agent.plist_is_current(spec, home):
             return CheckOutcome(Status.PASS, str(target))
         if target.exists():
             return CheckOutcome(Status.FAIL, f"{target} does not match this checkout")
-        return CheckOutcome(Status.FAIL, f"no plist at {target}")
+        return CheckOutcome(
+            Status.UNKNOWN, f"no plist at {target} - the hourly agent is not enabled for this account"
+        )
 
     return Check(
         name="launch agent plist",
         probe=probe,
         remedy=(
-            "./install.sh --project <project>, from the account that runs the agent; "
-            "if that was just run and this still fails, the plist could not be written "
+            "./install.sh --project <project> --live --enable-agent, from the account that "
+            "runs the agent, rewrites it and reloads the agent; if that was just run and this "
+            "still fails, the plist could not be written "
             '- see docs/DEPLOYMENT.md, section "Checking a machine later"'
         ),
-        fix=lambda: launch_agent.write_plist(spec, home),
+        needed_by_agent=False,
     )
 
 
@@ -417,8 +475,10 @@ def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
         name="launch agent loaded",
         probe=probe,
         remedy=(
+            "read logs/launchagent-<project>.out and .err for why the last run failed; to "
+            "reload the agent, "
             "log in as the operating account and run "
-            "./install.sh --project <project> --enable-agent, "
-            "then check logs/launchagent-*.err"
+            "./install.sh --project <project> --live --enable-agent"
         ),
+        needed_by_agent=False,
     )

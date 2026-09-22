@@ -188,6 +188,23 @@ def test_key_mode_check_fails_on_a_group_readable_key(tmp_path, monkeypatch):
     assert deployment.key_mode_check(key).probe().status is Status.FAIL
 
 
+def test_key_mode_check_passes_on_the_stricter_0o400(tmp_path, monkeypatch):
+    """A FAIL here would have setup's fix() chmod it to 0600, adding owner write."""
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o400)
+    assert deployment.key_mode_check(key).probe().status is Status.PASS
+
+
+def test_key_mode_check_fails_on_a_key_its_owner_cannot_read(tmp_path, monkeypatch):
+    key = tmp_path / "k.json"
+    key.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(deployment.platform_probe, "has_posix_permissions", lambda: True)
+    monkeypatch.setattr(deployment.platform_probe, "file_mode", lambda _: 0o200)
+    assert deployment.key_mode_check(key).probe().status is Status.FAIL
+
+
 def test_key_mode_check_is_unknown_when_the_platform_lacks_posix_permissions(tmp_path, monkeypatch):
     """Windows os.stat reports 0o666 for every file, so a mode comparison there
     would be a meaningless FAIL rather than an honest "can't tell"."""
@@ -228,12 +245,45 @@ def test_sheet_id_check_looks_at_the_mode_it_was_given():
 
 
 def test_drive_check_is_unknown_when_the_directory_is_absent(tmp_path):
-    outcome = deployment.drive_check(tmp_path / "LaCie").probe()
+    outcome = deployment.drive_check(tmp_path / "unplugged").probe()
     assert outcome.status is Status.UNKNOWN
 
 
 def test_drive_check_passes_for_a_readable_directory(tmp_path):
     assert deployment.drive_check(tmp_path).probe().status is Status.PASS
+
+
+def test_drive_check_is_not_needed_by_the_agent_because_sync_metadata_never_reads_it(tmp_path):
+    assert deployment.drive_check(tmp_path).needed_by_agent is False
+
+
+def test_drive_check_names_no_particular_project_or_device():
+    # A fixed path: tmp_path embeds the username, and the Mac's account is `sarasoldphotos`.
+    files_dir = Path("/Volumes/drive/files")
+    check = deployment.drive_check(files_dir)
+    for project_specific in ("photo", "LaCie"):
+        assert project_specific not in check.name
+        assert project_specific not in check.remedy
+    assert str(files_dir) in check.remedy
+
+
+def test_format_report_prefers_an_outcomes_own_remedy():
+    check = failing("bad")
+    report = deployment.format_report([(check, CheckOutcome(Status.FAIL, "broken", "do this instead"))])
+    assert "fix: do this instead" in report
+    assert "run the thing" not in report
+
+
+def test_agent_blocking_failures_names_only_fails_the_agent_needs():
+    results = [
+        (failing("key"), CheckOutcome(Status.FAIL, "missing")),
+        (
+            Check(name="drive", probe=lambda: CheckOutcome(Status.FAIL, "x"), remedy="r", needed_by_agent=False),
+            CheckOutcome(Status.FAIL, "unreadable"),
+        ),
+        (passing("sheet"), CheckOutcome(Status.UNKNOWN, "offline")),
+    ]
+    assert deployment.agent_blocking_failures(results) == ["key"]
 
 
 def test_python_version_check_fails_below_the_floor():
@@ -277,12 +327,47 @@ def test_sheet_reachable_check_passes_when_the_grid_comes_back():
     assert outcome.status is Status.PASS
 
 
+def test_sheet_reachable_check_does_not_claim_edit_access_it_never_tested():
+    """A Viewer share reads fine, and sync-metadata needs Editor."""
+    outcome = deployment.sheet_reachable_check(grid_with("title"), "sa@x.com").probe()
+    assert "edit access is not checked" in outcome.detail
+
+
 def test_sheet_reachable_check_is_unknown_when_the_network_is_down():
     def offline():
-        raise google_auth.AuthUnavailable("could not reach Google to authenticate")
+        raise google_auth.AuthUnavailable("could not reach Google to authenticate", transient=True)
 
     outcome = deployment.sheet_reachable_check(offline, "sa@x.com").probe()
     assert outcome.status is Status.UNKNOWN
+
+
+def test_sheet_reachable_check_fails_when_google_rejects_the_key():
+    """A revoked or malformed key is confirmed-broken; UNKNOWN let doctor exit 0 on it."""
+
+    def rejected():
+        raise google_auth.AuthUnavailable("Google rejected the service account key")
+
+    outcome = deployment.sheet_reachable_check(rejected, "sa@x.com").probe()
+    assert outcome.status is Status.FAIL
+    assert outcome.remedy == deployment.AUTH_REMEDY
+
+
+def test_sheet_reachable_check_fails_on_a_tab_the_sheet_does_not_have():
+    def bad_range():
+        raise make_http_error(message="Unable to parse range: Shet1", status=400)
+
+    outcome = deployment.sheet_reachable_check(bad_range, "sa@x.com").probe()
+    assert outcome.status is Status.FAIL
+    assert outcome.remedy == deployment.BAD_REQUEST_REMEDY
+
+
+def test_sheet_reachable_check_is_unknown_when_the_probe_declines_to_read():
+    def placeholder():
+        raise deployment.SheetNotChecked("the test-mode sheet_id is still a placeholder")
+
+    outcome = deployment.sheet_reachable_check(placeholder, "sa@x.com").probe()
+    assert outcome.status is Status.UNKNOWN
+    assert "placeholder" in outcome.detail
 
 
 def test_sheet_reachable_check_fails_when_the_sheet_is_not_shared():
@@ -316,42 +401,108 @@ def test_sheet_reachable_check_names_the_address_to_share_with():
     assert "sa@x.com" in deployment.sheet_reachable_check(forbidden, "sa@x.com").remedy
 
 
-def test_sync_columns_check_passes_when_both_columns_are_present():
+def proceeds(grid):
+    return None
+
+
+def never_consulted(grid):
+    pytest.fail("sync_refusal ran without a Sheet to judge")
+
+
+def test_sync_columns_check_passes_when_sync_metadata_would_proceed():
     probe = grid_with("identifier", "title", *sync_state.SYNC_STATE_COLUMNS)
-    assert deployment.sync_columns_check(probe).probe().status is Status.PASS
+    assert deployment.sync_columns_check(probe, proceeds).probe().status is Status.PASS
 
 
-def test_sync_columns_check_fails_and_names_the_missing_column():
-    probe = grid_with("identifier", "title", sync_state.IA_SYNC_HASH_COLUMN)
-    outcome = deployment.sync_columns_check(probe).probe()
+def test_sync_columns_check_hands_sync_metadata_the_whole_grid():
+    seen = []
+    probe = grid_with("identifier", "title")
+    deployment.sync_columns_check(probe, lambda grid: seen.append(grid)).probe()
+    assert seen == [[["identifier", "title"], ["a-value", "a-value"]]]
+
+
+def test_sync_columns_check_fails_with_sync_metadatas_own_refusal():
+    refusal = f"the Sheet has no column(s) named {sync_state.IA_LAST_SYNCED_COLUMN}"
+    outcome = deployment.sync_columns_check(grid_with("title"), lambda grid: refusal).probe()
     assert outcome.status is Status.FAIL
-    assert sync_state.IA_LAST_SYNCED_COLUMN in outcome.detail
+    assert outcome.detail == refusal
+
+
+def test_sync_columns_check_points_a_refused_read_at_sharing_not_the_header_row():
+    def forbidden():
+        raise make_http_error(status=403)
+
+    outcome = deployment.sync_columns_check(forbidden, never_consulted).probe()
+    assert outcome.status is Status.FAIL
+    assert outcome.remedy == deployment.SHEET_REFUSED_REMEDY
 
 
 def test_sync_columns_check_is_unknown_when_the_sheet_cannot_be_read():
     def offline():
-        raise google_auth.AuthUnavailable("no network")
+        raise google_auth.AuthUnavailable("no network", transient=True)
 
-    assert deployment.sync_columns_check(offline).probe().status is Status.UNKNOWN
+    assert deployment.sync_columns_check(offline, never_consulted).probe().status is Status.UNKNOWN
 
 
 def test_sync_columns_check_fails_on_a_wrong_sheet_id():
     def not_found():
         raise make_http_error(message="Requested entity was not found.", status=404)
 
-    assert deployment.sync_columns_check(not_found).probe().status is Status.FAIL
+    assert deployment.sync_columns_check(not_found, never_consulted).probe().status is Status.FAIL
 
 
 def test_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
-    assert deployment.agent_plist_check(spec, tmp_path / "home").probe().status is Status.FAIL
+    home = tmp_path / "home"
+    target = launch_agent.plist_path(spec, home)
+    target.parent.mkdir(parents=True)
+    target.write_text("<plist>from an older checkout</plist>", encoding="utf-8")
+    assert deployment.agent_plist_check(spec, home).probe().status is Status.FAIL
 
 
-def test_agent_plist_check_fix_writes_the_plist(tmp_path):
+def test_agent_plist_check_is_unknown_not_fail_when_the_agent_was_never_enabled(tmp_path):
+    """FAIL would have setup's fix() create the plist, and launchd loads every
+    plist in LaunchAgents at login - a live agent nobody enabled."""
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    outcome = deployment.agent_plist_check(spec, tmp_path / "home").probe()
+    assert outcome.status is Status.UNKNOWN
+    assert "not enabled" in outcome.detail
+
+
+def test_converge_never_creates_a_plist_that_was_not_there(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
     home = tmp_path / "home"
-    deployment.agent_plist_check(spec, home).fix()
-    assert launch_agent.plist_is_current(spec, home) is True
+    deployment.converge([deployment.agent_plist_check(spec, home)], announce=lambda _: None)
+    assert not launch_agent.plist_path(spec, home).exists()
+
+
+def test_converge_leaves_a_stale_plist_for_enable_agent_to_rewrite_and_reload(tmp_path):
+    """A rewrite alone never reaches the loaded job, and from a second checkout
+    it would repoint the live agent at that checkout."""
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    home = tmp_path / "home"
+    target = launch_agent.plist_path(spec, home)
+    target.parent.mkdir(parents=True)
+    target.write_text("<plist>from another checkout</plist>", encoding="utf-8")
+    deployment.converge([deployment.agent_plist_check(spec, home)], announce=lambda _: None)
+    assert target.read_text(encoding="utf-8") == "<plist>from another checkout</plist>"
+
+
+def test_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert deployment.agent_plist_check(spec, tmp_path / "home").needed_by_agent is False
+    assert deployment.agent_loaded_check(spec).needed_by_agent is False
+
+
+def test_agent_loaded_check_remedy_is_a_command_setup_accepts(tmp_path):
+    """--enable-agent without --live is refused, so a remedy without it cannot work."""
+    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo")).remedy
+    assert "--live --enable-agent" in remedy
+
+
+def test_agent_plist_check_has_no_fix_so_only_enable_agent_writes_it(tmp_path):
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    assert deployment.agent_plist_check(spec, tmp_path / "home").fix is None
 
 
 def test_agent_loaded_check_is_unknown_when_launchctl_says_nothing(tmp_path, monkeypatch):
@@ -394,6 +545,13 @@ def test_install_sh_python_floor_matches_the_one_python_enforces():
 
 def test_install_sh_hands_off_to_setup_not_to_a_second_check_list():
     assert "ia_bulk.py setup" in Path("install.sh").read_text(encoding="utf-8")
+
+
+def test_install_sh_rebuilds_a_venv_whose_python_does_not_qualify():
+    """`[ -d .venv ]` alone reused a 3.9 or dangling venv on every run."""
+    script = Path("install.sh").read_text(encoding="utf-8")
+    rebuild = script.index("! qualifies ./.venv/bin/python")
+    assert script.index("rm -rf .venv", rebuild) < script.index('-m venv .venv')
 
 
 def test_install_sh_does_not_install_an_interpreter():
@@ -449,32 +607,15 @@ def test_converge_leaves_a_failing_check_with_no_fix_untouched():
     assert outcome.detail == "broken"
 
 
-def test_sync_columns_check_fails_rather_than_unknown_when_the_header_row_will_not_map():
+def test_sync_columns_check_fails_rather_than_unknown_when_the_refusal_itself_raises():
     """_probe's blanket handler would call this UNKNOWN. A header row this tool
     cannot map is confirmed-broken, not unknowable."""
 
-    def unmappable():
-        return [[None], ["a-value"]]
+    def broken(grid):
+        raise ValueError("header cell is not text")
 
-    outcome = deployment.sync_columns_check(unmappable).probe()
+    outcome = deployment.sync_columns_check(grid_with("title"), broken).probe()
     assert outcome.status is Status.FAIL
-
-
-def test_sync_columns_check_fails_on_a_duplicated_sync_column():
-    probe = grid_with(
-        "identifier",
-        sync_state.IA_SYNC_HASH_COLUMN,
-        sync_state.IA_SYNC_HASH_COLUMN.replace("_", " ").title(),
-        sync_state.IA_LAST_SYNCED_COLUMN,
-    )
-    outcome = deployment.sync_columns_check(probe).probe()
-    assert outcome.status is Status.FAIL
-    assert sync_state.IA_SYNC_HASH_COLUMN in outcome.detail
-
-
-def test_sync_columns_check_ignores_a_collision_among_the_sheets_own_columns():
-    probe = grid_with("Title", "title", *sync_state.SYNC_STATE_COLUMNS)
-    assert deployment.sync_columns_check(probe).probe().status is Status.PASS
 
 
 def test_agent_plist_check_remedy_leads_with_install_sh_then_the_runbook(tmp_path):
@@ -485,6 +626,7 @@ def test_agent_plist_check_remedy_leads_with_install_sh_then_the_runbook(tmp_pat
         launch_agent.sync_agent_spec(tmp_path / "repo", "demo"), tmp_path / "home"
     ).remedy
     assert remedy.startswith("./install.sh --project")
+    assert "--live --enable-agent" in remedy
     assert remedy.index("install.sh") < remedy.index("could not be written")
     assert "DEPLOYMENT.md" in remedy
 
@@ -508,7 +650,7 @@ def test_unverified_sheet_checks_is_empty_when_both_sheet_checks_pass():
     results = [
         (passing(deployment.SHEET_REACHABLE_CHECK), CheckOutcome(Status.PASS, "read 10 rows")),
         (passing(deployment.SYNC_COLUMNS_CHECK), CheckOutcome(Status.PASS, "both present")),
-        (passing("photo drive"), CheckOutcome(Status.UNKNOWN, "unplugged?")),
+        (passing("files drive"), CheckOutcome(Status.UNKNOWN, "unplugged?")),
     ]
     assert deployment.unverified_sheet_checks(results) == []
 
@@ -516,7 +658,7 @@ def test_unverified_sheet_checks_is_empty_when_both_sheet_checks_pass():
 def test_the_sheet_checks_carry_the_names_the_agent_gate_looks_for():
     """The gate matches by name, so a renamed check would silently stop blocking."""
     reachable = deployment.sheet_reachable_check(grid_with("title"), "sa@x.com")
-    columns = deployment.sync_columns_check(grid_with("title"))
+    columns = deployment.sync_columns_check(grid_with("title"), proceeds)
     assert reachable.name in deployment.LIVE_SHEET_CHECKS
     assert columns.name in deployment.LIVE_SHEET_CHECKS
 

@@ -99,8 +99,10 @@ def test_unusable_key_file_raises_an_actionable_error(tmp_path, content):
     key_path = tmp_path / "key.json"
     _write_key(key_path, content)
 
-    with pytest.raises(AuthUnavailable, match="not a readable service account key"):
+    with pytest.raises(AuthUnavailable, match="not a readable service account key") as exc:
         load_service_account_credentials(key_path)
+
+    assert exc.value.transient is False
 
 
 def test_unreadable_key_path_names_a_permissions_problem(tmp_path):
@@ -127,6 +129,7 @@ def test_google_rejecting_the_key_is_reported_as_a_credential_problem(
     assert "rejected the service account key" in str(exc.value)
     assert "network problem" not in str(exc.value)
     assert "clock" in str(exc.value)
+    assert exc.value.transient is False
 
 
 def test_retryable_token_failure_is_reported_as_temporary(tmp_path, monkeypatch, private_key_pem):
@@ -143,6 +146,7 @@ def test_retryable_token_failure_is_reported_as_temporary(tmp_path, monkeypatch,
 
     assert "temporary" in str(exc.value)
     assert "rejected" not in str(exc.value)
+    assert exc.value.transient is True
 
 
 def test_unreachable_google_is_reported_as_a_network_problem(tmp_path, monkeypatch, private_key_pem):
@@ -159,6 +163,7 @@ def test_unreachable_google_is_reported_as_a_network_problem(tmp_path, monkeypat
 
     assert "network problem" in str(exc.value)
     assert "rejected" not in str(exc.value)
+    assert exc.value.transient is True
 
 
 def test_default_service_account_key_path_is_anchored_to_the_project_root(monkeypatch, tmp_path):

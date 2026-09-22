@@ -21,6 +21,35 @@ gui/501/org.lcpsociety.iabulk.sync = {
 """
 
 
+class _FakeClock:
+    """Stands in for platform_probe's `time` module only, not the global one."""
+
+    def __init__(self, *readings):
+        self._readings = iter(readings)
+        self.sleeps = 0
+
+    def monotonic(self):
+        return next(self._readings)
+
+    def sleep(self, seconds):
+        self.sleeps += 1
+
+
+def test_wait_until_unloaded_returns_once_launchctl_stops_listing_the_label(monkeypatch):
+    listings = iter([LOADED_OUTPUT, LOADED_OUTPUT, None])
+    monkeypatch.setattr(platform_probe, "launchctl_print", lambda label: next(listings))
+    clock = _FakeClock(0.0, 1.0, 2.0)
+    monkeypatch.setattr(platform_probe, "time", clock)
+    assert platform_probe.wait_until_unloaded("org.example") is True
+    assert clock.sleeps == 2
+
+
+def test_wait_until_unloaded_gives_up_after_the_timeout(monkeypatch):
+    monkeypatch.setattr(platform_probe, "launchctl_print", lambda label: LOADED_OUTPUT)
+    monkeypatch.setattr(platform_probe, "time", _FakeClock(0.0, 10.0, 31.0))
+    assert platform_probe.wait_until_unloaded("org.example", timeout=30.0) is False
+
+
 def test_parse_last_exit_reads_the_code():
     assert platform_probe.parse_last_exit(LOADED_OUTPUT) == 0
 
