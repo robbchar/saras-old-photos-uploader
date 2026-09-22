@@ -417,7 +417,9 @@ absolute path of the registry `setup` was given — this checkout's
 `projects_registry.json` unless you passed `--registry`. If you did, give
 `doctor` the same `--registry` (§15). Checked against any other registry,
 `launch agent plist` reports a plist that does not match, because the agent is
-not syncing what that `doctor` run looked at.
+not syncing what that `doctor` run looked at. Every `./install.sh` command
+`setup` and `doctor` print repeats that `--registry`, so running one as
+printed re-enables the same agent.
 
 **It enables nothing if a check the agent needs failed.** `setup` converges,
 re-checks, and only then writes the plist and loads the agent. A `[FAIL]` line

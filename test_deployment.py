@@ -1,5 +1,6 @@
 import json
 import re
+import shlex
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ import launch_agent
 import project_config
 import sync_state
 from deployment import Check, CheckOutcome, Status
+
+DEMO_INSTALL = deployment.InstallCommand("demo")
 
 
 def passing(name="ok"):
@@ -287,41 +290,63 @@ def test_agent_blocking_failures_names_only_fails_the_agent_needs():
 
 
 def test_python_version_check_fails_below_the_floor():
-    assert deployment.python_version_check((3, 9), "demo").probe().status is Status.FAIL
+    assert deployment.python_version_check((3, 9), DEMO_INSTALL).probe().status is Status.FAIL
 
 
 def test_python_version_check_passes_at_the_floor():
-    assert deployment.python_version_check((3, 10), "demo").probe().status is Status.PASS
+    assert deployment.python_version_check((3, 10), DEMO_INSTALL).probe().status is Status.PASS
 
 
 def test_python_version_check_remedy_names_the_real_project():
-    assert "./install.sh --project demo " in deployment.python_version_check((3, 9), "demo").remedy
+    assert "./install.sh --project demo " in deployment.python_version_check((3, 9), DEMO_INSTALL).remedy
 
 
 def test_dependencies_check_passes_because_the_test_run_already_imported_them():
     """Not a live gate: importing deployment imports all three, so this probe
     can only ever see them present. It documents the requirement."""
-    assert deployment.dependencies_check("demo").probe().status is Status.PASS
+    assert deployment.dependencies_check(DEMO_INSTALL).probe().status is Status.PASS
 
 
 def test_dependencies_check_remedy_names_the_real_project():
-    assert deployment.dependencies_check("demo").remedy.startswith("./install.sh --project demo ")
+    assert deployment.dependencies_check(DEMO_INSTALL).remedy.startswith("./install.sh --project demo ")
 
 
 def test_install_command_names_the_project():
-    assert deployment.install_command("sarasoldphotos") == "./install.sh --project sarasoldphotos"
+    assert deployment.InstallCommand("sarasoldphotos").render() == "./install.sh --project sarasoldphotos"
 
 
 def test_install_command_for_the_agent_adds_live_and_enable_agent():
     assert (
-        deployment.install_command("sarasoldphotos", enable_agent=True)
+        deployment.InstallCommand("sarasoldphotos").render(enable_agent=True)
         == "./install.sh --project sarasoldphotos --live --enable-agent"
     )
 
 
 def test_install_command_quotes_a_project_id_the_shell_would_split():
     # --project is typed by a person; the refusal that echoes it runs before the registry is read.
-    assert deployment.install_command("two words") == "./install.sh --project 'two words'"
+    assert deployment.InstallCommand("two words").render() == "./install.sh --project 'two words'"
+
+
+def test_install_command_repeats_a_non_default_registry():
+    """The plist records the registry, so a re-run without it enables a different agent."""
+    install = deployment.InstallCommand("demo", Path("/srv/alt registry.json"))
+    assert install.render(enable_agent=True) == (
+        f"./install.sh --project demo --registry {shlex.quote(str(Path('/srv/alt registry.json')))} "
+        "--live --enable-agent"
+    )
+
+
+def test_every_command_carrying_remedy_repeats_the_registry(tmp_path):
+    install = deployment.InstallCommand("demo", tmp_path / "alt.json")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "alt.json")
+    remedies = [
+        deployment.dependencies_check(install).remedy,
+        deployment.python_version_check((3, 9), install).remedy,
+        deployment.agent_plist_check(spec, tmp_path / "home", install).remedy,
+        deployment.agent_loaded_check(spec, install).remedy,
+    ]
+    for remedy in remedies:
+        assert f"--registry {shlex.quote(str(tmp_path / 'alt.json'))}" in remedy, remedy
 
 
 def grid_with(*headers):
@@ -481,14 +506,14 @@ def test_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
     target = launch_agent.plist_path(spec, home)
     target.parent.mkdir(parents=True)
     target.write_text("<plist>from an older checkout</plist>", encoding="utf-8")
-    assert deployment.agent_plist_check(spec, home).probe().status is Status.FAIL
+    assert deployment.agent_plist_check(spec, home, DEMO_INSTALL).probe().status is Status.FAIL
 
 
 def test_agent_plist_check_is_unknown_not_fail_when_the_agent_was_never_enabled(tmp_path):
     """FAIL would have setup's fix() create the plist, and launchd loads every
     plist in LaunchAgents at login - a live agent nobody enabled."""
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    outcome = deployment.agent_plist_check(spec, tmp_path / "home").probe()
+    outcome = deployment.agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).probe()
     assert outcome.status is Status.UNKNOWN
     assert "not enabled" in outcome.detail
 
@@ -496,7 +521,7 @@ def test_agent_plist_check_is_unknown_not_fail_when_the_agent_was_never_enabled(
 def test_converge_never_creates_a_plist_that_was_not_there(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     home = tmp_path / "home"
-    deployment.converge([deployment.agent_plist_check(spec, home)], announce=lambda _: None)
+    deployment.converge([deployment.agent_plist_check(spec, home, DEMO_INSTALL)], announce=lambda _: None)
     assert not launch_agent.plist_path(spec, home).exists()
 
 
@@ -508,24 +533,28 @@ def test_converge_leaves_a_stale_plist_for_enable_agent_to_rewrite_and_reload(tm
     target = launch_agent.plist_path(spec, home)
     target.parent.mkdir(parents=True)
     target.write_text("<plist>from another checkout</plist>", encoding="utf-8")
-    deployment.converge([deployment.agent_plist_check(spec, home)], announce=lambda _: None)
+    deployment.converge([deployment.agent_plist_check(spec, home, DEMO_INSTALL)], announce=lambda _: None)
     assert target.read_text(encoding="utf-8") == "<plist>from another checkout</plist>"
 
 
 def test_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    assert deployment.agent_plist_check(spec, tmp_path / "home").needed_by_agent is False
-    assert deployment.agent_loaded_check(spec).needed_by_agent is False
+    assert deployment.agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).needed_by_agent is False
+    assert deployment.agent_loaded_check(spec, DEMO_INSTALL).needed_by_agent is False
 
 
 def test_agent_loaded_check_remedy_is_a_command_setup_accepts(tmp_path):
     """--enable-agent without --live is refused, so a remedy without it cannot work."""
-    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")).remedy
+    remedy = deployment.agent_loaded_check(
+        launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"), DEMO_INSTALL
+    ).remedy
     assert "--live --enable-agent" in remedy
 
 
 def test_agent_loaded_check_remedy_names_the_real_project_and_its_logs(tmp_path):
-    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")).remedy
+    remedy = deployment.agent_loaded_check(
+        launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"), DEMO_INSTALL
+    ).remedy
     assert "./install.sh --project demo --live --enable-agent" in remedy
     assert "logs/launchagent-demo.out" in remedy
     assert "logs/launchagent-demo.err" in remedy
@@ -533,13 +562,13 @@ def test_agent_loaded_check_remedy_names_the_real_project_and_its_logs(tmp_path)
 
 def test_agent_plist_check_has_no_fix_so_only_enable_agent_writes_it(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    assert deployment.agent_plist_check(spec, tmp_path / "home").fix is None
+    assert deployment.agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).fix is None
 
 
 def test_agent_loaded_check_is_unknown_when_launchctl_says_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(deployment.platform_probe, "launchctl_print", lambda _: None)
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    assert deployment.agent_loaded_check(spec).probe().status is Status.UNKNOWN
+    assert deployment.agent_loaded_check(spec, DEMO_INSTALL).probe().status is Status.UNKNOWN
 
 
 def test_agent_loaded_check_passes_and_reports_the_last_exit(tmp_path, monkeypatch):
@@ -547,7 +576,7 @@ def test_agent_loaded_check_passes_and_reports_the_last_exit(tmp_path, monkeypat
         deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 0\n"
     )
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    outcome = deployment.agent_loaded_check(spec).probe()
+    outcome = deployment.agent_loaded_check(spec, DEMO_INSTALL).probe()
     assert outcome.status is Status.PASS
     assert "0" in outcome.detail
 
@@ -557,13 +586,13 @@ def test_agent_loaded_check_fails_when_the_last_run_errored(tmp_path, monkeypatc
         deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 1\n"
     )
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    assert deployment.agent_loaded_check(spec).probe().status is Status.FAIL
+    assert deployment.agent_loaded_check(spec, DEMO_INSTALL).probe().status is Status.FAIL
 
 
 def test_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_path):
     # Loading is gated on --enable-agent, which setup does explicitly.
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
-    assert deployment.agent_loaded_check(spec).fix is None
+    assert deployment.agent_loaded_check(spec, DEMO_INSTALL).fix is None
 
 
 def test_install_sh_python_floor_matches_the_one_python_enforces():
@@ -654,7 +683,9 @@ def test_agent_plist_check_remedy_leads_with_install_sh_then_the_runbook(tmp_pat
     ./install.sh was never run for this account - that has to come first. The
     write-failure case only applies on the `setup` path, and stays secondary."""
     remedy = deployment.agent_plist_check(
-        launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"), tmp_path / "home"
+        launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"),
+        tmp_path / "home",
+        DEMO_INSTALL,
     ).remedy
     assert remedy.startswith("./install.sh --project demo --live --enable-agent")
     assert remedy.index("install.sh") < remedy.index("could not be written")

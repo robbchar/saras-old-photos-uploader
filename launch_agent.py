@@ -14,7 +14,6 @@ LABEL_PREFIX = "org.lcpsociety.iabulk.sync"
 
 @dataclass(frozen=True)
 class AgentSpec:
-    project_id: str
     label: str
     program_arguments: list[str]
     interval: int
@@ -28,7 +27,6 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
     # Absolute, so the agent reads the file setup checked, whatever its working directory.
     registry_path = Path(registry_path).resolve()
     return AgentSpec(
-        project_id=project_id,
         label=f"{LABEL_PREFIX}.{project_id}",
         program_arguments=[
             str(repo_root / ".venv" / "bin" / "python"),

@@ -5,6 +5,7 @@ import io
 import json
 import csv
 import re
+import shlex
 import tempfile
 from argparse import Namespace
 from pathlib import Path
@@ -4896,7 +4897,7 @@ def test_cmd_setup_reenables_an_agent_whose_last_run_failed(tmp_path, monkeypatc
         ia_bulk,
         "build_deployment_checks",
         lambda args, include_network: [
-            deployment.agent_loaded_check(spec),
+            deployment.agent_loaded_check(spec, deployment.InstallCommand("sarasoldphotos")),
             *_sheet_checks_that(deployment.Status.PASS),
         ],
     )
@@ -5178,6 +5179,31 @@ def test_every_install_sh_remedy_names_the_required_project_flag(tmp_path):
         )
         # Pasted into zsh, `<project>` is a redirect from a file named "project".
         assert "<" not in remedy and ">" not in remedy, f"remedy has a placeholder: {remedy!r}"
+        # Without it, re-running enables an agent on the default registry, and doctor still FAILs.
+        assert f"--registry {shlex.quote(str(registry_path.resolve()))}" in remedy, remedy
+
+
+def test_install_command_omits_the_checkouts_own_registry():
+    args = _setup_args("--registry", str(ia_bulk.REPO_ROOT / "projects_registry.json"))
+    assert ia_bulk.install_command_for(args).registry is None
+
+
+def test_cmd_setup_refusal_repeats_a_non_default_registry(tmp_path, monkeypatch, capsys):
+    """Run as printed, a refusal that dropped --registry would enable a live agent
+    on the default registry's Sheet instead."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
+    )
+    _explode_on_launchctl(monkeypatch)
+    registry_path = tmp_path / "alt.json"
+
+    assert ia_bulk.cmd_setup(_setup_args("--registry", str(registry_path), "--enable-agent")) == 1
+    assert (
+        "./install.sh --project sarasoldphotos "
+        f"--registry {shlex.quote(str(registry_path.resolve()))} --live --enable-agent"
+    ) in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -5189,7 +5215,9 @@ def test_every_install_sh_remedy_names_the_required_project_flag(tmp_path):
     ],
 )
 def test_agent_not_enabled_message_names_the_real_project(blocking, unverified):
-    message = ia_bulk.agent_not_enabled_message(blocking, unverified, "sarasoldphotos")
+    message = ia_bulk.agent_not_enabled_message(
+        blocking, unverified, deployment.InstallCommand("sarasoldphotos")
+    )
     assert RUNNABLE_ENABLE_COMMAND in message
     assert "<project>" not in message
 

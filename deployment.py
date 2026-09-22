@@ -115,10 +115,21 @@ def _is_private(mode: int) -> bool:
     """Owner can read, group and other get nothing: 0600, or the stricter 0400."""
     return mode & 0o077 == 0 and mode & 0o400 != 0
 
-def install_command(project_id: str, *, enable_agent: bool = False) -> str:
+@dataclass(frozen=True)
+class InstallCommand:
     """The ./install.sh line a remedy names, runnable in zsh exactly as printed."""
-    command = f"./install.sh --project {shlex.quote(project_id)}"
-    return f"{command} --live --enable-agent" if enable_agent else command
+
+    project_id: str
+    # None for the checkout's own projects_registry.json, which install.sh reads by default.
+    registry: Path | None = None
+
+    def render(self, *, enable_agent: bool = False) -> str:
+        arguments = ["./install.sh", "--project", self.project_id]
+        if self.registry is not None:
+            arguments += ["--registry", str(self.registry)]
+        if enable_agent:
+            arguments += ["--live", "--enable-agent"]
+        return shlex.join(arguments)
 
 
 _REQUIRED_MODULES = (
@@ -128,7 +139,7 @@ _REQUIRED_MODULES = (
 )
 
 
-def dependencies_check(project_id: str) -> Check:
+def dependencies_check(install: InstallCommand) -> Check:
     """A statement of what this pipeline needs importable, not a live gate on the
     CLI: ia_bulk.py imports all three at module scope, so a CLI run that reaches
     this probe has already proved them present. It is meaningful to a caller that
@@ -148,11 +159,11 @@ def dependencies_check(project_id: str) -> Check:
     return Check(
         name="dependencies",
         probe=probe,
-        remedy=f"{install_command(project_id)} (or: .venv/bin/pip install -r requirements.txt)",
+        remedy=f"{install.render()} (or: .venv/bin/pip install -r requirements.txt)",
     )
 
 
-def python_version_check(version: tuple[int, int], project_id: str) -> Check:
+def python_version_check(version: tuple[int, int], install: InstallCommand) -> Check:
     def probe() -> CheckOutcome:
         running = ".".join(str(part) for part in version)
         if version < MINIMUM_PYTHON:
@@ -164,7 +175,7 @@ def python_version_check(version: tuple[int, int], project_id: str) -> Check:
         name="python version",
         probe=probe,
         remedy=(
-            f"install Python 3.10+ and re-run {install_command(project_id)} - see docs/DEPLOYMENT.md"
+            f"install Python 3.10+ and re-run {install.render()} - see docs/DEPLOYMENT.md"
         ),
     )
 
@@ -437,7 +448,7 @@ def sync_columns_check(read_grid: SheetProbe, sync_refusal: SheetRefusal) -> Che
     )
 
 
-def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
+def agent_plist_check(spec: launch_agent.AgentSpec, home: Path, install: InstallCommand) -> Check:
     """No fix(): launchd loads every plist in LaunchAgents at login, and a rewrite
     alone never reaches the loaded job, so only --enable-agent writes it and reloads."""
 
@@ -455,7 +466,7 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
         name="launch agent plist",
         probe=probe,
         remedy=(
-            f"{install_command(spec.project_id, enable_agent=True)}, from the account that "
+            f"{install.render(enable_agent=True)}, from the account that "
             "runs the agent, rewrites it and reloads the agent; if that was just run and this "
             "still fails, the plist could not be written "
             '- see docs/DEPLOYMENT.md, section "Checking a machine later"'
@@ -464,7 +475,7 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
     )
 
 
-def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
+def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) -> Check:
     # Relative, as the operator reads them from the checkout they run install.sh in.
     stdout_log = spec.stdout_path.relative_to(spec.working_directory).as_posix()
     stderr_log = spec.stderr_path.relative_to(spec.working_directory).as_posix()
@@ -491,7 +502,7 @@ def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
             f"read {stdout_log} and {stderr_log} for why the last run failed; to "
             "reload the agent, "
             "log in as the operating account and run "
-            f"{install_command(spec.project_id, enable_agent=True)}"
+            f"{install.render(enable_agent=True)}"
         ),
         needed_by_agent=False,
     )

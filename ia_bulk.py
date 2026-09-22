@@ -177,6 +177,9 @@ def read_csv(csv_path: str | Path) -> CsvData:
         return CsvData(fieldnames=list(reader.fieldnames or []), rows=rows)
 
 
+DEFAULT_REGISTRY = "projects_registry.json"
+
+
 def load_registry(registry_path: str | Path) -> dict:
     with open(registry_path, encoding="utf-8") as f:
         return json.load(f)
@@ -2508,10 +2511,11 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     live = bool(args.live)
     repo_root = REPO_ROOT
     key_path = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
+    install = install_command_for(args)
 
     checks = [
-        deployment.python_version_check(sys.version_info[:2], config.project_id),
-        deployment.dependencies_check(config.project_id),
+        deployment.python_version_check(sys.version_info[:2], install),
+        deployment.dependencies_check(install),
         deployment.key_present_check(key_path),
         deployment.key_mode_check(key_path),
         deployment.ia_credentials_check(),
@@ -2557,14 +2561,22 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     spec = launch_agent.sync_agent_spec(repo_root, config.project_id, args.registry)
     checks.extend(
         [
-            deployment.agent_plist_check(spec, Path.home()),
-            deployment.agent_loaded_check(spec),
+            deployment.agent_plist_check(spec, Path.home(), install),
+            deployment.agent_loaded_check(spec, install),
         ]
     )
     return checks
 
 
-# {command} is deployment.install_command(args.project, enable_agent=True).
+def install_command_for(args) -> deployment.InstallCommand:
+    """The ./install.sh line that repeats this run. install.sh runs setup from
+    REPO_ROOT, so only a registry other than REPO_ROOT's own needs --registry."""
+    registry = Path(args.registry).resolve()
+    is_default = registry == REPO_ROOT / DEFAULT_REGISTRY
+    return deployment.InstallCommand(args.project, None if is_default else registry)
+
+
+# {command} is install_command_for(args).render(enable_agent=True).
 ENABLE_AGENT_NEEDS_LIVE = (
     "--enable-agent loads an agent that runs `sync-metadata --live`, so it refuses to run "
     "without --live: without it setup would verify the TEST Sheet and then start an hourly "
@@ -2592,12 +2604,14 @@ AGENT_NOT_ENABLED_UNVERIFIED = (
 )
 
 
-def agent_not_enabled_message(blocking: list[str], unverified: list[str], project_id: str) -> str:
+def agent_not_enabled_message(
+    blocking: list[str], unverified: list[str], install: deployment.InstallCommand
+) -> str:
     """FAILs are named first: an UNKNOWN Sheet check is often only their
     consequence. A merely offline machine reaches the same reduced assurance
     --offline is refused for, so UNKNOWN on the two Sheet checks blocks too.
     This rule lives here, not in deployment.exit_code."""
-    command = deployment.install_command(project_id, enable_agent=True)
+    command = install.render(enable_agent=True)
     if not blocking:
         return AGENT_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified), command=command)
     message = AGENT_NOT_ENABLED.format(names=", ".join(blocking), command=command)
@@ -2620,7 +2634,7 @@ def enable_agent_refusal(args) -> str | None:
     it refuses rather than infers what the operator meant."""
     if not args.enable_agent:
         return None
-    command = deployment.install_command(args.project, enable_agent=True)
+    command = install_command_for(args).render(enable_agent=True)
     if not args.live:
         return ENABLE_AGENT_NEEDS_LIVE.format(command=command)
     if args.offline:
@@ -2719,7 +2733,10 @@ def cmd_setup(args) -> int:
         unverified = deployment.unverified_sheet_checks(results)
         if blocking or unverified:
             print(deployment.format_report(results))
-            print(agent_not_enabled_message(blocking, unverified, args.project), file=sys.stderr)
+            print(
+                agent_not_enabled_message(blocking, unverified, install_command_for(args)),
+                file=sys.stderr,
+            )
             return 1
         try:
             agent_failed = not load_sync_agent(args, announce)
@@ -5807,7 +5824,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "--files-dir", default=".", help="Base directory the CSV's 'file' column is resolved against (--csv only)"
     )
-    validate_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    validate_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     validate_parser.add_argument(
         "--live",
         action="store_true",
@@ -5841,7 +5858,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Base directory the 'file' column is resolved against (--csv only; the Sheet path takes it from the registry)",
     )
-    upload_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    upload_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     upload_parser.add_argument("--live", action="store_true", help="Target the real Sheet and the registry's real collection instead of the test Sheet and test_collection")
     upload_parser.add_argument(
         "--collection",
@@ -5917,7 +5934,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sync_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    sync_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    sync_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     sync_parser.add_argument("--live", action="store_true", help="Read the project's real Sheet and target the real, permanent items instead of the test Sheet and its zztest- rehearsal items")
     sync_parser.add_argument(
         "--dry-run",
@@ -5955,7 +5972,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Find rows whose filename does not resolve against the drive and correct them",
     )
     reconcile_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    reconcile_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    reconcile_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     reconcile_parser.add_argument("--live", action="store_true", help="Read and write the project's real Sheet instead of its test Sheet")
     reconcile_parser.add_argument("--dry-run", action="store_true", help="Print what would be proposed; prompt for nothing and write nothing")
     reconcile_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
@@ -5965,7 +5982,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append a skeleton row for every photo file on the drive that no row claims",
     )
     append_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    append_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    append_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     append_parser.add_argument("--live", action="store_true", help="Read and write the project's real Sheet instead of its test Sheet")
     append_parser.add_argument("--dry-run", action="store_true", help="Print the rows that would be appended and write nothing")
     append_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
@@ -5975,7 +5992,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Check that this machine is set up to run the pipeline. Reads only; changes nothing",
     )
     doctor_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    doctor_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    doctor_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     doctor_parser.add_argument("--live", action="store_true", help="Check the project's real Sheet instead of its test Sheet")
     doctor_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
 
@@ -5984,7 +6001,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bring this machine to the state this checkout needs, then verify. Safe to re-run",
     )
     setup_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    setup_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    setup_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     setup_parser.add_argument("--live", action="store_true", help="Converge against the project's real Sheet instead of its test Sheet")
     setup_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
     setup_parser.add_argument(
