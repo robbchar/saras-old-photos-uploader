@@ -23,8 +23,10 @@ class AgentSpec:
     working_directory: Path
 
 
-def sync_agent_spec(repo_root: Path, project_id: str) -> AgentSpec:
+def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str) -> AgentSpec:
     repo_root = Path(repo_root).resolve()
+    # Absolute, so the agent reads the file setup checked, whatever its working directory.
+    registry_path = Path(registry_path).resolve()
     return AgentSpec(
         project_id=project_id,
         label=f"{LABEL_PREFIX}.{project_id}",
@@ -35,6 +37,8 @@ def sync_agent_spec(repo_root: Path, project_id: str) -> AgentSpec:
             "--project",
             project_id,
             "--live",
+            "--registry",
+            str(registry_path),
         ],
         interval=HOURLY,
         stdout_path=repo_root / "logs" / f"launchagent-{project_id}.out",

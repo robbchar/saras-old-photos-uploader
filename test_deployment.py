@@ -476,7 +476,7 @@ def test_sync_columns_check_fails_on_a_wrong_sheet_id():
 
 
 def test_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     home = tmp_path / "home"
     target = launch_agent.plist_path(spec, home)
     target.parent.mkdir(parents=True)
@@ -487,14 +487,14 @@ def test_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
 def test_agent_plist_check_is_unknown_not_fail_when_the_agent_was_never_enabled(tmp_path):
     """FAIL would have setup's fix() create the plist, and launchd loads every
     plist in LaunchAgents at login - a live agent nobody enabled."""
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     outcome = deployment.agent_plist_check(spec, tmp_path / "home").probe()
     assert outcome.status is Status.UNKNOWN
     assert "not enabled" in outcome.detail
 
 
 def test_converge_never_creates_a_plist_that_was_not_there(tmp_path):
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     home = tmp_path / "home"
     deployment.converge([deployment.agent_plist_check(spec, home)], announce=lambda _: None)
     assert not launch_agent.plist_path(spec, home).exists()
@@ -503,7 +503,7 @@ def test_converge_never_creates_a_plist_that_was_not_there(tmp_path):
 def test_converge_leaves_a_stale_plist_for_enable_agent_to_rewrite_and_reload(tmp_path):
     """A rewrite alone never reaches the loaded job, and from a second checkout
     it would repoint the live agent at that checkout."""
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     home = tmp_path / "home"
     target = launch_agent.plist_path(spec, home)
     target.parent.mkdir(parents=True)
@@ -513,32 +513,32 @@ def test_converge_leaves_a_stale_plist_for_enable_agent_to_rewrite_and_reload(tm
 
 
 def test_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_plist_check(spec, tmp_path / "home").needed_by_agent is False
     assert deployment.agent_loaded_check(spec).needed_by_agent is False
 
 
 def test_agent_loaded_check_remedy_is_a_command_setup_accepts(tmp_path):
     """--enable-agent without --live is refused, so a remedy without it cannot work."""
-    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo")).remedy
+    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")).remedy
     assert "--live --enable-agent" in remedy
 
 
 def test_agent_loaded_check_remedy_names_the_real_project_and_its_logs(tmp_path):
-    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo")).remedy
+    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")).remedy
     assert "./install.sh --project demo --live --enable-agent" in remedy
     assert "logs/launchagent-demo.out" in remedy
     assert "logs/launchagent-demo.err" in remedy
 
 
 def test_agent_plist_check_has_no_fix_so_only_enable_agent_writes_it(tmp_path):
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_plist_check(spec, tmp_path / "home").fix is None
 
 
 def test_agent_loaded_check_is_unknown_when_launchctl_says_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(deployment.platform_probe, "launchctl_print", lambda _: None)
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_loaded_check(spec).probe().status is Status.UNKNOWN
 
 
@@ -546,7 +546,7 @@ def test_agent_loaded_check_passes_and_reports_the_last_exit(tmp_path, monkeypat
     monkeypatch.setattr(
         deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 0\n"
     )
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     outcome = deployment.agent_loaded_check(spec).probe()
     assert outcome.status is Status.PASS
     assert "0" in outcome.detail
@@ -556,13 +556,13 @@ def test_agent_loaded_check_fails_when_the_last_run_errored(tmp_path, monkeypatc
     monkeypatch.setattr(
         deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 1\n"
     )
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_loaded_check(spec).probe().status is Status.FAIL
 
 
 def test_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_path):
     # Loading is gated on --enable-agent, which setup does explicitly.
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_loaded_check(spec).fix is None
 
 
@@ -654,7 +654,7 @@ def test_agent_plist_check_remedy_leads_with_install_sh_then_the_runbook(tmp_pat
     ./install.sh was never run for this account - that has to come first. The
     write-failure case only applies on the `setup` path, and stays secondary."""
     remedy = deployment.agent_plist_check(
-        launch_agent.sync_agent_spec(tmp_path / "repo", "demo"), tmp_path / "home"
+        launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"), tmp_path / "home"
     ).remedy
     assert remedy.startswith("./install.sh --project demo --live --enable-agent")
     assert remedy.index("install.sh") < remedy.index("could not be written")

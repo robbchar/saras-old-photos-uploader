@@ -4825,9 +4825,73 @@ def test_cmd_setup_does_not_bootstrap_until_the_old_agent_is_gone(monkeypatch, c
     assert "still registered" in capsys.readouterr().out
 
 
+def _write_registry(path):
+    path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    return path
+
+
+def test_enable_agent_points_the_agent_at_the_registry_setup_checked(tmp_path, monkeypatch):
+    """The gate reads --registry; an agent reading projects_registry.json instead
+    would run an hourly live sync against a Sheet the gate never saw."""
+    registry_path = _write_registry(tmp_path / "alt.json")
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: _sheet_checks_that(deployment.Status.PASS),
+    )
+    written = []
+    monkeypatch.setattr(
+        ia_bulk.launch_agent,
+        "write_plist",
+        lambda spec, home: (written.append(spec), f"wrote {spec.label}.plist")[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: (True, "loaded"))
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "astoriaphotos", "--registry", str(registry_path),
+         "--live", "--enable-agent"]
+    )
+
+    assert ia_bulk.cmd_setup(args) == 0
+    arguments = written[0].program_arguments
+    assert arguments[arguments.index("--registry") + 1] == str(registry_path.resolve())
+
+
+def _plist_check_outcome(registry_path, home, monkeypatch):
+    monkeypatch.setattr(ia_bulk.Path, "home", lambda: home)
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    checks = ia_bulk.build_deployment_checks(args, include_network=False)
+    (plist_check,) = [check for check in checks if check.name == "launch agent plist"]
+    return plist_check.probe()
+
+
+def test_doctor_passes_the_plist_enable_agent_wrote_for_the_same_registry(tmp_path, monkeypatch):
+    registry_path = _write_registry(tmp_path / "alt.json")
+    home = tmp_path / "home"
+    ia_bulk.launch_agent.write_plist(
+        ia_bulk.launch_agent.sync_agent_spec(ia_bulk.REPO_ROOT, "astoriaphotos", registry_path), home
+    )
+    assert _plist_check_outcome(registry_path, home, monkeypatch).status is deployment.Status.PASS
+
+
+def test_doctor_flags_a_plist_enabled_for_a_different_registry(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ia_bulk.launch_agent.write_plist(
+        ia_bulk.launch_agent.sync_agent_spec(
+            ia_bulk.REPO_ROOT, "astoriaphotos", _write_registry(tmp_path / "alt.json")
+        ),
+        home,
+    )
+    outcome = _plist_check_outcome(_write_registry(tmp_path / "other.json"), home, monkeypatch)
+    assert outcome.status is deployment.Status.FAIL
+    assert "registry" in outcome.detail
+
+
 def test_cmd_setup_reenables_an_agent_whose_last_run_failed(tmp_path, monkeypatch):
     """The loaded check's FAIL used to block the very reload its remedy prescribes."""
-    spec = ia_bulk.launch_agent.sync_agent_spec(tmp_path, "sarasoldphotos")
+    spec = ia_bulk.launch_agent.sync_agent_spec(tmp_path, "sarasoldphotos", tmp_path / "registry.json")
     monkeypatch.setattr(
         ia_bulk,
         "build_deployment_checks",

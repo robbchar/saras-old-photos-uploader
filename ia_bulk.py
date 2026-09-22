@@ -2554,7 +2554,7 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
             ]
         )
 
-    spec = launch_agent.sync_agent_spec(repo_root, config.project_id)
+    spec = launch_agent.sync_agent_spec(repo_root, config.project_id, args.registry)
     checks.extend(
         [
             deployment.agent_plist_check(spec, Path.home()),
@@ -2635,7 +2635,7 @@ def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
     takes effect."""
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
-    spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id)
+    spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id, args.registry)
     plist = launch_agent.plist_path(spec, Path.home())
 
     # RunAtLoad means bootstrapping starts a live sync immediately, so say so

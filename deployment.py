@@ -446,7 +446,7 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
         if launch_agent.plist_is_current(spec, home):
             return CheckOutcome(Status.PASS, str(target))
         if target.exists():
-            return CheckOutcome(Status.FAIL, f"{target} does not match this checkout")
+            return CheckOutcome(Status.FAIL, f"{target} does not match this checkout and registry")
         return CheckOutcome(
             Status.UNKNOWN, f"no plist at {target} - the hourly agent is not enabled for this account"
         )

@@ -5,7 +5,7 @@ import launch_agent
 
 
 def a_spec(tmp_path, project_id="demo"):
-    return launch_agent.sync_agent_spec(tmp_path / "repo", project_id)
+    return launch_agent.sync_agent_spec(tmp_path / "repo", project_id, tmp_path / "registry.json")
 
 
 def test_sync_agent_spec_labels_the_agent_per_project(tmp_path):
@@ -21,6 +21,30 @@ def test_sync_agent_spec_runs_sync_metadata_live(tmp_path):
     arguments = a_spec(tmp_path).program_arguments
     assert "sync-metadata" in arguments
     assert "--live" in arguments
+
+
+def test_sync_agent_spec_reads_the_registry_setup_was_given(tmp_path):
+    """setup gates on --registry, so an agent reading the default would sync a
+    Sheet nothing checked."""
+    arguments = launch_agent.sync_agent_spec(
+        tmp_path / "repo", "demo", tmp_path / "alt.json"
+    ).program_arguments
+    assert arguments[arguments.index("--registry") + 1] == str((tmp_path / "alt.json").resolve())
+
+
+def test_sync_agent_spec_makes_a_relative_registry_absolute(tmp_path, monkeypatch):
+    # The agent's WorkingDirectory is the checkout, not wherever setup was run from.
+    monkeypatch.chdir(tmp_path)
+    arguments = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", "alt.json").program_arguments
+    registry_argument = arguments[arguments.index("--registry") + 1]
+    assert registry_argument == str(tmp_path.resolve() / "alt.json")
+
+
+def test_plist_is_current_is_false_once_the_registry_changes(tmp_path):
+    home = tmp_path / "home"
+    launch_agent.write_plist(a_spec(tmp_path), home)
+    other = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "other.json")
+    assert launch_agent.plist_is_current(other, home) is False
 
 
 def test_sync_agent_spec_is_hourly(tmp_path):
@@ -74,7 +98,7 @@ def test_plist_is_current_is_true_right_after_writing(tmp_path):
 def test_plist_is_current_is_false_once_the_repo_moves(tmp_path):
     home = tmp_path / "home"
     launch_agent.write_plist(a_spec(tmp_path), home)
-    moved = launch_agent.sync_agent_spec(tmp_path / "elsewhere", "demo")
+    moved = launch_agent.sync_agent_spec(tmp_path / "elsewhere", "demo", tmp_path / "registry.json")
     assert launch_agent.plist_is_current(moved, home) is False
 
 
@@ -92,7 +116,7 @@ def test_write_plist_creates_the_stdio_directory_launchd_will_not(tmp_path):
     """logs/ is gitignored, so a fresh clone has none. launchd creates no
     intermediate directories for StandardOutPath/StandardErrorPath, so the job
     either fails to spawn or its output vanishes."""
-    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
+    spec = a_spec(tmp_path)
     assert not spec.stderr_path.parent.exists()
     launch_agent.write_plist(spec, tmp_path / "home")
     assert spec.stdout_path.parent.is_dir()

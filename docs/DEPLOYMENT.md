@@ -411,6 +411,14 @@ infer what you meant, `setup` refuses and names this command. `--offline` is
 refused with `--enable-agent` for the same reason: the Sheet checks it skips
 are exactly the ones that gate enabling a live agent.
 
+**The agent reads the registry `setup` checked.** The plist runs
+`sync-metadata --project <project> --live --registry <path>`, with the
+absolute path of the registry `setup` was given — this checkout's
+`projects_registry.json` unless you passed `--registry`. If you did, give
+`doctor` the same `--registry` (§15). Checked against any other registry,
+`launch agent plist` reports a plist that does not match, because the agent is
+not syncing what that `doctor` run looked at.
+
 **It enables nothing if a check the agent needs failed.** `setup` converges,
 re-checks, and only then writes the plist and loads the agent. A `[FAIL]` line
 on anything the hourly sync depends on — a missing key, a placeholder sheet
@@ -516,9 +524,9 @@ enabled stays that way.
 
 **If the plist changed, the running agent is still the old one.** When a
 `git pull` changes what the agent should run, `doctor` and `setup` report
-`[FAIL] launch agent plist: … does not match this checkout` — `setup` does not
-rewrite it, because launchd holds its own copy from the moment it was
-bootstrapped and a rewrite alone would not reach it. Re-run §12 from the
+`[FAIL] launch agent plist: … does not match this checkout and registry` —
+`setup` does not rewrite it, because launchd holds its own copy from the moment
+it was bootstrapped and a rewrite alone would not reach it. Re-run §12 from the
 operating account; it rewrites the plist, boots the agent out, and bootstraps
 the new definition:
 
@@ -566,24 +574,27 @@ happens to be offline right now.
 
 ### If `launch agent plist` still says FAIL
 
-`FAIL` here means a plist exists but does not match this checkout. No plist at
-all is `UNKNOWN`: the agent is not enabled, and §12 is the whole answer. In
-order of likelihood:
+`FAIL` here means a plist exists but does not match this checkout and
+registry. No plist at all is `UNKNOWN`: the agent is not enabled, and §12 is
+the whole answer. In order of likelihood:
 
 1. **A `git pull` changed what the agent should run** and §12 has not been
    re-run since. Re-run it (§14).
-2. **You are looking at the wrong home, or the wrong checkout** (§2). `doctor`
-   run from the development account reports on that account's own plist, and
-   one run from a second clone compares the plist with that clone. Log in as
-   `sarasoldphotos` and check again from the checkout the agent runs.
+2. **You are looking at the wrong home, checkout or registry** (§2). `doctor`
+   run from the development account reports on that account's own plist, one
+   run from a second clone compares the plist with that clone, and one given a
+   different `--registry` than §12 was compares it with that registry. Log in
+   as `sarasoldphotos` and check again from the checkout the agent runs, with
+   the `--registry` §12 was given, if any.
 3. **The write was tried and failed.** This one applies only after §12 has
    just run and the check still says `FAIL` — usually `~/Library/LaunchAgents`
    is not writable by the account running the script. Confirm you are the
    operating account (§2) and re-run §12.
 
-Whatever the cause, the plist is generated from the checkout, so replacing it
-is safe: `rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist`
-and re-run §12, which writes it fresh and reloads the agent.
+Whatever the cause, the plist is generated from the checkout and registry, so
+replacing it is safe:
+`rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist` and
+re-run §12, which writes it fresh and reloads the agent.
 
 ## 16. Verifying the service account by hand
 
