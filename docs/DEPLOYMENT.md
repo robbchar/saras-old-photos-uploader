@@ -438,7 +438,9 @@ sync against a Sheet whose id, sharing and sync columns were never confirmed,
 which is exactly what refusing `--offline` is for. `setup` says which check
 could not be verified and loads nothing; each `UNKNOWN` line says why. A key
 Google rejects, or a `sheet_tab` naming no tab, is a `FAIL` with its own fix
-line, not an `UNKNOWN`. When there are `FAIL`s as well, `setup` names those
+line, not an `UNKNOWN`. An error on Google's side while issuing the token — any
+HTTP 5xx, a 502 included — says nothing about the key, so it stays `UNKNOWN`:
+re-run in a few minutes. When there are `FAIL`s as well, `setup` names those
 first and the `UNKNOWN` Sheet checks after them — an `UNKNOWN` Sheet check is
 often only a consequence of a `FAIL`.
 
