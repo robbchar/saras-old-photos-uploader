@@ -4437,6 +4437,10 @@ def _setup_args(*extra):
     )
 
 
+# What _setup_args' operator pastes back into zsh; `<project>` there is a redirect.
+RUNNABLE_ENABLE_COMMAND = "./install.sh --project sarasoldphotos --live --enable-agent"
+
+
 def _stub_plist_write(monkeypatch, written=None):
     """load_sync_agent writes the plist; never into the real ~/Library/LaunchAgents."""
 
@@ -4478,7 +4482,7 @@ def test_cmd_setup_refuses_enable_agent_without_live(monkeypatch, capsys):
     assert ia_bulk.cmd_setup(_setup_args("--enable-agent")) == 1
     err = capsys.readouterr().err
     assert "--live" in err
-    assert ia_bulk.ENABLE_AGENT_COMMAND in err
+    assert RUNNABLE_ENABLE_COMMAND in err
 
 
 def test_cmd_setup_refuses_enable_agent_with_offline(monkeypatch, capsys):
@@ -4492,7 +4496,7 @@ def test_cmd_setup_refuses_enable_agent_with_offline(monkeypatch, capsys):
     assert ia_bulk.cmd_setup(_setup_args("--live", "--offline", "--enable-agent")) == 1
     err = capsys.readouterr().err
     assert "--offline" in err
-    assert ia_bulk.ENABLE_AGENT_COMMAND in err
+    assert RUNNABLE_ENABLE_COMMAND in err
 
 
 def test_cmd_setup_still_allows_offline_without_enable_agent(monkeypatch):
@@ -4519,6 +4523,7 @@ def test_cmd_setup_does_not_enable_the_agent_when_a_check_failed(monkeypatch, ca
     assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
     captured = capsys.readouterr()
     assert "NOT enabled" in captured.err
+    assert RUNNABLE_ENABLE_COMMAND in captured.err
     assert "[FAIL] service account key" in captured.out
 
 
@@ -4583,6 +4588,7 @@ def test_cmd_setup_does_not_enable_the_agent_when_the_live_sheet_is_unverified(m
     err = capsys.readouterr().err
     assert "could not be verified" in err
     assert "NOT enabled" in err
+    assert RUNNABLE_ENABLE_COMMAND in err
     for name in deployment.LIVE_SHEET_CHECKS:
         assert name in err
 
@@ -5103,7 +5109,25 @@ def test_every_install_sh_remedy_names_the_required_project_flag(tmp_path):
 
     assert install_sh_remedies, "expected at least one check to remedy via install.sh"
     for remedy in install_sh_remedies:
-        assert "--project" in remedy, f"remedy names install.sh but not --project: {remedy!r}"
+        assert "./install.sh --project astoriaphotos" in remedy, (
+            f"remedy names install.sh but not the real --project: {remedy!r}"
+        )
+        # Pasted into zsh, `<project>` is a redirect from a file named "project".
+        assert "<" not in remedy and ">" not in remedy, f"remedy has a placeholder: {remedy!r}"
+
+
+@pytest.mark.parametrize(
+    ("blocking", "unverified"),
+    [
+        (["service account key"], []),
+        ([], ["spreadsheet reachable"]),
+        (["service account key"], ["spreadsheet reachable"]),
+    ],
+)
+def test_agent_not_enabled_message_names_the_real_project(blocking, unverified):
+    message = ia_bulk.agent_not_enabled_message(blocking, unverified, "sarasoldphotos")
+    assert RUNNABLE_ENABLE_COMMAND in message
+    assert "<project>" not in message
 
 
 # ---------------------------------------------------------------------------

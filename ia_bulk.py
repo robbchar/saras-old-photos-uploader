@@ -2510,8 +2510,8 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     key_path = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
 
     checks = [
-        deployment.python_version_check(sys.version_info[:2]),
-        deployment.dependencies_check(),
+        deployment.python_version_check(sys.version_info[:2], config.project_id),
+        deployment.dependencies_check(config.project_id),
         deployment.key_present_check(key_path),
         deployment.key_mode_check(key_path),
         deployment.ia_credentials_check(),
@@ -2564,24 +2564,23 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     return checks
 
 
-ENABLE_AGENT_COMMAND = "./install.sh --project <project> --live --enable-agent"
-
+# {command} is deployment.install_command(args.project, enable_agent=True).
 ENABLE_AGENT_NEEDS_LIVE = (
     "--enable-agent loads an agent that runs `sync-metadata --live`, so it refuses to run "
     "without --live: without it setup would verify the TEST Sheet and then start an hourly "
     "live sync against a real Sheet whose ID, sharing and sync columns were never checked. "
-    f"Run: {ENABLE_AGENT_COMMAND}"
+    "Run: {command}"
 )
 
 ENABLE_AGENT_NEEDS_NETWORK = (
     "--enable-agent cannot be combined with --offline: the Sheet checks --offline skips are "
     "exactly the ones that gate enabling a live agent. Re-run on a machine with network. "
-    f"Run: {ENABLE_AGENT_COMMAND}"
+    "Run: {command}"
 )
 
 AGENT_NOT_ENABLED = (
     "{names} failed - the hourly sync agent was NOT enabled and nothing was loaded. Fix those "
-    "[FAIL] lines above, then re-run: " + ENABLE_AGENT_COMMAND
+    "[FAIL] lines above, then re-run: {command}"
 )
 
 AGENT_NOT_ENABLED_UNVERIFIED = (
@@ -2589,18 +2588,19 @@ AGENT_NOT_ENABLED_UNVERIFIED = (
     "sync agent was NOT enabled and nothing was loaded. It would run `sync-metadata --live` "
     "unattended against a Sheet whose sharing and sync columns were never confirmed. Each "
     "UNKNOWN line above says why - most often no network, or Google briefly unavailable. "
-    "Resolve that, then re-run: " + ENABLE_AGENT_COMMAND
+    "Resolve that, then re-run: {command}"
 )
 
 
-def agent_not_enabled_message(blocking: list[str], unverified: list[str]) -> str:
+def agent_not_enabled_message(blocking: list[str], unverified: list[str], project_id: str) -> str:
     """FAILs are named first: an UNKNOWN Sheet check is often only their
     consequence. A merely offline machine reaches the same reduced assurance
     --offline is refused for, so UNKNOWN on the two Sheet checks blocks too.
     This rule lives here, not in deployment.exit_code."""
+    command = deployment.install_command(project_id, enable_agent=True)
     if not blocking:
-        return AGENT_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified))
-    message = AGENT_NOT_ENABLED.format(names=", ".join(blocking))
+        return AGENT_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified), command=command)
+    message = AGENT_NOT_ENABLED.format(names=", ".join(blocking), command=command)
     if unverified:
         message += f" ({' and '.join(unverified)} came back UNKNOWN too, and must PASS as well.)"
     return message
@@ -2620,10 +2620,11 @@ def enable_agent_refusal(args) -> str | None:
     it refuses rather than infers what the operator meant."""
     if not args.enable_agent:
         return None
+    command = deployment.install_command(args.project, enable_agent=True)
     if not args.live:
-        return ENABLE_AGENT_NEEDS_LIVE
+        return ENABLE_AGENT_NEEDS_LIVE.format(command=command)
     if args.offline:
-        return ENABLE_AGENT_NEEDS_NETWORK
+        return ENABLE_AGENT_NEEDS_NETWORK.format(command=command)
     return None
 
 
@@ -2718,7 +2719,7 @@ def cmd_setup(args) -> int:
         unverified = deployment.unverified_sheet_checks(results)
         if blocking or unverified:
             print(deployment.format_report(results))
-            print(agent_not_enabled_message(blocking, unverified), file=sys.stderr)
+            print(agent_not_enabled_message(blocking, unverified, args.project), file=sys.stderr)
             return 1
         try:
             agent_failed = not load_sync_agent(args, announce)

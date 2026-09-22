@@ -287,17 +287,41 @@ def test_agent_blocking_failures_names_only_fails_the_agent_needs():
 
 
 def test_python_version_check_fails_below_the_floor():
-    assert deployment.python_version_check((3, 9)).probe().status is Status.FAIL
+    assert deployment.python_version_check((3, 9), "demo").probe().status is Status.FAIL
 
 
 def test_python_version_check_passes_at_the_floor():
-    assert deployment.python_version_check((3, 10)).probe().status is Status.PASS
+    assert deployment.python_version_check((3, 10), "demo").probe().status is Status.PASS
+
+
+def test_python_version_check_remedy_names_the_real_project():
+    assert "./install.sh --project demo " in deployment.python_version_check((3, 9), "demo").remedy
 
 
 def test_dependencies_check_passes_because_the_test_run_already_imported_them():
     """Not a live gate: importing deployment imports all three, so this probe
     can only ever see them present. It documents the requirement."""
-    assert deployment.dependencies_check().probe().status is Status.PASS
+    assert deployment.dependencies_check("demo").probe().status is Status.PASS
+
+
+def test_dependencies_check_remedy_names_the_real_project():
+    assert deployment.dependencies_check("demo").remedy.startswith("./install.sh --project demo ")
+
+
+def test_install_command_names_the_project():
+    assert deployment.install_command("sarasoldphotos") == "./install.sh --project sarasoldphotos"
+
+
+def test_install_command_for_the_agent_adds_live_and_enable_agent():
+    assert (
+        deployment.install_command("sarasoldphotos", enable_agent=True)
+        == "./install.sh --project sarasoldphotos --live --enable-agent"
+    )
+
+
+def test_install_command_quotes_a_project_id_the_shell_would_split():
+    # --project is typed by a person; the refusal that echoes it runs before the registry is read.
+    assert deployment.install_command("two words") == "./install.sh --project 'two words'"
 
 
 def grid_with(*headers):
@@ -500,6 +524,13 @@ def test_agent_loaded_check_remedy_is_a_command_setup_accepts(tmp_path):
     assert "--live --enable-agent" in remedy
 
 
+def test_agent_loaded_check_remedy_names_the_real_project_and_its_logs(tmp_path):
+    remedy = deployment.agent_loaded_check(launch_agent.sync_agent_spec(tmp_path / "repo", "demo")).remedy
+    assert "./install.sh --project demo --live --enable-agent" in remedy
+    assert "logs/launchagent-demo.out" in remedy
+    assert "logs/launchagent-demo.err" in remedy
+
+
 def test_agent_plist_check_has_no_fix_so_only_enable_agent_writes_it(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo")
     assert deployment.agent_plist_check(spec, tmp_path / "home").fix is None
@@ -625,8 +656,7 @@ def test_agent_plist_check_remedy_leads_with_install_sh_then_the_runbook(tmp_pat
     remedy = deployment.agent_plist_check(
         launch_agent.sync_agent_spec(tmp_path / "repo", "demo"), tmp_path / "home"
     ).remedy
-    assert remedy.startswith("./install.sh --project")
-    assert "--live --enable-agent" in remedy
+    assert remedy.startswith("./install.sh --project demo --live --enable-agent")
     assert remedy.index("install.sh") < remedy.index("could not be written")
     assert "DEPLOYMENT.md" in remedy
 

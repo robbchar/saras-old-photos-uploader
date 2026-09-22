@@ -14,6 +14,7 @@ LABEL_PREFIX = "org.lcpsociety.iabulk.sync"
 
 @dataclass(frozen=True)
 class AgentSpec:
+    project_id: str
     label: str
     program_arguments: list[str]
     interval: int
@@ -25,6 +26,7 @@ class AgentSpec:
 def sync_agent_spec(repo_root: Path, project_id: str) -> AgentSpec:
     repo_root = Path(repo_root).resolve()
     return AgentSpec(
+        project_id=project_id,
         label=f"{LABEL_PREFIX}.{project_id}",
         program_arguments=[
             str(repo_root / ".venv" / "bin" / "python"),

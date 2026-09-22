@@ -14,6 +14,7 @@ from __future__ import annotations
 import configparser
 import enum
 import importlib
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,6 +115,12 @@ def _is_private(mode: int) -> bool:
     """Owner can read, group and other get nothing: 0600, or the stricter 0400."""
     return mode & 0o077 == 0 and mode & 0o400 != 0
 
+def install_command(project_id: str, *, enable_agent: bool = False) -> str:
+    """The ./install.sh line a remedy names, runnable in zsh exactly as printed."""
+    command = f"./install.sh --project {shlex.quote(project_id)}"
+    return f"{command} --live --enable-agent" if enable_agent else command
+
+
 _REQUIRED_MODULES = (
     "internetarchive",
     "googleapiclient.discovery",
@@ -121,7 +128,7 @@ _REQUIRED_MODULES = (
 )
 
 
-def dependencies_check() -> Check:
+def dependencies_check(project_id: str) -> Check:
     """A statement of what this pipeline needs importable, not a live gate on the
     CLI: ia_bulk.py imports all three at module scope, so a CLI run that reaches
     this probe has already proved them present. It is meaningful to a caller that
@@ -141,11 +148,11 @@ def dependencies_check() -> Check:
     return Check(
         name="dependencies",
         probe=probe,
-        remedy="./install.sh --project <project> (or: .venv/bin/pip install -r requirements.txt)",
+        remedy=f"{install_command(project_id)} (or: .venv/bin/pip install -r requirements.txt)",
     )
 
 
-def python_version_check(version: tuple[int, int]) -> Check:
+def python_version_check(version: tuple[int, int], project_id: str) -> Check:
     def probe() -> CheckOutcome:
         running = ".".join(str(part) for part in version)
         if version < MINIMUM_PYTHON:
@@ -156,7 +163,9 @@ def python_version_check(version: tuple[int, int]) -> Check:
     return Check(
         name="python version",
         probe=probe,
-        remedy="install Python 3.10+ and re-run ./install.sh --project <project> - see docs/DEPLOYMENT.md",
+        remedy=(
+            f"install Python 3.10+ and re-run {install_command(project_id)} - see docs/DEPLOYMENT.md"
+        ),
     )
 
 
@@ -446,7 +455,7 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
         name="launch agent plist",
         probe=probe,
         remedy=(
-            "./install.sh --project <project> --live --enable-agent, from the account that "
+            f"{install_command(spec.project_id, enable_agent=True)}, from the account that "
             "runs the agent, rewrites it and reloads the agent; if that was just run and this "
             "still fails, the plist could not be written "
             '- see docs/DEPLOYMENT.md, section "Checking a machine later"'
@@ -456,6 +465,10 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path) -> Check:
 
 
 def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
+    # Relative, as the operator reads them from the checkout they run install.sh in.
+    stdout_log = spec.stdout_path.relative_to(spec.working_directory).as_posix()
+    stderr_log = spec.stderr_path.relative_to(spec.working_directory).as_posix()
+
     def probe() -> CheckOutcome:
         output = platform_probe.launchctl_print(spec.label)
         if output is None:
@@ -475,10 +488,10 @@ def agent_loaded_check(spec: launch_agent.AgentSpec) -> Check:
         name="launch agent loaded",
         probe=probe,
         remedy=(
-            "read logs/launchagent-<project>.out and .err for why the last run failed; to "
+            f"read {stdout_log} and {stderr_log} for why the last run failed; to "
             "reload the agent, "
             "log in as the operating account and run "
-            "./install.sh --project <project> --live --enable-agent"
+            f"{install_command(spec.project_id, enable_agent=True)}"
         ),
         needed_by_agent=False,
     )
