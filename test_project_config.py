@@ -78,6 +78,32 @@ def test_collection_key_off_the_identifier_scheme_is_rejected(collection_key):
         load_project_config(registry, "sarasoldphotos")
 
 
+def test_sibling_project_id_off_the_identifier_scheme_is_rejected():
+    """Every registered project id is checked, not just the one being run."""
+    block = REGISTRY["projects"]["sarasoldphotos"]
+    registry = {"collection_key": "lcps", "projects": {"sarasoldphotos": block, "astoria-maps": block}}
+
+    with pytest.raises(ConfigError, match=r"'astoria-maps'.*lowercase letters and digits only"):
+        load_project_config(registry, "sarasoldphotos")
+
+
+def test_off_scheme_error_names_the_offending_characters():
+    registry = {"collection_key": "Lcps ", "projects": REGISTRY["projects"]}
+
+    with pytest.raises(ConfigError) as raised:
+        load_project_config(registry, "sarasoldphotos")
+
+    assert "found ' ', 'L'" in str(raised.value)
+    assert "hyphens" not in str(raised.value)
+
+
+def test_off_scheme_error_explains_hyphens_when_there_is_one():
+    registry = {"collection_key": "lcps-org", "projects": REGISTRY["projects"]}
+
+    with pytest.raises(ConfigError, match=r"found '-' \(hyphens separate an identifier's parts\)"):
+        load_project_config(registry, "sarasoldphotos")
+
+
 def test_missing_required_key_names_the_key_and_the_project():
     registry = {"collection_key": "lcps", "projects": {"p": {"mediatype": "image"}}}
 

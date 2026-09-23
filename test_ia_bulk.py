@@ -2227,6 +2227,33 @@ def test_cmd_validate_rejects_a_project_id_off_the_identifier_scheme_before_touc
     assert calls == []
 
 
+def test_cmd_validate_csv_rejects_a_project_id_off_the_identifier_scheme_before_reading_rows(
+    tmp_path, capsys
+):
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    csv_path = tmp_path / "items.csv"
+    write_csv(
+        csv_path,
+        ["identifier", "file", "mediatype", "title"],
+        [{"identifier": "lcps-astoria-maps-00001", "file": "a.jpg", "mediatype": "image", "title": "First"}],
+    )
+    registry = make_registry()
+    registry["projects"] = {"astoria-maps": registry["projects"]["astoriaphotos"]}
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    exit_code = cmd_validate(
+        Namespace(project="astoria-maps", csv=str(csv_path), files_dir=str(tmp_path), registry=str(registry_path))
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "'astoria-maps' must be lowercase letters and digits only" in captured.err
+    assert "does not match scheme" not in captured.out
+
+
 def test_cmd_validate_rejects_an_unreplaced_placeholder_sheet_id_before_touching_the_network(
     tmp_path, monkeypatch, capsys
 ):

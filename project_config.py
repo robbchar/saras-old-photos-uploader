@@ -109,15 +109,42 @@ def unregistered_project_error(registry: dict, project_id: str) -> str | None:
     return f"unknown project '{project_id}'; registry knows: {known}"
 
 
+def registry_id_error(registry: dict) -> str | None:
+    """The message for the first registry id off the identifier scheme, or None.
+
+    Checks collection_key and every project id, raw: minted identifiers must
+    parse back. Shared with the --csv paths via refuse_unregistered_project.
+    Non-string collection_key and non-dict projects are left to
+    load_project_config's own shape checks. See docs/DECISIONS.md,
+    "Registry ids must be lowercase letters and digits"."""
+    collection_key = registry.get("collection_key")
+    projects = registry.get("projects", {})
+    labeled_ids = [("collection_key", collection_key)] if isinstance(collection_key, str) else []
+    if isinstance(projects, dict):
+        labeled_ids += [("project id", project_id) for project_id in projects]
+    for label, value in labeled_ids:
+        if is_identifier_part(value):
+            continue
+        offending = ", ".join(repr(char) for char in sorted(set(value)) if not is_identifier_part(char))
+        message = (
+            f"registry {label} {value!r} must be lowercase letters and digits only; "
+            f"found {offending or 'an empty value'}"
+        )
+        if "-" in value:
+            message += " (hyphens separate an identifier's parts)"
+        return message
+    return None
+
+
 def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
     # Validate collection_key at registry root
     if "collection_key" not in registry:
         raise ConfigError("registry is missing required top-level key: collection_key")
 
     collection_key = registry.get("collection_key", "")
-    if not isinstance(collection_key, str) or not collection_key.strip():
+    if not isinstance(collection_key, str):
         raise ConfigError(
-            f"registry collection_key must be a non-empty string, "
+            f"registry collection_key must be a string, "
             f"got {type(collection_key).__name__!r}"
         )
 
@@ -131,14 +158,9 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
     if unregistered:
         raise ConfigError(unregistered)
 
-    # Checked raw, before any strip: "lcps " would otherwise mint one way and validate another.
-    # See docs/DECISIONS.md, "Registry ids must be lowercase letters and digits".
-    for label, value in (("collection_key", collection_key), ("project id", project_id)):
-        if not is_identifier_part(value):
-            raise ConfigError(
-                f"registry {label} {value!r} must be lowercase letters and digits only; "
-                f"hyphens separate an identifier's parts"
-            )
+    off_scheme = registry_id_error(registry)
+    if off_scheme:
+        raise ConfigError(off_scheme)
 
     block = projects[project_id]
     # Checked before the first block.get() below. Without this, a hand-edited
@@ -271,7 +293,7 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
         project_id=project_id,
         upload_log_tab=log_tabs["upload_log_tab"],
         sync_log_tab=log_tabs["sync_log_tab"],
-        collection_key=collection_key.strip(),
+        collection_key=collection_key,
         mediatype=block["mediatype"].strip(),
         ia_collection=block["ia_collection"].strip(),
         sheet_id=block["sheet_id"].strip(),

@@ -14,13 +14,15 @@ from enum import Enum
 NUMBER_WIDTH = 5
 # One part of COLLECTIONKEY-PROJECTID; no hyphens, since hyphens separate the parts.
 IDENTIFIER_PART = r"[a-z0-9]+"
+_IDENTIFIER_PART_RE = re.compile(IDENTIFIER_PART)
+# [0-9], not \d: \d also matches non-ASCII digits, which format_identifier never produces.
 _IDENTIFIER_RE = re.compile(
-    rf"^(?P<collection>{IDENTIFIER_PART})-(?P<project>{IDENTIFIER_PART})-(?P<number>\d{{{NUMBER_WIDTH}}})$"
+    rf"^(?P<collection>{IDENTIFIER_PART})-(?P<project>{IDENTIFIER_PART})-(?P<number>[0-9]{{{NUMBER_WIDTH}}})$"
 )
 
 
 def is_identifier_part(value: str) -> bool:
-    return re.fullmatch(IDENTIFIER_PART, value) is not None
+    return _IDENTIFIER_PART_RE.fullmatch(value) is not None
 
 
 def format_identifier(collection_key: str, project_id: str, number: int) -> str:
@@ -63,12 +65,10 @@ def next_identifiers(
 ) -> list[str]:
     highest = 0
     for identifier in existing:
-        match = _IDENTIFIER_RE.match(identifier.strip())
-        if not match:
+        parsed = parse_identifier(identifier)
+        if parsed is None or parsed[:2] != (collection_key, project_id):
             continue
-        if match.group("collection") != collection_key or match.group("project") != project_id:
-            continue
-        highest = max(highest, int(match.group("number")))
+        highest = max(highest, parsed[2])
 
     return [
         format_identifier(collection_key, project_id, highest + offset)
