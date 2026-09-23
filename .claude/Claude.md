@@ -6,7 +6,10 @@ so keep things generic to "a project" rather than hardcoded to photos.
 
 ## Identifier scheme
 `COLLECTIONKEY-PROJECTID-NUMBER` — all lowercase, hyphen-separated.
-- COLLECTIONKEY: LCPS's IA collection identifier (confirm before real runs)
+- COLLECTIONKEY: `lcps`, settled 2026-08-23 (see `docs/DECISIONS.md`,
+  "Still open"). An identifier namespace only, not the IA collection items
+  land in (`ia_collection`). Do not change it: every minted identifier
+  starts with it.
 - PROJECTID: short project code, e.g. `photosexample` (illustrative only —
   see `projects_registry.json` for the actual registered codes; tracked in
   a small project registry, not invented ad hoc per script run)

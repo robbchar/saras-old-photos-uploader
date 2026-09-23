@@ -23,7 +23,9 @@ project" so a second LCPS project can reuse the same pipeline.
 `COLLECTIONKEY-PROJECTID-NUMBER` — all lowercase, hyphen-separated. The
 registry refuses a collection key or project id that isn't lowercase letters
 and digits only (see [`docs/decisions/IDENTIFIERS.md`](docs/decisions/IDENTIFIERS.md#registry-ids-must-be-lowercase-letters-and-digits)).
-- COLLECTIONKEY: LCPS's IA collection identifier (confirm before real runs)
+- COLLECTIONKEY: `lcps`, settled 2026-08-23 (see
+  [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)). An identifier
+  namespace only, not the IA collection items land in (`ia_collection`).
 - PROJECTID: short project code, e.g. `photosexample` (illustrative only —
   see `projects_registry.json` for the actual registered codes; tracked in
   a small project registry, not invented ad hoc per script run)
@@ -540,11 +542,12 @@ with no stamp — do this deliberately, never as a default.
 python ia_bulk.py upload --project sarasoldphotos --live
 ```
 
-**Before any `--live` run**, confirm both of these by hand — neither is
+**Before any `--live` run**, check both of these by hand — neither is
 validated automatically against Internet Archive (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps)):
-- `projects_registry.json`'s `collection_key` — still unconfirmed against how
-  LCPS actually names its collection.
+- `projects_registry.json`'s `collection_key` still reads `"lcps"`, the value
+  settled on 2026-08-23 (see [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)).
+  Do not change it: it is the first segment of every identifier.
 - the project's `ia_collection` in `projects_registry.json` — for
   `sarasoldphotos`, already confirmed by hand against archive.org on
   2026-08-22 (see [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)); a

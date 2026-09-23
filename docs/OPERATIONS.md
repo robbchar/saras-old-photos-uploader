@@ -348,14 +348,15 @@ python ia_bulk.py upload --project sarasoldphotos --live
 Nothing on this list is validated automatically. A wrong value here puts real
 files in the wrong place under a permanent identifier.
 
-- [ ] `projects_registry.json` → `collection_key` (currently `"lcps"`) is the
+- [ ] `projects_registry.json` → `collection_key` is `"lcps"`. It is the
       first segment of every identifier this tool mints
-      (`lcps-sarasoldphotos-00001`). `check_identifier` already refuses any
-      row whose identifier prefix doesn't match this value, and any whose
-      `PROJECTID` belongs to a different registered project — but the value
-      itself has **never been confirmed** against how LCPS actually names its
-      collection. This is a different thing from the IA collection uploads
-      land in; see the next item.
+      (`lcps-sarasoldphotos-00001`), and it was **settled on 2026-08-23** —
+      see [`DECISIONS.md`](DECISIONS.md#still-open). Check that it still
+      reads `"lcps"`; do not change it. `check_identifier` already refuses
+      any row whose identifier prefix doesn't match this value, and any whose
+      `PROJECTID` belongs to a different registered project. This is a
+      different thing from the IA collection uploads land in; see the next
+      item.
 - [ ] `projects_registry.json` → `ia_collection` (currently
       `"sarasoldphotos"`) is the actual Internet Archive collection
       `upload --live` uploads into — taken from the registry automatically;

@@ -578,8 +578,8 @@ IA's metadata-update endpoint returns an HTTP 400 with
 `{"error": "no changes to _meta.xml"}` when every field in the request
 already matches what's on the item — i.e. nothing was wrong, there was
 just nothing to do. `update_metadata_row` detects that specific error and
-raises `MetadataUnchanged` instead of `RuntimeError`; the sync run catches
-it separately, logs the row as `"status": "unchanged"` (not `"failure"`),
+raises `MetadataUnchanged` instead of `RuntimeError`; `SheetSyncRun.execute`
+catches it separately, logs the row as `"status": "unchanged"` (not `"failure"`),
 counts it in `SyncSummary`'s `unchanged`, and stamps `ia_sync_hash` as for a
 real change, so a row that's already correct doesn't inflate the error count
 or flip the exit code.
@@ -609,11 +609,11 @@ ones and must stay a pure function of the Sheet.
 Verified defects with reproductions live in
 [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md). The design-level gaps are below.
 
-`projects_registry.json`'s `collection_key` value (`lcps`) has never been
-confirmed against LCPS's actual IA collection identifier — confirm it before
-any `--live` run. A wrong value here doesn't cause data loss (validation
-would just reject every real identifier), but it needs to be right before
-real uploads can pass `validate`.
+`projects_registry.json`'s `collection_key` value (`lcps`) was settled on
+2026-08-23 — see [`DECISIONS.md`](DECISIONS.md#still-open). Nothing in the
+tool pins it: a changed value would change the first segment of every
+identifier minted after the change, and `validate` would reject every
+identifier already in the Sheet.
 
 The target IA collection is the project's `ia_collection` in
 `projects_registry.json`, and only there: there is no collection flag. (The
