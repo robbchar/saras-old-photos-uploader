@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from column_map import normalize_header
+from identifiers import is_identifier_part
 
 REQUIRED_KEYS = (
     "mediatype",
@@ -129,6 +130,15 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
     unregistered = unregistered_project_error(registry, project_id)
     if unregistered:
         raise ConfigError(unregistered)
+
+    # Checked raw, before any strip: "lcps " would otherwise mint one way and validate another.
+    # See docs/DECISIONS.md, "Registry ids must be lowercase letters and digits".
+    for label, value in (("collection_key", collection_key), ("project id", project_id)):
+        if not is_identifier_part(value):
+            raise ConfigError(
+                f"registry {label} {value!r} must be lowercase letters and digits only; "
+                f"hyphens separate an identifier's parts"
+            )
 
     block = projects[project_id]
     # Checked before the first block.get() below. Without this, a hand-edited

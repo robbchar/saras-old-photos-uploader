@@ -2204,6 +2204,29 @@ def test_cmd_validate_rejects_an_unknown_project_before_touching_the_sheet(tmp_p
     assert calls == []
 
 
+def test_cmd_validate_rejects_a_project_id_off_the_identifier_scheme_before_touching_the_sheet(
+    tmp_path, monkeypatch
+):
+    from ia_bulk import cmd_validate
+    from project_config import ConfigError
+
+    calls = []
+    monkeypatch.setattr(
+        "ia_bulk.build_sheet_client", lambda config, live: calls.append(config) or FakeSheetClient([])
+    )
+
+    registry = make_sheet_registry()
+    registry["projects"] = {"astoria-maps": registry["projects"]["astoriaphotos"]}
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    args = Namespace(csv=None, project="astoria-maps", registry=str(registry_path), live=False)
+
+    with pytest.raises(ConfigError, match="lowercase letters and digits only"):
+        cmd_validate(args)
+
+    assert calls == []
+
+
 def test_cmd_validate_rejects_an_unreplaced_placeholder_sheet_id_before_touching_the_network(
     tmp_path, monkeypatch, capsys
 ):

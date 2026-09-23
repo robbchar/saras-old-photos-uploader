@@ -12,7 +12,15 @@ from collections.abc import Iterable
 from enum import Enum
 
 NUMBER_WIDTH = 5
-_IDENTIFIER_RE = re.compile(r"^(?P<collection>[a-z0-9]+)-(?P<project>[a-z0-9]+)-(?P<number>\d{5})$")
+# One part of COLLECTIONKEY-PROJECTID; no hyphens, since hyphens separate the parts.
+IDENTIFIER_PART = r"[a-z0-9]+"
+_IDENTIFIER_RE = re.compile(
+    rf"^(?P<collection>{IDENTIFIER_PART})-(?P<project>{IDENTIFIER_PART})-(?P<number>\d{{{NUMBER_WIDTH}}})$"
+)
+
+
+def is_identifier_part(value: str) -> bool:
+    return re.fullmatch(IDENTIFIER_PART, value) is not None
 
 
 def format_identifier(collection_key: str, project_id: str, number: int) -> str:
@@ -22,7 +30,11 @@ def format_identifier(collection_key: str, project_id: str, number: int) -> str:
             f"Identifier number {number} exceeds {NUMBER_WIDTH}-digit maximum ({max_number}). "
             f"Project has exhausted its identifier space; scheme requires widening."
         )
-    return f"{collection_key}-{project_id}-{number:0{NUMBER_WIDTH}d}"
+    identifier = f"{collection_key}-{project_id}-{number:0{NUMBER_WIDTH}d}"
+    # Backstop for load_project_config's check: minting what can't be parsed re-mints it next run.
+    if parse_identifier(identifier) != (collection_key, project_id, number):
+        raise ValueError(f"Identifier {identifier!r} does not parse back to its parts")
+    return identifier
 
 
 def parse_identifier(identifier: str) -> tuple[str, str, int] | None:
