@@ -233,6 +233,16 @@ class Readiness(Enum):
     NOT_READY = "not_ready"
 
 
+class UploadVerdict(Enum):
+    """Validity crossed with readiness; NOT_READY beats INVALID (see
+    format_lifecycle_summary). Only READY rows are uploadable, and
+    classify_row() still decides which of those `upload` targets (not DONE)."""
+
+    READY = "ready"
+    INVALID = "invalid"
+    NOT_READY = "not_ready"
+
+
 @dataclass
 class RowValidation:
     row_number: int
@@ -254,6 +264,12 @@ class RowValidation:
         """Derived, never stored: `missing_fields` being non-empty IS what
         not-ready means, so a second stored field could only drift from it."""
         return Readiness.NOT_READY if self.missing_fields else Readiness.READY
+
+    @property
+    def verdict(self) -> UploadVerdict:
+        if self.readiness is Readiness.NOT_READY:
+            return UploadVerdict.NOT_READY
+        return UploadVerdict.READY if self.is_valid else UploadVerdict.INVALID
 
 
 def validate_rows(
@@ -548,74 +564,75 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
             "also carries sheet_structure_validation()'s row-1/shape entries)."
         )
 
-    counts: dict[tuple[RowState, str], int] = {
+    counts: dict[tuple[RowState, UploadVerdict], int] = {
         (state, bucket): 0
         for state in (RowState.UNASSIGNED, RowState.DONE, RowState.RESERVED)
-        for bucket in ("ready", "invalid", "not_ready")
+        for bucket in UploadVerdict
     }
 
     # The results themselves, not merely a tally: each not-ready line renders
     # its own missing-field detail from its own rows (see
     # format_missing_field_lines), so the bucket has to keep them.
-    buckets: dict[tuple[RowState, str], list[RowValidation]] = {key: [] for key in counts}
+    buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = {key: [] for key in counts}
     for row, result in zip(rows, row_results):
         state = classify_row(row)
-        if result.readiness is Readiness.NOT_READY:
-            bucket = "not_ready"  # precedence: counted once, here - never also "invalid"
-        elif result.is_valid:
-            bucket = "ready"
-        else:
-            bucket = "invalid"
+        bucket = result.verdict
         buckets[(state, bucket)].append(result)
         counts[(state, bucket)] += 1
 
     lines = [
-        f"{_pluralize(counts[(RowState.UNASSIGNED, 'ready')], 'row')} ready to upload "
+        f"{_pluralize(counts[(RowState.UNASSIGNED, UploadVerdict.READY)], 'row')} ready to upload "
         "(no identifier yet)"
     ]
-    if counts[(RowState.UNASSIGNED, "not_ready")]:
+    if counts[(RowState.UNASSIGNED, UploadVerdict.NOT_READY)]:
         lines.append(
-            f"{_pluralize(counts[(RowState.UNASSIGNED, 'not_ready')], 'row')} not yet "
+            f"{_pluralize(counts[(RowState.UNASSIGNED, UploadVerdict.NOT_READY)], 'row')} not yet "
             "assigned an identifier and not yet catalogued (missing required fields) - "
             "waiting on data entry, not blocked by an error"
         )
-        lines.extend(format_missing_field_lines(buckets[(RowState.UNASSIGNED, "not_ready")]))
-    if counts[(RowState.UNASSIGNED, "invalid")]:
+        lines.extend(
+            format_missing_field_lines(buckets[(RowState.UNASSIGNED, UploadVerdict.NOT_READY)])
+        )
+    if counts[(RowState.UNASSIGNED, UploadVerdict.INVALID)]:
         lines.append(
-            f"{_pluralize(counts[(RowState.UNASSIGNED, 'invalid')], 'row')} not yet "
+            f"{_pluralize(counts[(RowState.UNASSIGNED, UploadVerdict.INVALID)], 'row')} not yet "
             "assigned an identifier but failed validation - see the errors above; will "
             "not be uploaded until fixed"
         )
 
-    lines.append(f"{counts[(RowState.DONE, 'ready')]:,} already uploaded")
-    if counts[(RowState.DONE, "not_ready")]:
+    lines.append(f"{counts[(RowState.DONE, UploadVerdict.READY)]:,} already uploaded")
+    if counts[(RowState.DONE, UploadVerdict.NOT_READY)]:
         lines.append(
-            f"{_pluralize(counts[(RowState.DONE, 'not_ready')], 'row')} already uploaded "
-            "but missing required fields - a required column was cleared after upload; "
+            f"{_pluralize(counts[(RowState.DONE, UploadVerdict.NOT_READY)], 'row')} already "
+            "uploaded but missing required fields - a required column was cleared after upload; "
             "needs a human to look, not an automatic retry"
         )
-        lines.extend(format_missing_field_lines(buckets[(RowState.DONE, "not_ready")]))
-    if counts[(RowState.DONE, "invalid")]:
+        lines.extend(
+            format_missing_field_lines(buckets[(RowState.DONE, UploadVerdict.NOT_READY)])
+        )
+    if counts[(RowState.DONE, UploadVerdict.INVALID)]:
         lines.append(
-            f"{_pluralize(counts[(RowState.DONE, 'invalid')], 'row')} already uploaded but "
-            "now fail validation - see the errors above; this needs a human to look, not "
-            "an automatic retry"
+            f"{_pluralize(counts[(RowState.DONE, UploadVerdict.INVALID)], 'row')} already "
+            "uploaded but now fail validation - see the errors above; this needs a human to "
+            "look, not an automatic retry"
         )
 
     lines.append(
-        f"{counts[(RowState.RESERVED, 'ready')]:,} reserved but unconfirmed - will retry "
-        "under existing identifier"
+        f"{counts[(RowState.RESERVED, UploadVerdict.READY)]:,} reserved but unconfirmed - "
+        "will retry under existing identifier"
     )
-    if counts[(RowState.RESERVED, "not_ready")]:
+    if counts[(RowState.RESERVED, UploadVerdict.NOT_READY)]:
         lines.append(
-            f"{_pluralize(counts[(RowState.RESERVED, 'not_ready')], 'row')} reserved but "
-            "not yet catalogued (missing required fields) - waiting on data entry before "
+            f"{_pluralize(counts[(RowState.RESERVED, UploadVerdict.NOT_READY)], 'row')} reserved "
+            "but not yet catalogued (missing required fields) - waiting on data entry before "
             "it can retry"
         )
-        lines.extend(format_missing_field_lines(buckets[(RowState.RESERVED, "not_ready")]))
-    if counts[(RowState.RESERVED, "invalid")]:
+        lines.extend(
+            format_missing_field_lines(buckets[(RowState.RESERVED, UploadVerdict.NOT_READY)])
+        )
+    if counts[(RowState.RESERVED, UploadVerdict.INVALID)]:
         lines.append(
-            f"{_pluralize(counts[(RowState.RESERVED, 'invalid')], 'row')} reserved but "
+            f"{_pluralize(counts[(RowState.RESERVED, UploadVerdict.INVALID)], 'row')} reserved but "
             "invalid - see the errors above; will NOT retry automatically until fixed"
         )
 
@@ -2988,16 +3005,9 @@ def plan_upload_targets(
 
     pending: list[tuple[int, dict[str, str], RowState]] = []
     for offset, (row, result) in enumerate(zip(rows, row_results)):
-        # Scope is valid AND ready - readiness is load-bearing here, not a
-        # nicety. SHEET_REQUIRED_COLUMNS no longer requires `title` or `file`,
-        # so a row nobody has catalogued yet is now perfectly VALID; it is
-        # merely NOT_READY. Filtering on is_valid alone uploaded it under a
-        # permanent, unrenameable identifier with no title - and, because its
-        # `file` is blank, with files_dir itself as the file argument (see the
-        # guard at the top of upload_row). This is also what makes `upload`'s
-        # scope agree with what `validate`'s lifecycle summary calls "ready to
-        # upload"; the two commands must not define that phrase differently.
-        if not result.is_valid or result.readiness is Readiness.NOT_READY:
+        # Not is_valid alone: an uncatalogued row is valid but NOT_READY, and uploading it
+        # mints a permanent identifier with no title and a blank `file` (see upload_row).
+        if result.verdict is not UploadVerdict.READY:
             continue
         if scope is not None and offset + 2 not in scope:
             continue
@@ -3647,12 +3657,8 @@ def upload_from_sheet(args) -> int:
         return 1
     reported = in_batch_scope(row_results, scope)
 
-    blocked = [
-        result
-        for result in reported
-        if not result.is_valid and result.readiness is Readiness.READY
-    ]
-    not_ready = [result for result in reported if result.readiness is Readiness.NOT_READY]
+    blocked = [result for result in reported if result.verdict is UploadVerdict.INVALID]
+    not_ready = [result for result in reported if result.verdict is UploadVerdict.NOT_READY]
     not_ready_broken = [result for result in not_ready if not result.is_valid]
 
     if blocked:

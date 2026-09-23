@@ -161,10 +161,20 @@ field is missing (derived from each result's own `missing_fields`, never a
 hardcoded list), printed by `validate`. `upload` does not print this
 breakdown — see `DECISIONS.md` as linked above — and only a row that was
 actually in scope (ready, but failing validation) affects `upload`'s exit
-code; `plan_upload_targets` excludes not-ready rows from that scope entirely
-(a row's own docstring note explains why filtering on `is_valid` alone would
-have uploaded an uncatalogued row under a permanent identifier with no
-title).
+code.
+
+**One verdict, three readers.** `RowValidation.verdict` (`UploadVerdict.READY`/
+`INVALID`/`NOT_READY`) combines the two questions into one answer to "is
+this row uploadable": not-ready takes precedence over invalid. It does not
+say whether the row is already uploaded — `classify_row` still does.
+`validate`'s lifecycle summary buckets by it within each lifecycle state,
+`plan_upload_targets` targets `READY` rows that are not `DONE`, and
+`upload_from_sheet` itemizes `INVALID` and counts `NOT_READY` from it — none
+of them recompute the rule, so `upload` targets exactly the rows `validate`
+reports as "ready to upload" plus those "reserved but unconfirmed".
+Filtering on `is_valid` alone
+once uploaded an uncatalogued row under a permanent identifier with no title;
+that is the drift this closes.
 
 ## The reserve → upload → confirm protocol
 Per chunk, `SheetUploadRun.execute()` does four things in this order:
