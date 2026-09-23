@@ -820,5 +820,8 @@ python -m ruff check .
 python -m pyright ia_bulk.py test_ia_bulk.py
 ```
 
-Tests are pure-offline — the `internetarchive` calls are monkeypatched, so the
-suite never touches the network.
+Tests are pure-offline, and `conftest.py` enforces it. Any test that resolves or
+connects to a non-loopback host fails at teardown, naming the host, even when
+the code under test swallows the error. Tests read an empty `ia` config and no
+`IA_*` credentials, never the developer's own. The guard covers the test
+process only, so a subprocess a test starts is not guarded.
