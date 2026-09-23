@@ -1,12 +1,9 @@
 """Bulk validate/upload/sync-metadata CLI for Internet Archive, driven by a
-project's Google Sheet (read live) or, for offline/dry-run work, a CSV
-exported from it. See docs/ARCHITECTURE.md for the CSV schema and identifier
-scheme this script assumes, and docs/DECISIONS.md ("The Sheet is read live")
-for why both sources exist."""
+project's Google Sheet (read live). See docs/ARCHITECTURE.md for the
+identifier scheme this script assumes."""
 from __future__ import annotations
 
 import argparse
-import csv
 import functools
 import json
 import os
@@ -49,7 +46,6 @@ from project_config import (
     ConfigError,
     ProjectConfig,
     load_project_config,
-    unregistered_project_error,
 )
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
@@ -104,10 +100,6 @@ REQUIRED_UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
 # required-columns check, and removing it is a different (and wrong)
 # change from the one this constant's shrink makes.
 SHEET_REQUIRED_COLUMNS = ("mediatype",)
-# Columns this script reads by exact lowercase name. A case variant of one of
-# these (a "Date" column from the raw Sheet export, say) is silently treated as
-# unrelated pass-through metadata, so check_header rejects it.
-KNOWN_LOWERCASE_COLUMNS = frozenset(REQUIRED_UPLOAD_COLUMNS) | {"date"}
 CHUNK_SIZE = 500
 # Internet Archive's per-account daily item cap. CHUNK_SIZE covers the
 # 500-items-per-run half of the limit in `.claude/CLAUDE.md` ("IA batch
@@ -159,24 +151,6 @@ def chunk_rows(
         yield rows[start : start + chunk_size]
 
 
-@dataclass
-class CsvData:
-    """Header and rows travel together because validating one without the
-    other is what let a malformed header slip through: check_row_shape can
-    only see a row/header field-count mismatch, and check_header can only see
-    the header text."""
-
-    fieldnames: list[str]
-    rows: list[dict[str, str]]
-
-
-def read_csv(csv_path: str | Path) -> CsvData:
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-        return CsvData(fieldnames=list(reader.fieldnames or []), rows=rows)
-
-
 DEFAULT_REGISTRY = "projects_registry.json"
 
 
@@ -201,8 +175,8 @@ def check_identifier(
     renamed. A default here would let the next call site re-introduce
     exactly that, so every caller has to say which project it means.
 
-    column_name defaults to "identifier" (the CSV path, unchanged) and
-    names the column being checked in every message. The Sheet path passes
+    column_name names the column being checked in every message. The Sheet
+    path passes
     "ia_identifier" - on a Sheet that has BOTH its own `Identifier` column
     (donor metadata, untouched by this tool) and `ia_identifier` (the
     tool's minted one), a message that just says "identifier" leaves a
@@ -249,94 +223,6 @@ def check_identifier(
     return errors
 
 
-def refuse_unregistered_project(registry: dict, project_id: str) -> bool:
-    """True if the run must stop. The --csv paths never build a
-    ProjectConfig, so they never inherited load_project_config's
-    unknown-project guard - which cost nothing while --project went unread
-    there, and started costing the moment check_identifier began comparing
-    every row against it (issue #2). Without this, a mistyped --project
-    fails every single row with "belongs to project 'astoriaphotos', but
-    this run is --project astoriaphoto": true, useless, and repeated once
-    per row, with the flag that is actually wrong named only in passing.
-    """
-    message = unregistered_project_error(registry, project_id)
-    if message is None:
-        return False
-    print(message, file=sys.stderr)
-    return True
-
-
-def check_header(fieldnames: list[str] | None) -> list[str]:
-    """Header text becomes the IA metadata field name verbatim, so a sloppy
-    header ships sloppy field names across the whole batch - and metadata on
-    an uploaded item is permanent enough to be worth failing loudly over.
-
-    These are rejected rather than silently cleaned up: stripping or
-    lowercasing a header on the user's behalf would quietly change which
-    field a value lands in, which is the very failure this check exists to
-    catch."""
-    if not fieldnames:
-        return ["CSV has no header row"]
-
-    errors: list[str] = []
-
-    for fieldname in fieldnames:
-        if fieldname != fieldname.strip():
-            errors.append(
-                f"column '{fieldname}' has leading/trailing whitespace - it would upload "
-                "as a metadata field name with that whitespace in it"
-            )
-
-    seen: set[str] = set()
-    for fieldname in fieldnames:
-        if fieldname in seen:
-            errors.append(f"duplicate column '{fieldname}'")
-        seen.add(fieldname)
-
-    for fieldname in fieldnames:
-        canonical = fieldname.strip().lower()
-        if canonical in KNOWN_LOWERCASE_COLUMNS and fieldname != canonical:
-            errors.append(
-                f"column '{fieldname}' must be lowercase '{canonical}' - as spelled it is "
-                "passed through as an unrelated metadata field"
-            )
-
-    return errors
-
-
-def check_row_shape(row: dict) -> list[str]:
-    """A CSV row must have exactly as many fields as the header. csv.DictReader
-    tolerates both mismatches silently, and both corrupt an upload:
-
-    - Surplus fields land in a list under the None restkey, which later blows
-      up upload_row's metadata comprehension with "'list' object has no
-      attribute 'strip'".
-    - Missing fields become None, which means the header and the data disagree
-      about column positions - so every value past the gap is uploaded under
-      the wrong field name. A header cell containing an unquoted comma
-      produces exactly this.
-
-    Note that an empty cell is "" and is perfectly fine; only None means the
-    field was absent from the row."""
-    errors: list[str] = []
-
-    surplus = row.get(None)
-    if surplus:
-        errors.append(
-            f"row has more fields than the header ({len(surplus)} extra: {surplus!r}) - "
-            "a header cell probably contains an unquoted comma"
-        )
-
-    missing = [key for key, value in row.items() if key is not None and value is None]
-    if missing:
-        errors.append(
-            f"row has fewer fields than the header (missing: {', '.join(missing)}) - "
-            "every value after the gap is attributed to the wrong column"
-        )
-
-    return errors
-
-
 class Readiness(Enum):
     """Whether a human has filled in the fields a row needs before it can be
     uploaded. Deliberately NOT a member of RowState: RowState answers "has
@@ -376,7 +262,6 @@ def validate_rows(
     files_dir: str | Path,
     registry: dict,
     project_id: str,
-    skip_identifiers: frozenset[str] = frozenset(),
     required_columns: tuple[str, ...] = REQUIRED_UPLOAD_COLUMNS,
     check_file_exists: bool = True,
     identifier_column: str = "identifier",
@@ -386,27 +271,19 @@ def validate_rows(
     check_identifier and used nowhere else here - see that function for why
     it is required rather than defaulted (issue #2).
 
-    skip_identifiers lets a --resume-from run skip re-validating rows a
-    prior run already validated and uploaded successfully - the identifier
-    is still tracked for duplicate detection, just without redoing the
-    regex/registry/disk-stat checks.
+    required_columns defaults to REQUIRED_UPLOAD_COLUMNS, but the Sheet path
+    passes SHEET_REQUIRED_COLUMNS, which excludes 'identifier' - see that
+    constant's comment for why.
 
-    required_columns defaults to REQUIRED_UPLOAD_COLUMNS (the CSV path,
-    unchanged) but the Sheet path passes SHEET_REQUIRED_COLUMNS, which
-    excludes 'identifier' - see that constant's comment for why.
-
-    check_file_exists defaults to True (the CSV path, unchanged: a CSV row's
-    'file' is a real, already-resolvable path, so checking it on disk is
-    correct there). The Sheet path now also passes True (Phase 2 - see
+    check_file_exists defaults to True, and the Sheet path passes True (see
     SHEET_REQUIRED_COLUMNS' comment): by the time this runs, cmd_validate
     has already resolved each row's 'file' against disk via resolve_file(),
     so this check is a redundant safety net there rather than the primary
     signal, which is fine - it costs one cheap is_file() stat per row.
 
-    identifier_column defaults to "identifier" (the CSV path, unchanged:
-    that column is pre-assigned, permanent, and never generated by this
-    tool). The Sheet path passes "ia_identifier" instead - after Task 9 the
-    Sheet's own 'identifier' column holds the donor's original archival
+    identifier_column defaults to "identifier". The Sheet path passes
+    "ia_identifier" instead - after Task 9 the Sheet's own 'identifier'
+    column holds the donor's original archival
     reference (e.g. "CD 1 01 53 58 1 Central SS"), not a minted IA
     identifier, and running check_identifier's COLLECTIONKEY-PROJECTID-
     NUMBER regex against a donor reference fails every row for the wrong
@@ -414,9 +291,7 @@ def validate_rows(
     this fix. See docs/DECISIONS.md, "Tool-owned Sheet columns are all
     `ia_`-prefixed".
 
-    required_for_upload defaults to () (the CSV path, unchanged: a CSV's
-    'title' etc. are already covered by required_columns, and a CSV has no
-    ProjectConfig to source a second list from). The Sheet path passes
+    required_for_upload defaults to (). The Sheet path passes
     config.required_for_upload - a blank one of these is a READINESS fact
     (nobody has catalogued this row yet), not a validation error, which is
     the whole reason it is recorded on missing_fields rather than folded
@@ -428,12 +303,7 @@ def validate_rows(
         row_number = offset + 2  # header is row 1
         identifier = (row.get(identifier_column) or "").strip()
 
-        if identifier in skip_identifiers:
-            seen_identifiers.setdefault(identifier, row_number)
-            results.append(RowValidation(row_number=row_number, identifier=identifier))
-            continue
-
-        errors: list[str] = check_row_shape(row)
+        errors: list[str] = []
 
         for column in required_columns:
             if not (row.get(column) or "").strip():
@@ -474,40 +344,16 @@ def validate_rows(
     return results
 
 
-def validate_csv_rows(
-    rows: list[dict[str, str]],
-    files_dir: str | Path,
-    registry: dict,
-    project_id: str,
-    skip_identifiers: frozenset[str] = frozenset(),
-) -> list[RowValidation]:
-    """The CSV path's answer, named. `identifier`, `file`, `mediatype` and
-    `title` are all required: a CSV is a small file somebody prepared by hand
-    for one batch, its identifiers are pre-assigned and permanent, and a blank
-    one is a defect rather than a starting state."""
-    return validate_rows(
-        rows,
-        files_dir,
-        registry,
-        project_id,
-        skip_identifiers=skip_identifiers,
-        required_columns=REQUIRED_UPLOAD_COLUMNS,
-        check_file_exists=True,
-        identifier_column="identifier",
-    )
-
-
 def validate_sheet_rows(
     rows: list[dict[str, str]],
     files_dir: str | Path,
     registry: dict,
     project_id: str,
-    skip_identifiers: frozenset[str] = frozenset(),
     required_for_upload: tuple[str, ...] = (),
 ) -> list[RowValidation]:
-    """The Sheet path's answer, named. It differs from the CSV path's in
-    exactly three ways, all of which used to travel as loose parameters at
-    every call site:
+    """The Sheet path's answer, named. It differs from validate_rows'
+    defaults in exactly three ways, all of which used to travel as loose
+    parameters at every call site:
 
     - the tool's minted identifier lives in `ia_identifier`, never
       `identifier` (which on the real Sheet is the donor's own archival
@@ -523,7 +369,6 @@ def validate_sheet_rows(
         files_dir,
         registry,
         project_id,
-        skip_identifiers=skip_identifiers,
         required_columns=SHEET_REQUIRED_COLUMNS,
         check_file_exists=True,
         identifier_column=IA_IDENTIFIER_COLUMN,
@@ -538,8 +383,7 @@ def sheet_structure_validation(column_map: ColumnMap, grid: list[list[str]]) -> 
     """check_column_map catches two headers that normalize to the same IA
     field name - which would silently overwrite one column's data across
     every row - and headers that normalize to an empty field name. Those are
-    genuinely header-level problems, so they're filed under row 1, mirroring
-    header_validation() for the CSV path.
+    genuinely header-level problems, so they're filed under row 1.
 
     check_grid_shape catches a data row longer than the header, whose excess
     cells otherwise vanish without a trace - but that is a problem with a
@@ -937,8 +781,8 @@ def utc_timestamp() -> str:
     outlive the run: local time repeats an hour during the DST fall-back
     transition, so a run spanning it stamps a later chunk with an earlier
     wall-clock time than an earlier one. `ia_uploaded` is the permanent record
-    of when an archival item was published, and the log is what --resume-from
-    and any later audit read - both were naive local time, with no offset to
+    of when an archival item was published, and the log is what any later
+    audit reads - both were naive local time, with no offset to
     reconstruct the real instant from afterwards.
 
     The trailing Z is not decoration: without it the string is ambiguous, and
@@ -1058,118 +902,15 @@ def log_result(
         f.write(json.dumps(entry) + "\n")
 
 
-def _read_log_results(log_path: str | Path, live: bool) -> list[dict]:
-    """Every row-result record in a prior run's log, for the SAME mode (test
-    vs --live) as this run. Damaged lines are skipped and reported.
-
-    Shared by load_prior_successes() and load_uploaded_as(), which ask two
-    different questions of the same records. The mode filter is load-bearing
-    for both: a test-mode entry only ever confirms that the zztest-prefixed
-    item landed in test_collection, never the real one, so it must not answer
-    for a --live run (or vice versa). Logs from before the "live" field
-    existed have no mode recorded and are treated conservatively as matching
-    neither.
-
-    A line that will not parse is SKIPPED, not raised on. log_result appends
-    one line per row with no atomic write, so a run killed mid-write - Ctrl-C,
-    a full disk, a closed laptop - leaves a truncated final line. Raising
-    there made the log permanently unusable, disabling the only recovery
-    mechanism the CSV path has using the exact crash it exists to recover
-    from. Every intact line before the damaged one is still a real record and
-    is still honored.
-
-    Damaged lines are counted and reported on stderr rather than skipped in
-    silence: a lost line is a row this run no longer knows anything about, and
-    the operator should know why the run does not match the last one."""
-    results: list[dict] = []
-    damaged = 0
-    with open(log_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                # Any record naming its own type is a run-level record, not
-                # a row - the header and the closing summary today, whatever
-                # else the log grows later. Skipped by the presence of
-                # "record" rather than by matching each type's name, so a new
-                # record type cannot arrive here as damage; and skipped
-                # explicitly rather than by merely lacking a "status" or
-                # "identifier" key, so those schemas stay free to grow a
-                # field of that name without silently turning this into a bug.
-                if "record" in entry:
-                    continue
-                if entry.get("live") != live:
-                    continue
-                # A record naming no identifier cannot answer either caller's
-                # question, and is damage of the same kind as a line that will
-                # not parse.
-                if not entry.get("identifier"):
-                    damaged += 1
-                    continue
-                results.append(entry)
-            except (json.JSONDecodeError, AttributeError):
-                # AttributeError covers a line that parses as valid JSON of the
-                # wrong shape entirely - a bare list or string has no .get().
-                damaged += 1
-
-    if damaged:
-        print(
-            f"{_pluralize(damaged, 'line')} in {log_path} could not be read and were skipped - "
-            "the log is damaged, most likely truncated by a run that was killed mid-write.",
-            file=sys.stderr,
-        )
-    return results
-
-
-def load_prior_successes(log_path: str | Path, live: bool) -> set[str]:
-    """Identifiers logged as success/unchanged in the same mode as this run,
-    for --resume-from to skip. See _read_log_results() for the mode filter and
-    the damaged-line handling."""
-    return {
-        entry["identifier"]
-        for entry in _read_log_results(log_path, live)
-        if entry.get("status") in ("success", "unchanged")
-    }
-
-
-def load_uploaded_as(log_path: str | Path, live: bool) -> dict[str, str]:
-    """Real identifier -> the identifier that run actually sent to Internet
-    Archive.
-
-    In test mode the two differ: effective_identifier() prepends
-    `zztest-<that run's stamp>-`, and the stamp is unique per invocation (see
-    run_stamp()). Any later command that re-derives the target with its OWN
-    stamp therefore names an item that has never existed - which is precisely
-    what made test-mode sync-metadata impossible before this existed. The log's
-    `uploaded_as` field is the only record of which stamped item a row's files
-    actually went to, so it is read rather than recomputed.
-
-    Entries with no `uploaded_as` are skipped rather than counted as damage:
-    upload_from_csv writes a "carried over from resumed log" success record per
-    skipped identifier, and those legitimately name no target.
-
-    Later entries win, which is what a resumed run needs: a row re-uploaded
-    under a second stamp is on Internet Archive under the LATER one, and that
-    is the item to correct."""
-    return {
-        entry["identifier"]: entry["uploaded_as"]
-        for entry in _read_log_results(log_path, live)
-        if entry.get("status") in ("success", "unchanged") and entry.get("uploaded_as")
-    }
-
-
 def run_stamp() -> str:
     """A lowercase, IA-identifier-safe stamp unique to this invocation of the
     script - e.g. "20260819t144907". Computed ONCE per run and threaded
     through every effective_identifier() call that run makes, never
     recomputed per row: a run's test items must group together under one
-    stamp, not scatter across however many rows it processed. (A *resumed*
-    run is a separate invocation with its own stamp, so its items land under
-    a second stamp rather than the original run's - that's correct, not a
-    bug: --resume-from still recognizes them as done because it matches on
-    the real `identifier`, never on the stamped `uploaded_as`.)
+    stamp, not scatter across however many rows it processed. (A re-run is
+    a separate invocation with its own stamp, so its items land under a
+    second stamp - correct, not a bug: done-ness is tracked by the Sheet's
+    `ia_uploaded` column, never by the stamped identifier.)
 
     Uses UTC (time.gmtime), not local time: local time repeats an hour's
     worth of timestamps during the DST fall-back transition, which would
@@ -1191,7 +932,7 @@ def effective_identifier(identifier: str, live: bool, stamp: str) -> str:
     caller of this function lives in this same file.
 
     Live is untouched: a live identifier is the permanent, public address of
-    an archival item and must stay a pure function of the Sheet/CSV, so the
+    an archival item and must stay a pure function of the Sheet, so the
     live branch deliberately never looks at `stamp`. A stamp reaching a live
     identifier would be the worst outcome this function could produce."""
     if live:
@@ -1583,7 +1324,6 @@ class MetadataUnchanged(Exception):
 
 def update_metadata_row(row: dict, target_identifier: str) -> None:
     """Blank cells are dropped entirely, not sent as empty strings - a
-    sync-metadata CSV only needs to list the columns that changed, so a
     blank cell must mean "leave this field alone", not "clear it". To
     actually delete an existing field on the IA item, put the literal
     value REMOVE_TAG in that cell; the internetarchive library (and the
@@ -1624,43 +1364,6 @@ def update_metadata_row(row: dict, target_identifier: str) -> None:
             )
 
     retry_ia_call(send, f"metadata update of '{target_identifier}'")
-
-
-def validate_identifiers(
-    rows: list[dict[str, str]],
-    registry: dict,
-    project_id: str,
-    skip_identifiers: frozenset[str] = frozenset(),
-) -> list[RowValidation]:
-    """project_id is the run's own --project - see check_identifier for why
-    it is required. It matters more here than anywhere else: sync-metadata
-    writes metadata to whatever identifier the row names, so a wrong-project
-    identifier does not merely misfile this project's item, it overwrites
-    another project's."""
-    seen_identifiers: dict[str, int] = {}
-    results: list[RowValidation] = []
-
-    for offset, row in enumerate(rows):
-        row_number = offset + 2
-        identifier = (row.get("identifier") or "").strip()
-
-        if identifier in skip_identifiers:
-            seen_identifiers.setdefault(identifier, row_number)
-            results.append(RowValidation(row_number=row_number, identifier=identifier))
-            continue
-
-        errors = check_identifier(identifier, row_number, registry, project_id, seen_identifiers)
-        results.append(RowValidation(row_number=row_number, identifier=identifier, errors=errors))
-
-    return results
-
-
-def header_validation(fieldnames: list[str]) -> list[RowValidation]:
-    """Header problems are reported as row 1 - which is literally what the
-    header row is - so they flow through the same report and exit-code path
-    as row problems instead of needing a parallel channel."""
-    errors = check_header(fieldnames)
-    return [RowValidation(row_number=1, identifier="", errors=errors)] if errors else []
 
 
 def build_sheet_client(config: ProjectConfig, live: bool) -> SheetClient:
@@ -2153,17 +1856,6 @@ def check_required_for_upload(config: ProjectConfig, column_map: ColumnMap) -> l
 MAX_LISTED_BATCH_VALUES = 20
 
 
-# --batch is a Sheet-and-registry concept: the column it matches against is
-# named in the registry, and a CSV is a small hand-prepared file whose rows
-# are already the ones the operator chose. Silently ignoring an explicit flag
-# on the wrong path is its own trap - the same reasoning --limit's refusal is
-# written under.
-BATCH_IS_SHEET_ONLY = (
-    "--batch scopes a run to a value of the column named by the registry's batch_column, "
-    "so it applies to the Sheet path only. Drop --csv to run against the Sheet."
-)
-
-
 class BatchScopeError(Exception):
     """--batch cannot be honored as typed.
 
@@ -2375,9 +2067,9 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
     banner and starting their own work.
 
     Deliberately does NOT print the banner or run the per-command flag
-    checks. Those happen first and differ per command - `upload` rejects
-    --collection and validates --limit, `sync-metadata` rejects --from-log -
-    and moving the placeholder check ahead of them would change which
+    checks. Those happen first and differ per command - `upload` validates
+    --limit, for one - and moving the placeholder check ahead of them would
+    change which
     complaint an operator sees when both are wrong.
 
     `command` appears in the placeholder message only ("before running
@@ -2759,25 +2451,6 @@ def cmd_setup(args) -> int:
 
 
 def cmd_validate(args) -> int:
-    # `is not None`, not truthiness: --csv "" must be an explicit (if
-    # useless) request to read a CSV named "", and fail as such, rather than
-    # silently falling through to the Sheet path because an empty string is
-    # falsy.
-    csv_path = getattr(args, "csv", None)
-    if csv_path is not None:
-        if getattr(args, "batch", None) is not None:
-            print(BATCH_IS_SHEET_ONLY, file=sys.stderr)
-            return 1
-        data = read_csv(csv_path)
-        registry = load_registry(args.registry)
-        if refuse_unregistered_project(registry, args.project):
-            return 1
-        results = header_validation(data.fieldnames) + validate_csv_rows(
-            data.rows, args.files_dir, registry, args.project
-        )
-        print(format_report(results))
-        return 0 if all(r.is_valid for r in results) else 1
-
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
     live = bool(args.live)
@@ -2839,73 +2512,6 @@ def cmd_validate(args) -> int:
         print("  (none)")
 
     return 0 if all(r.is_valid for r in results) else 1
-
-
-def run_rows(
-    rows: list[dict],
-    log_path: str | Path,
-    live: bool,
-    stamp: str,
-    action: str,
-    process_row,
-    describe,
-    file_value_for,
-    targets: dict[str, str] | None = None,
-) -> PushOutcome:
-    """Shared progress/log-and-count loop for cmd_upload and
-    cmd_sync_metadata - they differ only in how a row is processed, how its
-    progress line reads, and what (if anything) goes in the log's file
-    field. process_row(row, target_identifier) may raise MetadataUnchanged
-    to count as "unchanged" rather than "failure".
-
-    Deliberately a flat loop. This used to iterate chunk_rows(rows) and then
-    the rows within each chunk, which was exactly equivalent - nothing
-    happened at a chunk boundary, no pause, no batched write - while implying
-    a batching guarantee this path does not have. SheetUploadRun.execute()
-    chunks for a real reason (a reserve and a confirm write per chunk, and a
-    re-read of the Sheet between them); there is no equivalent here, which is
-    why --chunk-size is rejected on the --csv path rather than honored.
-
-    `stamp` is computed once by the caller (run_stamp(), called once per
-    command invocation) and passed in rather than computed here, so every row
-    this run touches shares one stamp. See run_stamp()'s docstring for why
-    that matters.
-
-    `targets` maps a real identifier to the one to send, for a caller that
-    must NOT re-derive it - sync-metadata corrects items an earlier run
-    created, and in test mode those carry that run's stamp, not this one's
-    (see load_uploaded_as()). When it is passed, every row is guaranteed to
-    be in it: cmd_sync_metadata rejects the whole file up front otherwise,
-    rather than letting a miss fall back to a recomputed target that names
-    an item which has never existed."""
-    total = len(rows)
-    succeeded = 0
-    unchanged = 0
-    failures: list[RowFailure] = []
-    position = 0
-    for row in rows:
-        position += 1
-        identifier = row["identifier"].strip()
-        target_identifier = (
-            targets[identifier] if targets is not None
-            else effective_identifier(identifier, live, stamp)
-        )
-        file_value = file_value_for(row)
-        print(f"[{position}/{total}] {action} {describe(row, target_identifier)}")
-        try:
-            process_row(row, target_identifier)
-            succeeded += 1
-            log_result(log_path, identifier, file_value, "success", live, uploaded_as=target_identifier)
-        except MetadataUnchanged:
-            unchanged += 1
-            log_result(log_path, identifier, file_value, "unchanged", live, uploaded_as=target_identifier)
-        except Exception as exc:
-            failures.append(RowFailure(identifier=identifier, error=str(exc)))
-            print(f"    - {format_row_error(exc)}")
-            log_result(
-                log_path, identifier, file_value, "failure", live, error=str(exc), uploaded_as=target_identifier
-            )
-    return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
 
 
 class MissingWriteBackColumns(Exception):
@@ -3289,9 +2895,8 @@ def identifier_from_url(url: str) -> str | None:
     one of this tool's own URLs.
 
     `ia_url` is what upload's confirm write recorded, so in test mode it
-    already carries THAT run's stamp. This is why the Sheet path needs no
-    equivalent of the --csv path's --from-log: the Sheet is its own record of
-    what landed where. Returns None rather than guessing at an unrecognised
+    already carries THAT run's stamp, so the Sheet is its own record of what
+    landed where - no upload log is read back. Returns None rather than guessing at an unrecognised
     cell - a human having pasted something is far likelier than the URL prefix
     having changed."""
     url = url.strip()
@@ -3910,134 +3515,7 @@ def print_dry_run(
 
 
 def cmd_upload(args) -> int:
-    # `is not None`, not truthiness, and matching cmd_validate: --csv "" must
-    # be an explicit (if useless) request to read a CSV named "", and fail as
-    # such, rather than silently falling through to the Sheet path because an
-    # empty string is falsy.
-    csv_path = getattr(args, "csv", None)
-    if csv_path is not None:
-        return upload_from_csv(args, csv_path)
     return upload_from_sheet(args)
-
-
-def upload_from_csv(args, csv_path: str) -> int:
-    """Unchanged in behavior: a CSV is small and hand-prepared, so any failing
-    row means the file is wrong and nothing is uploaded. See docs/DECISIONS.md,
-    "On the Sheet path, `upload` uploads the valid rows and reports the rest"
-    for why the Sheet path deliberately does the opposite."""
-    if getattr(args, "write_identifier", False) or getattr(args, "dry_run", False):
-        print(
-            "--write-identifier and --dry-run describe what happens to the project's Sheet, so "
-            "they apply to the Sheet path only. Drop --csv to run against the Sheet.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Task 12: --limit and --chunk-size describe SheetUploadRun's own
-    # reserve/upload/confirm batching and quota-stopping behavior, which the
-    # CSV path (a small, hand-prepared file uploaded via run_rows - see this
-    # function's own docstring) does not have. Silently ignoring an explicit
-    # flag on the wrong path is its own trap (see --collection's old "lcps"
-    # default, above), so this is checked the same way --write-identifier and
-    # --dry-run are just above rather than left to do nothing. Only an
-    # explicitly-changed --chunk-size trips this: the default (unset, or
-    # equal to CHUNK_SIZE) is indistinguishable from "the flag was never
-    # passed" and must not block an ordinary --csv run.
-    limit = getattr(args, "limit", None)
-    chunk_size = getattr(args, "chunk_size", None)
-    if limit is not None or (chunk_size is not None and chunk_size != CHUNK_SIZE):
-        print(
-            "--limit and --chunk-size describe the Sheet path's batching and quota-stopping "
-            "behavior, so they apply to the Sheet path only. Drop --csv to run against the "
-            "Sheet.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if getattr(args, "batch", None) is not None:
-        print(BATCH_IS_SHEET_ONLY, file=sys.stderr)
-        return 1
-
-    files_dir = getattr(args, "files_dir", None) or "."
-    collection = TEST_COLLECTION
-    if args.live:
-        collection = getattr(args, "collection", None)
-        if not collection:
-            # The old "lcps" default was not a real Internet Archive
-            # collection: a --live run pushed real files at a collection that
-            # does not exist and reported success. Guessing is worse than
-            # refusing.
-            print(
-                "--live needs an explicit --collection on the --csv path; there is no default "
-                "any more. Drop --csv to take the collection from the project's registry entry "
-                "instead.",
-                file=sys.stderr,
-            )
-            return 1
-
-    data = read_csv(csv_path)
-    rows = data.rows
-    registry = load_registry(args.registry)
-    if refuse_unregistered_project(registry, args.project):
-        return 1
-
-    skip_identifiers: set[str] = set()
-    if args.resume_from:
-        skip_identifiers = load_prior_successes(args.resume_from, args.live)
-
-    to_upload = [row for row in rows if (row.get("identifier") or "").strip() not in skip_identifiers]
-
-    validation_results = header_validation(data.fieldnames) + validate_csv_rows(
-        rows, files_dir, registry, args.project, frozenset(skip_identifiers)
-    )
-    if not all(r.is_valid for r in validation_results):
-        print(format_report(validation_results))
-        print(
-            "validation failed; run 'validate' and fix the errors above before uploading",
-            file=sys.stderr,
-        )
-        return 1
-
-    # The CSV path has no --limit to trim with (it is rejected above), so the
-    # fix here is to split the file - but the cap is Internet Archive's and
-    # applies to this path just as much, and relying on the operator to
-    # remember it is what left it unenforced. Counted after --resume-from
-    # filtering: rows a prior run already uploaded do not spend today's quota.
-    if len(to_upload) > DAILY_ITEM_CAP and not getattr(args, "allow_over_daily_cap", False):
-        print(
-            f"this CSV would upload {len(to_upload)} items, over Internet Archive's "
-            f"{DAILY_ITEM_CAP}/day cap for the account. Split it into files of "
-            f"{DAILY_ITEM_CAP} rows or fewer and run them on separate days. Pass "
-            "--allow-over-daily-cap to override if you know this account's cap has been "
-            "raised.",
-            file=sys.stderr,
-        )
-        return 1
-
-    log_path = open_log(args.log_dir, "upload")
-    for identifier in skip_identifiers:
-        log_result(log_path, identifier, "", "success", args.live, error="carried over from resumed log")
-
-    outcome = run_rows(
-        to_upload,
-        log_path,
-        args.live,
-        run_stamp(),
-        action="uploading",
-        process_row=lambda row, target: upload_row(row, target, collection, files_dir),
-        describe=lambda row, target: f"{target} ({row['file'].strip()})",
-        file_value_for=lambda row: row["file"].strip(),
-    )
-
-    # The same summary object the Sheet path builds, from this path's own
-    # PushOutcome. No log tab: there is no Sheet on this path to write one
-    # into, and the record is what an unattended run is read from anyway.
-    summary = UploadSummary(succeeded=outcome.succeeded, failures=outcome.failures)
-    for line in upload_summary_lines(summary):
-        print(line)
-    try_log_run_summary(log_path, summary, args.live)  # no Sheet here, so no tab
-    print(f"log written to {log_path}")
-    return 1 if summary.failed else 0
 
 
 def upload_from_sheet(args) -> int:
@@ -4062,31 +3540,6 @@ def upload_from_sheet(args) -> int:
             "identifiers there"
         )
     print()
-
-    for flag, value in (
-        ("--collection", getattr(args, "collection", None)),
-        ("--files-dir", getattr(args, "files_dir", None)),
-    ):
-        # Silently ignoring an explicit flag is its own trap, and this one used
-        # to be the dangerous kind: --collection defaulting to "lcps" would
-        # have sent real photographs to a collection that does not exist.
-        if value:
-            print(
-                f"{flag} is a --csv-path override; on the Sheet path this comes from project "
-                f"'{config.project_id}' in {args.registry}. Remove {flag}, or change the "
-                "registry.",
-                file=sys.stderr,
-            )
-            return 1
-
-    if getattr(args, "resume_from", None):
-        print(
-            "--resume-from is a --csv-path flag. On the Sheet path the 'ia_uploaded' column is "
-            "the record of what is already done, so a rerun picks up where the last one stopped "
-            "by itself.",
-            file=sys.stderr,
-        )
-        return 1
 
     # Task 12: read and validate --limit/--chunk-size as early as possible -
     # before any Sheet I/O, field-receipt printing, or validation work - so a

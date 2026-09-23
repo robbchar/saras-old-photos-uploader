@@ -4,9 +4,7 @@ A small Python CLI for validating, uploading, and syncing metadata for
 Internet Archive items in bulk, reading a project's Google Sheet directly
 and live over the Sheets API. Built for the Lower Columbia Preservation
 Society's (LCPS) Astoria historical photo archive, but kept generic to "a
-project" so a second LCPS project can reuse the same pipeline. A
-hand-prepared CSV export remains a deliberate offline/dry-run fallback for
-`validate` and `upload` — see "Offline `--csv` path" below.
+project" so a second LCPS project can reuse the same pipeline.
 
 ## Docs
 
@@ -14,13 +12,10 @@ hand-prepared CSV export remains a deliberate offline/dry-run fallback for
   pre-live checklist, resuming, batch limits. **Start here to run something.**
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — provisioning and upgrading the
   Mac that runs this: Python, credentials, the hourly sync agent, `./install.sh`.
-- [`docs/CSV-PREPARATION.md`](docs/CSV-PREPARATION.md) — the offline `--csv`
-  path only: turning a raw Sheet export into the required schema, and the
-  traps that don't fail loudly.
 - [`docs/KNOWN-ISSUES.md`](docs/KNOWN-ISSUES.md) — verified defects and gaps,
   with reproductions.
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full design: CSV schema,
-  identifier scheme, chunking, logging/resume, safety rail.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — full design: Sheet column
+  mapping, identifier scheme, chunking, logging, safety rail.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — why it's built this way, including
   designs that were tried and reversed.
 
@@ -113,13 +108,11 @@ commands also need the Google service account key saved at
 
 ## Commands
 
-### `validate` — check a project's Sheet, or an offline CSV, no writes
+### `validate` — check a project's Sheet, no writes
 
 `--project` is required (it looks up the project's block in
-`projects_registry.json`). By default `validate` reads the project's Sheet
-live over the Google Sheets API (its test Sheet, unless `--live` is passed);
-pass `--csv` to validate an offline CSV export instead — the CSV path is
-unchanged from before this integration and still needs `--files-dir`.
+`projects_registry.json`). `validate` reads the project's Sheet live over the
+Google Sheets API (its test Sheet, unless `--live` is passed).
 
 ```bash
 # read the project's Sheet
@@ -127,15 +120,11 @@ python ia_bulk.py validate --project sarasoldphotos
 
 # report on one batch only, the same scope `upload --batch` would run
 python ia_bulk.py validate --project sarasoldphotos --batch "Logging"
-
-# validate an offline CSV instead
-python ia_bulk.py validate --project sarasoldphotos --csv items.csv --files-dir ./photos
 ```
 
 `--batch` narrows the report to the rows whose registry-configured
 `batch_column` holds that value, through the same code `upload --batch` uses —
-so the preview is the run. Sheet path only. See `upload` below for the flag in
-full.
+so the preview is the run. See `upload` below for the flag in full.
 
 For the Google Cloud setup this requires (the service account, its key file,
 and sharing the Sheet with it) see
@@ -144,7 +133,7 @@ and sharing the Sheet with it) see
 the reserve/upload/confirm protocol and registry fields in full see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and "Project registry" above.
 
-Sheet path: checks the header for colliding or empty field names and any data
+It checks the header for colliding or empty field names and any data
 row longer than the header, injects `mediatype` from the registry, resolves
 each row's file against `files_dir` using `file_template` (three passes: an
 exact filename match, then a case-insensitive match against the full name, then
@@ -156,36 +145,23 @@ summary (rows ready to upload / already uploaded / reserved but unconfirmed),
 and advisory suggestions for renaming a column to a standard IA field name.
 Every column the tool itself writes is `ia_`-prefixed (`ia_identifier`,
 `ia_identifier_bib`, `ia_uploaded`, `ia_url`); a blank `ia_identifier` is
-normal for a new row, not an error — it's assigned by `upload` later. The
-Sheet's own `identifier` column (if it has one) is ordinary donor metadata,
-untouched by this tool.
+normal for a new row, not an error — it's assigned by `upload` later. A set
+`ia_identifier` must be unique in the Sheet and match the
+`COLLECTIONKEY-PROJECTID-NUMBER` scheme (lowercase, 5-digit zero-padded
+NUMBER), with the prefix registered in `projects_registry.json` **and its
+`PROJECTID` equal to the run's own `--project`** — another registered
+project's identifier is refused, not accepted (issue #2). A `--project` that
+isn't in the registry stops the run before any row is reported. The Sheet's
+own `identifier` column (if it has one) is ordinary donor metadata, untouched
+by this tool. `date` is optional: `upload` fills a blank `date` with `[n.d.]`
+rather than omitting it.
 
-CSV path: checks the header once —
-- no column with leading/trailing whitespace, and no duplicate columns —
-  header text becomes the IA metadata field name verbatim
-- no case variant of a column the script reads by name (`identifier`, `file`,
-  `mediatype`, `title`, `date`) — a `Date` column is silently treated as
-  unrelated pass-through metadata while `date` stays empty
-
-Then, per row:
-- the row has exactly as many fields as the header — a mismatch means the two
-  disagree about column positions, so values upload under the wrong field names
-- `file` exists on disk (resolved against `--files-dir`)
-- `identifier` is unique in the CSV and matches the
-  `COLLECTIONKEY-PROJECTID-NUMBER` scheme (lowercase, 5-digit zero-padded
-  NUMBER), with the prefix registered in `projects_registry.json` **and its
-  `PROJECTID` equal to the run's own `--project`** — another registered
-  project's identifier is refused, not accepted (issue #2). A `--project`
-  that isn't in the registry stops the run before any row is reported.
-- `mediatype`, `title` are present and non-empty; `date` is optional —
-  `upload` fills a blank `date` with `[n.d.]` rather than omitting it
-
-Prints a pass/fail report per row (header problems are reported as row 1) and
-exits non-zero if anything fails. Always run this before `upload`.
+Header problems are reported as row 1. `validate` exits non-zero if anything
+fails. Always run it before `upload`.
 
 ### `upload` — mint identifiers, upload, record the result
 
-Reads the project's Sheet by default; `--csv` switches to the offline path.
+Reads the project's Sheet live.
 
 ```bash
 # rehearse against the test Sheet: uploads as zztest-…, writes nothing back
@@ -199,9 +175,6 @@ python ia_bulk.py upload --project sarasoldphotos --dry-run
 
 # upload one theme only, 100 of them
 python ia_bulk.py upload --project sarasoldphotos --batch "Logging" --limit 100
-
-# upload from an offline CSV instead
-python ia_bulk.py upload --csv items.csv --project sarasoldphotos --files-dir ./photos
 ```
 
 `--batch` scopes the run to the rows whose `batch_column` (from the registry)
@@ -211,7 +184,7 @@ applied before anything is counted, so `--limit` means "this many **of the
 batch**", and the not-yet-catalogued count covers the batch alone. A value no
 row carries is refused with the values actually present listed, rather than
 run as an empty upload — `validate --batch "…"` previews the same scope
-through the same code. Sheet path only.
+through the same code.
 
 | Mode | Reads | Uploads as | Writes back |
 |---|---|---|---|
@@ -220,7 +193,7 @@ through the same code. Sheet path only.
 | `--live` | real Sheet | real identifier → registry's `ia_collection` | real Sheet, always |
 | `--dry-run` | either | nothing | nothing — prints the intended writes |
 
-Per chunk of 500 rows the Sheet path does four things **in this order**:
+Per chunk of 500 rows `upload` does four things **in this order**:
 
 1. **reserve** — one batch write putting the minted `ia_identifier` in the Sheet
 2. **upload** — row by row, to Internet Archive, under that identifier
@@ -284,10 +257,9 @@ Sheet while a run is in progress.**
 **A failing row is skipped, not fatal.** One unresolvable file in row 9,000
 does not block the other 9,999; the failures are listed with their errors, the
 valid rows upload, and the command exits non-zero so a partial run is never
-mistaken for a clean one. The `--csv` path keeps the opposite behavior — it
-refuses to upload anything if any row fails.
+mistaken for a clean one.
 
-**A rate limit stops the run, not just one row (Sheet path only).** If an
+**A rate limit stops the run, not just one row.** If an
 upload fails with what looks like Internet Archive's rate limit, the run
 stops rather than grinding through the rest of the batch as unexplained
 failures — everything already uploaded that run, in this chunk or an earlier
@@ -296,7 +268,7 @@ one, is still confirmed in the Sheet first. This detector is best-effort: no
 captured, and it may not fire on one — see `docs/DECISIONS.md`, "Still open".
 `--limit` (below) is the operator-controlled fallback either way.
 
-**`--limit` and `--chunk-size` (Sheet path only).**
+**`--limit` and `--chunk-size`.**
 
 ```bash
 # upload at most 100 items this run, in the default batches of 500
@@ -313,22 +285,20 @@ scanned. On a Sheet with 2,900 uncatalogued rows and 150 ready ones,
 read. `--chunk-size` overrides the reserve/upload/confirm batch size
 (default 500, Internet Archive's per-run cap) for the rows `--limit` leaves;
 the two combine literally, as shown above. Both are recorded in the
-`run_header` record every Sheet-path log starts with (see
-`docs/ARCHITECTURE.md`) and rejected on `--csv`, the same way
-`--write-identifier`/`--dry-run` are rejected on the Sheet path.
+`run_header` record every upload log starts with (see
+`docs/ARCHITECTURE.md`).
 
 **The 5,000/day cap is enforced.** Internet Archive allows 5,000 items per
 account per day. A run planning more than that is refused before anything is
-uploaded, naming the fix — `--limit 5000` on the Sheet path, splitting the
-file on `--csv`. It refuses rather than silently capping, because a run that
+uploaded, naming the fix: `--limit 5000`. It refuses rather than silently capping, because a run that
 quietly stopped short would read as a complete one. `--allow-over-daily-cap`
 overrides it, and is only correct if you know IA has raised this account's
 cap. The refusal applies in test mode too: a rehearsal uploads through the
 same account and spends the same quota.
 
-Other behavior, both paths:
+Other behavior:
 
-- The Sheet path processes rows in chunks of 500 by default (Internet
+- Processes rows in chunks of 500 by default (Internet
   Archive's per-run batch limit), overridable via `--chunk-size`
 - Uploads each row via the `internetarchive` Python library (not the `ia`
   CLI), so per-row success/failure is captured directly
@@ -340,14 +310,11 @@ Other behavior, both paths:
 - Writes a timestamped JSONL log to `logs/upload-<timestamp>.jsonl`, one
   line per row: `{identifier, file, status, error, uploaded_as, live, timestamp}`.
   Timestamps are ISO-8601 UTC with an explicit `Z`, as is the `ia_uploaded`
-  cell written back to the Sheet
-- `--collection` and `--files-dir` are `--csv`-path overrides only; on the
-  Sheet path they come from the project's registry entry, and passing them
-  is an error rather than a silently ignored flag
-- `--resume-from <log>` (`--csv` only) skips identifiers already marked
-  `"success"` or `"unchanged"` **in the same mode** (test vs. `--live`) as
-  this run, and still writes a complete log of its own. The Sheet path needs
-  no such flag: `ia_uploaded` is already the record of what is done
+  cell written back to the Sheet. The log is an audit record; the tool never
+  reads it back
+- The collection and the files directory come from the project's registry
+  entry, never from a flag
+- A rerun resumes by itself: `ia_uploaded` is the record of what is done
 
 ### `sync-metadata` — update metadata on already-uploaded items
 
@@ -407,34 +374,9 @@ same sentinel the official `ia` CLI's `--modify field:REMOVE_TAG` uses).
 command refuses to send a live correction to a `zztest-` item, or a rehearsal
 correction to a real one.
 
-#### The `--csv` fallback
-
-```bash
-python ia_bulk.py sync-metadata --csv updates.csv --project sarasoldphotos --live
-python ia_bulk.py sync-metadata --csv updates.csv --project sarasoldphotos --from-log logs/upload-20260823T161331Z.jsonl
-```
-
-Offline only, and a hand-prepared CSV rather than the Sheet. Needs an
-`identifier` column plus whichever columns changed.
-
-**`--from-log` is required on this path in test mode.** A test item is named
-`zztest-<stamp>-<identifier>`, and the stamp is unique to the run that
-created it, so the CSV alone cannot say which items to correct — deriving
-the target from this run's stamp would name an item that has never existed.
-The upload log's `uploaded_as` field is the only record of that mapping, so
-`sync-metadata` reads it rather than recomputing. A row the log does not
-record as uploaded is an error, never a silent fall back. Live identifiers
-are unstamped, so the flag is optional with `--live`.
-
-It is distinct from `--resume-from`: that says which rows to *skip*, this
-says where the rows that remain should be *sent*.
-
-Same logging/safety-rail behavior as `upload`, but only requires
-an `identifier` column plus whichever metadata columns changed — no
-`file`/`mediatype`/`title`/`date` needed. A blank cell means "leave this
-field alone"; to actually delete an existing field on the IA item, put the
-literal value `REMOVE_TAG` in that cell (the same sentinel the official
-`ia` CLI's `--modify field:REMOVE_TAG` uses).
+An item with no uploaded Sheet row cannot be reached this way. Fix it with
+the raw `ia` CLI (`ia metadata <identifier> --modify ...`) or the item's
+edit page on archive.org.
 
 ### `reconcile-files` — correct a filename cell that doesn't match the drive
 
@@ -514,8 +456,7 @@ the contact-sheet PDFs already sitting alongside the photos on the drive
 from ever being offered as a match.
 
 `--live` reads and writes the real Sheet instead of the test one, same as
-every other command. There is no `--csv` path — reconciliation only makes
-sense against the live Sheet it is correcting.
+every other command.
 
 ### `append-rows` — add skeleton rows for files that have no row
 
@@ -581,7 +522,7 @@ the first live runs are verified by hand. See
 ## Safety rail
 
 By default every command targets IA's `test_collection` sandbox. The Sheet's
-`ia_identifier` column (and the CSV's `identifier` column) always holds the
+`ia_identifier` column always holds the
 real, permanent identifier — never author a `zztest-` identifier by hand.
 Instead, `upload` and `sync-metadata` automatically prepend
 `zztest-<run's stamp>-` to the real identifier for every network call (e.g.
@@ -610,26 +551,9 @@ validated automatically against Internet Archive (see
 `--dry-run` is the cheapest way to check the second one: it prints every
 identifier it would mint and every cell it would write, and touches nothing.
 
-## Offline `--csv` path
-
-By default `validate`/`upload` read the project's Sheet directly, live, over
-the Google Sheets API — see "Commands" above and
+Every command reads the Sheet live; there is no CSV export step. The
+offline CSV paths were removed on 2026-09-23 — see
 [`docs/DECISIONS.md`](docs/decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).
-Nothing needs preparing on that path; there is no export step and nothing
-local to go stale.
-
-`--csv` is a deliberate offline/dry-run fallback for validating or uploading
-from a hand-prepared CSV instead. A raw Sheet export does not match the
-schema `validate --csv`/`upload --csv` require (capitalized headers, no
-`mediatype` column) and must be transformed by hand into the required
-lowercase schema first — a deliberate manual step, not something this CLI
-automates. `validate --csv` catches the structural failures this creates —
-ragged rows, stray whitespace and duplicates in the header, and case variants
-of the columns the script reads by name. It cannot catch a *misspelled*
-header or a value entered in the wrong column, since neither is
-distinguishable from an intentional one. Follow
-[`docs/CSV-PREPARATION.md`](docs/CSV-PREPARATION.md) and eyeball a test
-upload before going live.
 
 ## Tests
 

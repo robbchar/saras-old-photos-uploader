@@ -1,8 +1,7 @@
 # IA Bulk Upload CLI — Architecture
 
 This is the design reference. For running a batch see
-[`OPERATIONS.md`](OPERATIONS.md); for preparing an offline CSV see
-[`CSV-PREPARATION.md`](CSV-PREPARATION.md); for verified defects see
+[`OPERATIONS.md`](OPERATIONS.md); for verified defects see
 [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md); for rationale and reversed decisions see
 [`DECISIONS.md`](DECISIONS.md).
 
@@ -10,8 +9,8 @@ This is the design reference. For running a batch see
 Single-script CLI (`ia_bulk.py`) for validating, uploading, and syncing
 metadata for Internet Archive items from a project's Google Sheet, read live
 over the Sheets API — see [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).
-A hand-prepared CSV (`--csv`) remains a deliberate offline/dry-run fallback
-for `validate` and `upload`; `sync-metadata` always takes a CSV. Generic to "a
+The Sheet is the only input; the offline CSV paths were removed on
+2026-09-23. Generic to "a
 project" so a second LCPS project can reuse this pipeline — see
 `projects_registry.json`.
 
