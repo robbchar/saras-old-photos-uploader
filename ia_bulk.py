@@ -2895,10 +2895,10 @@ def identifier_from_url(url: str) -> str | None:
     one of this tool's own URLs.
 
     `ia_url` is what upload's confirm write recorded, so in test mode it
-    already carries THAT run's stamp, so the Sheet is its own record of what
-    landed where - no upload log is read back. Returns None rather than guessing at an unrecognised
-    cell - a human having pasted something is far likelier than the URL prefix
-    having changed."""
+    already carries THAT run's stamp; the Sheet is its own record of what
+    landed where - no upload log is read back. Returns None rather than
+    guessing at an unrecognised cell - a human having pasted something is far
+    likelier than the URL prefix having changed."""
     url = url.strip()
     if not url.startswith(ITEM_URL_PREFIX):
         return None
@@ -2922,7 +2922,7 @@ def item_project_id(uploaded_as: str, live: bool) -> str | None:
 def sheet_upload_metadata(
     target: UploadTarget, uploadable: frozenset[str], mediatype: str
 ) -> dict[str, str]:
-    """The row dict handed to upload_row on the Sheet path.
+    """The row dict handed to upload_row.
 
     upload_row turns every key it is given (bar `identifier` and `file`) into
     an Internet Archive metadata field, and IA metadata is permanent - so the
@@ -3846,10 +3846,8 @@ def skipped_rows(problems: list[RowValidation]) -> list[RowFailure]:
 
 @dataclass(frozen=True)
 class PushOutcome:
-    """What a send loop did - one entry per row it actually sent. Shared by
-    `upload` and both `sync-metadata` paths, which is why the count is
-    `succeeded` rather than sync's own word for it: an upload that worked
-    did not "change" anything. SyncSummary is where it becomes `changed`.
+    """What sync's send loop did - one entry per row it actually sent.
+    SyncSummary is where `succeeded` becomes `changed`.
 
     `failures` is the list, never a count beside it: `failed` is derived, so
     there is no second number to forget to bump."""
@@ -3938,7 +3936,7 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
     """The run's closing lines for a person to read.
 
     Rendered from the same SyncSummary that log_run_summary() writes, and the
-    only place either sync path formats those numbers, so what a person is
+    only place sync formats those numbers, so what a person is
     told and what a program reads cannot drift apart - the reason this takes
     a summary rather than the counts it prints."""
     lines = [
@@ -4062,9 +4060,8 @@ def log_run_summary(log_path: str | Path, record: dict) -> None:
     replaying the per-row lines above it.
 
     Appended like every other record rather than rewritten in place, so a run
-    killed partway still leaves every intact row record behind it - the log
-    stays readable by _read_log_results() whether or not this line was ever
-    written."""
+    killed partway still leaves every intact row record behind it, whether
+    or not this line was ever written."""
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
 
@@ -4152,8 +4149,7 @@ def plan_sync_targets(
     check_identifier requires it (issue #2). This path targets whatever item
     `ia_url` names, so a cell pointing at another project's item does not
     merely misfile this project's row - it overwrites that project's
-    metadata. The --csv path gets this check from validate_identifiers; the
-    Sheet path never runs that, so it is made here.
+    metadata, so the check is made here.
 
     Scope is RowState.DONE and nothing else. An UNASSIGNED row has no item to
     correct, and a RESERVED row's upload never confirmed - correcting metadata
@@ -4170,9 +4166,8 @@ def plan_sync_targets(
     docs/DECISIONS.md, "A row pushes only when its content changed".
 
     Blank cells are dropped by update_metadata_row, so a cleared cell means
-    "leave this field alone" and REMOVE_TAG deletes - identical to the --csv
-    path. A Sheet cell cleared by accident can therefore never strip metadata
-    from a permanent public item.
+    "leave this field alone" and REMOVE_TAG deletes. A Sheet cell cleared by
+    accident can therefore never strip metadata from a permanent public item.
 
     Returns (targets, problems). A DONE row this run cannot safely target is a
     problem rather than a silent skip: the operator edited it expecting the
@@ -4488,52 +4483,9 @@ class SheetSyncRun:
         )
 
 
-def check_uploaded_as(
-    rows: list[dict[str, str]],
-    targets: dict[str, str],
-    skip_identifiers: frozenset[str],
-    log_path: str,
-) -> list[RowValidation]:
-    """Rows whose identifier the --from-log upload log does not record as
-    having been uploaded.
-
-    A miss is an error, never a fall back to recomputing the target. In test
-    mode recomputing is the exact bug --from-log exists to fix, and it fails
-    SILENTLY: modify_metadata() is sent to a stamped identifier that has never
-    existed, so the run reports failures whose message says nothing about the
-    real cause. Reported per row, before anything is sent, so a wrong CSV is
-    fixed in one pass.
-
-    A blank identifier is skipped here - validate_identifiers already reports
-    it as a missing required column, and two messages for one cell reads as
-    two problems."""
-    results: list[RowValidation] = []
-    for offset, row in enumerate(rows):
-        identifier = (row.get("identifier") or "").strip()
-        if not identifier or identifier in skip_identifiers or identifier in targets:
-            continue
-        results.append(
-            RowValidation(
-                row_number=offset + 2,
-                identifier=identifier,
-                errors=[
-                    f"'{identifier}' is not recorded as uploaded in {log_path} - "
-                    "sync-metadata can only correct an item an upload run actually created"
-                ],
-            )
-        )
-    return results
-
-
 def cmd_sync_metadata(args) -> int:
-    """`--csv` is the offline fallback, exactly as it is for validate and
-    upload. Without it the Sheet is read live and IS the correction: edit a
-    description in the Sheet, run this, it is on the site. That round trip is
-    the whole point of the Sheet being the source of truth, and this command
-    was the last one still requiring a hand-made CSV to do it."""
-    csv_path = getattr(args, "csv", None)
-    if csv_path is not None:
-        return sync_from_csv(args)
+    """The Sheet is read live and IS the correction: edit a description in the
+    Sheet, run this, it is on the site."""
     return sync_from_sheet(args)
 
 
@@ -4599,20 +4551,6 @@ def sync_from_sheet(args) -> int:
     if dry_run:
         print("--dry-run: nothing is sent to Internet Archive")
     print()
-
-    for flag in ("resume_from", "from_log"):
-        # Both name a prior run's LOG, which the Sheet path does not need: the
-        # Sheet's own ia_uploaded/ia_url columns are the record of what was
-        # uploaded and where it went.
-        if getattr(args, flag, None):
-            name = "--" + flag.replace("_", "-")
-            print(
-                f"{name} is a --csv-path flag. On the Sheet path, 'ia_uploaded' and 'ia_url' "
-                "are the record of what was uploaded and which item it became, so there is "
-                "no log to read.",
-                file=sys.stderr,
-            )
-            return 1
 
     # Read and validated before any Sheet I/O, the same way and for the same
     # reason upload's own --chunk-size is (see cmd_upload): chunk_rows()'s
@@ -4740,85 +4678,6 @@ def sync_from_sheet(args) -> int:
         mirror_run_to_log_tab(sheet.client, config.sync_log_tab, log_path, record, lines[0])
     print(f"log written to {log_path}")
     return 1 if (summary.failed or summary.skipped) else 0
-
-
-def sync_from_csv(args) -> int:
-    data = read_csv(args.csv)
-    rows = data.rows
-    registry = load_registry(args.registry)
-    if refuse_unregistered_project(registry, args.project):
-        return 1
-    live = bool(args.live)
-    from_log = getattr(args, "from_log", None)
-
-    # Every test item carries the stamp of the run that created it, and a
-    # stamp is unique per invocation (see run_stamp()), so the CSV alone
-    # cannot say which zztest- item a row's metadata belongs to. Deriving it
-    # here with THIS run's stamp named an item that has never existed and
-    # failed every row - a rehearsal mode that cannot rehearse. --from-log
-    # names the upload run being corrected; its `uploaded_as` field is the
-    # only record of that mapping. Live identifiers are unstamped, so the
-    # flag is optional there.
-    if not live and not from_log:
-        print(
-            "sync-metadata needs --from-log <upload log> in test mode. A test item is named "
-            "zztest-<stamp>-<identifier>, where the stamp is unique to the run that created "
-            "it, so the CSV alone cannot say which items to correct. Pass the log written by "
-            "the upload run you are correcting, or pass --live to target the real, unstamped "
-            "identifiers.",
-            file=sys.stderr,
-        )
-        return 1
-
-    targets: dict[str, str] | None = None
-    if from_log:
-        targets = load_uploaded_as(from_log, live)
-
-    skip_identifiers: set[str] = set()
-    if args.resume_from:
-        skip_identifiers = load_prior_successes(args.resume_from, live)
-
-    to_sync = [row for row in rows if (row.get("identifier") or "").strip() not in skip_identifiers]
-
-    validation_results = header_validation(data.fieldnames) + validate_identifiers(
-        rows, registry, args.project, frozenset(skip_identifiers)
-    )
-    if targets is not None:
-        validation_results += check_uploaded_as(
-            rows, targets, frozenset(skip_identifiers), str(from_log)
-        )
-    if not all(r.is_valid for r in validation_results):
-        print(format_report(validation_results))
-        print("identifier validation failed; fix the errors above before syncing", file=sys.stderr)
-        return 1
-
-    log_path = open_log(args.log_dir, "sync-metadata")
-    for identifier in skip_identifiers:
-        log_result(log_path, identifier, "", "success", live, error="carried over from resumed log")
-
-    outcome = run_rows(
-        to_sync,
-        log_path,
-        live,
-        run_stamp(),
-        action="updating metadata for",
-        process_row=lambda row, target: update_metadata_row(row, target),
-        describe=lambda row, target: target,
-        file_value_for=lambda row: "",
-        targets=targets,
-    )
-
-    # `checked` counts every row the CSV offered, including the ones
-    # --resume-from held back: they were read and judged, and a summary that
-    # counted only the sent ones would report a resumed run as a smaller job
-    # than the one it actually finished.
-    summary = SyncSummary(checked=len(rows), outcome=outcome)
-    try_log_run_summary(log_path, summary, live)
-
-    for line in sync_summary_lines(summary):
-        print(line)
-    print(f"log written to {log_path}")
-    return 1 if summary.failed else 0
 
 
 RECONCILE_FLUSH_EVERY = 25
@@ -5262,62 +5121,37 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ia_bulk",
         description=(
             "Validate, upload, and sync metadata for Internet Archive items from "
-            "a project's Google Sheet (read live) or, for validate, an offline CSV."
+            "a project's Google Sheet (read live)."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser(
-        "validate", help="Validate a project's Sheet, or an offline CSV, without touching the network"
+        "validate", help="Validate a project's Sheet without uploading or writing anything"
     )
     validate_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    validate_parser.add_argument(
-        "--csv", default=None, help="Validate this CSV offline instead of reading the project's Sheet"
-    )
-    validate_parser.add_argument(
-        "--files-dir", default=".", help="Base directory the CSV's 'file' column is resolved against (--csv only)"
-    )
     validate_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     validate_parser.add_argument(
         "--live",
         action="store_true",
-        help="Read the project's real Sheet instead of its test Sheet (ignored with --csv)",
+        help="Read the project's real Sheet instead of its test Sheet",
     )
     validate_parser.add_argument(
         "--batch",
         default=None,
         help=(
-            "Report only the rows whose registry-configured batch_column holds this value "
-            "(Sheet path only). Previews exactly the scope `upload --batch` would run, "
+            "Report only the rows whose registry-configured batch_column holds this value. "
+            "Previews exactly the scope `upload --batch` would run, "
             "through the same code. Matching ignores case and surrounding whitespace."
         ),
     )
 
     upload_parser = subparsers.add_parser(
-        "upload", help="Upload items from a project's Sheet, or from an offline CSV"
+        "upload", help="Upload items from a project's Sheet"
     )
     upload_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    upload_parser.add_argument(
-        "--csv", default=None, help="Upload from this CSV instead of the project's Sheet"
-    )
-    # No defaults on --files-dir/--collection. Both are technical
-    # configuration that belongs in the registry, confirmed once in version
-    # control per project, rather than retyped correctly on every run forever;
-    # --collection's old "lcps" default was not even a real Internet Archive
-    # collection. See docs/DECISIONS.md, "Technical configuration lives in the
-    # registry, not the command line".
-    upload_parser.add_argument(
-        "--files-dir",
-        default=None,
-        help="Base directory the 'file' column is resolved against (--csv only; the Sheet path takes it from the registry)",
-    )
     upload_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     upload_parser.add_argument("--live", action="store_true", help="Target the real Sheet and the registry's real collection instead of the test Sheet and test_collection")
-    upload_parser.add_argument(
-        "--collection",
-        default=None,
-        help="Collection to upload to when --live is passed (--csv only; the Sheet path takes it from the registry's ia_collection)",
-    )
     upload_parser.add_argument(
         "--write-identifier",
         action="store_true",
@@ -5329,13 +5163,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upload nothing and write nothing; print the identifiers that would be minted and the cells that would be written",
     )
     upload_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
-    upload_parser.add_argument("--resume-from", default=None, help="Path to a prior log; identifiers marked success there are skipped (--csv only)")
     upload_parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help=(
-            "Upload at most this many items this run (Sheet path only; must be positive). "
+            "Upload at most this many items this run (must be positive). "
             "Counts rows actually in scope to upload - valid AND ready AND not already done - "
             "not every row scanned; on a Sheet with 2,900 uncatalogued rows and 150 ready ones, "
             "--limit 100 uploads 100 of the 150 ready rows, not the first 100 rows read. "
@@ -5348,7 +5181,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Upload only the rows whose registry-configured batch_column holds this value "
-            "(Sheet path only) - the way a run is scoped to one theme. Only the value goes "
+            "- the way a run is scoped to one theme. Only the value goes "
             "here: which column holds it is a per-project fact and lives in the registry's "
             "batch_column. Matching ignores case and surrounding whitespace. Narrows the "
             "scope before anything is counted, so --limit means 'this many OF THE BATCH'. "
@@ -5369,7 +5202,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=CHUNK_SIZE,
         help=(
-            f"Items per reserve/upload/confirm batch (Sheet path only; must be positive; "
+            f"Items per reserve/upload/confirm batch (must be positive; "
             f"default {CHUNK_SIZE}, Internet Archive's own per-run item cap). Applied to "
             "whatever --limit leaves, not instead of it - see --limit's help for the exact "
             "combination."
@@ -5377,44 +5210,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sync_parser = subparsers.add_parser("sync-metadata", help="Update metadata on already-uploaded items")
-    sync_parser.add_argument(
-        "--csv",
-        default=None,
-        help=(
-            "Correct from this CSV instead of the project's Sheet. Without it the Sheet is "
-            "read live and its own columns are the correction - edit a description there, "
-            "run this, and it is on the site."
-        ),
-    )
     sync_parser.add_argument("--project", required=True, help="Project ID from the registry")
     sync_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     sync_parser.add_argument("--live", action="store_true", help="Read the project's real Sheet and target the real, permanent items instead of the test Sheet and its zztest- rehearsal items")
     sync_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Send nothing; print the items that would be updated and which fields would go to each (Sheet path only)",
+        help="Send nothing; print the items that would be updated and which fields would go to each",
     )
     sync_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
-    sync_parser.add_argument("--resume-from", default=None, help="Path to a prior log; identifiers marked success there are skipped")
-    sync_parser.add_argument(
-        "--from-log",
-        default=None,
-        help=(
-            "Path to the log of the upload run whose items are being corrected. REQUIRED in "
-            "test mode: a test item is named zztest-<stamp>-<identifier> where the stamp is "
-            "unique to the run that created it, so the CSV alone cannot say which items to "
-            "correct - this log's 'uploaded_as' field is the only record of that mapping. "
-            "Optional with --live, where identifiers are unstamped. Distinct from "
-            "--resume-from, which says which rows to SKIP; this says where the rows that "
-            "remain should be SENT."
-        ),
-    )
     sync_parser.add_argument(
         "--chunk-size",
         type=int,
         default=CHUNK_SIZE,
         help=(
-            f"Rows per push/stamp batch (Sheet path only; must be positive; default "
+            f"Rows per push/stamp batch (must be positive; default "
             f"{CHUNK_SIZE}). Each batch costs one Sheets write, and a run interrupted "
             "mid-way keeps every chunk it finished."
         ),

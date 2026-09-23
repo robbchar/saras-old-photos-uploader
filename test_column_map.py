@@ -98,7 +98,7 @@ def test_grid_to_rows_keys_rows_by_normalized_name():
 
 def test_grid_to_rows_pads_short_rows():
     """The Sheets API omits trailing empty cells, so a row can be shorter than
-    the header. That is normal, not a ragged-CSV error."""
+    the header. That is normal, not an error."""
     grid = [["Title", "Date"], ["Alderbrook Hall"]]
 
     _column_map, rows = grid_to_rows(grid)

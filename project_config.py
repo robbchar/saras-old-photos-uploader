@@ -91,11 +91,9 @@ class ProjectConfig:
 
 def unregistered_project_error(registry: dict, project_id: str) -> str | None:
     """The message for "that --project is not in this registry", or None if
-    it is. Shared with the --csv paths in ia_bulk.py, which need the same
-    guard without needing a whole ProjectConfig: since issue #2 every path
-    checks row identifiers against --project, and checking them against an
-    unregistered project id fails every row with a message blaming the
-    identifier rather than the flag.
+    it is. Since issue #2 row identifiers are checked against --project, and
+    checking them against an unregistered project id fails every row with a
+    message blaming the identifier rather than the flag.
 
     A non-dict `projects` is left to load_project_config's own check, which
     reports the shape problem in its own words and must stay ahead of this

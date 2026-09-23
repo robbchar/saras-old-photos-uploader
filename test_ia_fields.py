@@ -117,9 +117,8 @@ def test_collision_guard_works_with_generator_input():
 
 
 def test_metadata_to_send_drops_blank_cells():
-    """A blank cell means "leave this field alone", never "clear it" - the
-    rule is identical on the Sheet and --csv paths. REMOVE_TAG is the
-    deliberate, visible way to delete."""
+    """A blank cell means "leave this field alone", never "clear it".
+    REMOVE_TAG is the deliberate, visible way to delete."""
     from ia_fields import metadata_to_send
 
     assert metadata_to_send({"title": "Pier 39", "description": ""}) == {"title": "Pier 39"}
@@ -147,7 +146,7 @@ def test_metadata_to_send_drops_the_identifier_key():
 
 
 def test_metadata_to_send_tolerates_a_none_value():
-    """csv.DictReader yields None for a short row's missing trailing cells."""
+    """A None value is dropped like a blank cell."""
     from ia_fields import metadata_to_send
 
     assert metadata_to_send({"title": "Pier 39", "description": None}) == {"title": "Pier 39"}
