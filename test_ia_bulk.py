@@ -9295,6 +9295,7 @@ def test_dry_run_writes_no_summary_because_it_writes_no_log(tmp_path, monkeypatc
     from ia_bulk import cmd_sync_metadata
 
     registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), [])
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: None)
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
 
