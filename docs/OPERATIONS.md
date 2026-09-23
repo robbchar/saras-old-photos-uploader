@@ -9,84 +9,14 @@ a run's output.
 a `test_collection` run (`"live": false`). The first real run is still ahead,
 and several things below have never been exercised against production.
 
-## Google Cloud prerequisites (one-time)
+## Google Cloud prerequisites
 
-Reading and writing the Sheet uses a Google Cloud **service account**: no
-browser sign-in and no expiring token. See [`docs/DECISIONS.md`](DECISIONS.md),
-"The Sheet is reached as a service account, not as a person". Before the first
-run on a machine:
-
-- The service account is in the project's Google Cloud project, under IAM &
-  Admin → Service Accounts. It has no project roles; all of its access comes
-  from Sheet sharing.
-- Its JSON key must be saved to `.ignored/google-service-account.json`
-  (relative to the project root; never committed — everything under
-  `.ignored/` is gitignored). The key never expires, so treat it as a
-  password: never email it, and never put it in Drive or chat. To replace it,
-  create a new key on the service account's **Keys** tab, then delete the old
-  one there.
-- The target Sheet (both the real one and the test one named in the
-  project's registry entry) must be shared with the service account's address
-  as **Editor**, with "Notify people" unchecked. The address is the
-  `client_email` in the key file, and is also listed under Service Accounts.
-  `upload` writes `ia_identifier`/`ia_uploaded`/`ia_url`/`ia_identifier_bib`
-  back to the Sheet, so read-only sharing is not enough, even in test mode
-  with `--write-identifier`.
-- The **Google Sheets API** must be enabled in the Cloud project (APIs &
-  Services → Library).
-- Creating a key can be refused by the organization policy "Disable service
-  account key creation" (`iam.disableServiceAccountKeyCreation`), which
-  Google enforces by default on newer organizations; an organization-policy
-  administrator can turn it off for this one project.
-- If the Google Workspace that owns the Sheet restricts sharing outside its
-  domain, sharing with the service account's address (which is outside the
-  domain) is blocked until an admin allows it (admin.google.com → Apps →
-  Google Workspace → Drive and Docs → Sharing settings).
-
-Every edit the tool makes appears in the Sheet's version history as the
-service account, whoever ran the command.
-
-If the key is missing, unreadable, or deleted or disabled in the console,
-every Sheet command stops before doing anything and says which. A Sheet not
-yet shared with the service account fails its first read with a message naming
-the address to share it with.
-
-### Checking the service account
-
-Run this on any new machine (and after replacing the key) before trusting a
-real run. It needs about five minutes and changes nothing. `< /dev/null`
-detaches the command from the terminal, so nothing could stop and wait for a
-sign-in even if it tried.
-
-1. **Read the test Sheet.** Expect the normal readiness report and no sign-in
-   prompt:
-
-   ```bash
-   python ia_bulk.py validate --project sarasoldphotos < /dev/null
-   ```
-
-2. **Preview a sync.** Expect the usual summary line, for example
-   `10 uploaded rows; … 10 already in sync and would not be sent`:
-
-   ```bash
-   python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run < /dev/null
-   ```
-
-3. **See the failure message once.** Move the key aside, run `validate`,
-   and expect a single line starting `could not authenticate to Google
-   Sheets: missing service account key at …` with no traceback. Then put the
-   key back:
-
-   ```bash
-   mv .ignored/google-service-account.json .ignored/google-service-account.json.off
-   python ia_bulk.py validate --project sarasoldphotos
-   mv .ignored/google-service-account.json.off .ignored/google-service-account.json
-   ```
-
-For a full round trip — a real edit reaching Internet Archive, and the Sheet's
-version history showing the service account as its editor — follow
-[4. Corrections](#4-corrections) against the test Sheet: change one uploaded
-row's title, sync, check the item, then change it back and sync again.
+Provisioning the service account, its key, and sharing the Sheet now lives in
+[`docs/DEPLOYMENT.md`](DEPLOYMENT.md) — that's a one-time, per-machine setup
+step, not part of running a batch. The five-minute check that the service
+account actually works end to end is
+[§16 of that document](DEPLOYMENT.md#16-verifying-the-service-account-by-hand);
+run it on a new machine and after replacing the key.
 
 ## The pipeline
 
@@ -485,7 +415,11 @@ files in the wrong place under a permanent identifier.
       That count, not the exit code, is what tells you this run has the scope
       you think it has. It is the same set `upload` will plan, so an N that
       surprises you is worth resolving *before* anything permanent happens.
-- [ ] The `ia` CLI is authenticated as `admin@lcpsociety.org` (`ia whoami`).
+- [ ] The `ia` credentials belong to `admin@lcpsociety.org`:
+      `ia configure --check` (on the Mac, `./.venv/bin/ia configure --check`)
+      asks archive.org and prints
+      `The credentials for "admin@lcpsociety.org" are valid`. Any other
+      address, or `Your credentials are invalid`, is a stop.
 - [ ] The Sheet is current and saved — the rows you intend to upload were
       filled in, and no edit is still sitting unsaved or as a pending
       suggestion. A `--live` run reads the Sheet directly; there is no CSV
@@ -524,10 +458,15 @@ correction".
 
 ### Only a changed row is actually sent — and what to do if yours isn't
 
-Right now `sync-metadata` is run by hand, the same way as the other commands
-above (an hourly LaunchAgent is planned — issue #27 — but nothing in this
-repo installs one yet). Whichever way it gets run, most runs have nothing to
-do, and it says so:
+`sync-metadata` can be run by hand, the same way as the other commands above,
+or hourly by a LaunchAgent on the Mac, which
+`./install.sh --project sarasoldphotos --live --enable-agent` installs once
+the first live runs are verified — see
+[`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync). The agent's
+runs print to `logs/launchagent-sarasoldphotos.out` and `.err` instead of a
+screen, and `doctor --live`'s `launch agent loaded` line says whether its last
+run exited 0. Whichever way it gets run, most runs have nothing to do, and it
+says so:
 
 ```
 nothing to sync - all 3,842 uploaded rows already match their last push
@@ -541,11 +480,13 @@ every run, whether it changed or not, would be pointless and would bury the
 one real edit anybody cares about under a wall of "nothing changed" lines.
 
 To know whether a row changed, the tool keeps two columns of its own on the
-far right of the Sheet: **`ia_sync_hash`** and **`ia_last_synced`**. Like the
-other columns the tool owns, they are hidden — you don't need to look at
-them, and you can leave them hidden. `ia_last_synced` just records when a row
-last went out, for a human to glance at. `ia_sync_hash` is what the tool
-actually checks; it isn't meant to be read, only cleared.
+far right of the Sheet: **`ia_sync_hash`** and **`ia_last_synced`**. Unlike
+the other columns the tool owns, these two stay **visible, with a red
+background** — the red means "the tool owns this, don't type here", and both
+earn their place on screen. `ia_last_synced` records when a row last went out,
+for a human to glance at. `ia_sync_hash` is what the tool actually checks; it
+isn't meant to be read, only cleared — and clearing it is how you force a row
+to send again (see the carve-out below).
 
 **The rule about the tool's own columns hasn't changed, except for one
 carve-out:**
@@ -619,6 +560,9 @@ To read the newest one without looking up its timestamp:
 ```bash
 tail -n 1 "$(printf '%s\n' logs/sync-metadata-*.jsonl | sort | tail -n 1)" | python -m json.tool
 ```
+
+On the Mac, `python` at the end of that pipe is `.venv/bin/python` — macOS
+has no `python` command (see [`DEPLOYMENT.md`](DEPLOYMENT.md)).
 
 Sorting the names *is* sorting by time — log filenames are UTC timestamps
 precisely so a listing comes out in the order the runs happened (see

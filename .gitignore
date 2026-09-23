@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data/
+.venv/
 .vscode/
 .ignored/
 # Worktrees live here; never part of the tree itself.

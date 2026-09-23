@@ -99,8 +99,10 @@ def test_unusable_key_file_raises_an_actionable_error(tmp_path, content):
     key_path = tmp_path / "key.json"
     _write_key(key_path, content)
 
-    with pytest.raises(AuthUnavailable, match="not a readable service account key"):
+    with pytest.raises(AuthUnavailable, match="not a readable service account key") as exc:
         load_service_account_credentials(key_path)
+
+    assert exc.value.transient is False
 
 
 def test_unreadable_key_path_names_a_permissions_problem(tmp_path):
@@ -127,6 +129,7 @@ def test_google_rejecting_the_key_is_reported_as_a_credential_problem(
     assert "rejected the service account key" in str(exc.value)
     assert "network problem" not in str(exc.value)
     assert "clock" in str(exc.value)
+    assert exc.value.transient is False
 
 
 def test_retryable_token_failure_is_reported_as_temporary(tmp_path, monkeypatch, private_key_pem):
@@ -143,6 +146,103 @@ def test_retryable_token_failure_is_reported_as_temporary(tmp_path, monkeypatch,
 
     assert "temporary" in str(exc.value)
     assert "rejected" not in str(exc.value)
+    assert exc.value.transient is True
+
+
+class _TokenResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self.headers = {}
+        self.data = body.encode("utf-8")
+
+
+def _token_endpoint_answering(monkeypatch, status, response_body):
+    """Fakes only the HTTP transport, so google-auth's own error classification runs."""
+    calls = []
+
+    def request(**kwargs):
+        calls.append(kwargs["url"])
+        return _TokenResponse(status, response_body)
+
+    monkeypatch.setattr(google_auth, "Request", lambda: request)
+    # google-auth backs off between its own retries of 500/503/504/408/429.
+    monkeypatch.setattr("google.auth._exponential_backoff.time.sleep", lambda seconds: None)
+    return calls
+
+
+GOOGLE_FRONT_END_502_PAGE = (
+    "<!DOCTYPE html><html lang=en><title>Error 502 (Server Error)!!1</title>"
+    "<p><b>502.</b> That's an error.<p>The server encountered a temporary error.</html>"
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "response_body"),
+    [
+        pytest.param(502, GOOGLE_FRONT_END_502_PAGE, id="502_html"),
+        pytest.param(502, json.dumps({"error": "backend_error"}), id="502_json"),
+        pytest.param(501, "Not Implemented", id="501_plain_text"),
+    ],
+)
+def test_a_server_error_google_auth_does_not_retry_is_still_temporary(
+    tmp_path, monkeypatch, private_key_pem, status, response_body
+):
+    """google-auth's retry list is 500, 503, 504, 408 and 429, so a 502 comes out
+    retryable=False. A 5xx is the server failing, never a verdict on the key."""
+    key_path = tmp_path / "key.json"
+    _write_key(key_path, _service_account_key(private_key_pem))
+    _token_endpoint_answering(monkeypatch, status, response_body)
+
+    with pytest.raises(AuthUnavailable) as exc:
+        load_service_account_credentials(key_path)
+
+    assert exc.value.transient is True
+    assert "rejected" not in str(exc.value)
+    assert f"HTTP {status}" in str(exc.value)
+
+
+def test_a_server_error_names_its_status_not_its_html_page(tmp_path, monkeypatch, private_key_pem):
+    key_path = tmp_path / "key.json"
+    _write_key(key_path, _service_account_key(private_key_pem))
+    _token_endpoint_answering(monkeypatch, 502, GOOGLE_FRONT_END_502_PAGE)
+
+    with pytest.raises(AuthUnavailable) as exc:
+        load_service_account_credentials(key_path)
+
+    assert "<html" not in str(exc.value)
+
+
+def test_a_server_error_google_auth_retried_names_its_status(tmp_path, monkeypatch, private_key_pem):
+    key_path = tmp_path / "key.json"
+    _write_key(key_path, _service_account_key(private_key_pem))
+    calls = _token_endpoint_answering(monkeypatch, 503, GOOGLE_FRONT_END_502_PAGE)
+
+    with pytest.raises(AuthUnavailable) as exc:
+        load_service_account_credentials(key_path)
+
+    assert len(calls) > 1, "google-auth should have retried the 503 itself"
+    assert exc.value.transient is True
+    assert "HTTP 503" in str(exc.value)
+
+
+def test_google_rejecting_the_key_over_http_stays_a_credential_problem(
+    tmp_path, monkeypatch, private_key_pem
+):
+    """What the token endpoint really sends for a bad key: a 4xx with a JSON OAuth error."""
+    key_path = tmp_path / "key.json"
+    _write_key(key_path, _service_account_key(private_key_pem))
+    _token_endpoint_answering(
+        monkeypatch,
+        400,
+        json.dumps({"error": "invalid_grant", "error_description": "Invalid JWT Signature."}),
+    )
+
+    with pytest.raises(AuthUnavailable) as exc:
+        load_service_account_credentials(key_path)
+
+    assert exc.value.transient is False
+    assert "rejected the service account key" in str(exc.value)
+    assert "invalid_grant" in str(exc.value)
 
 
 def test_unreachable_google_is_reported_as_a_network_problem(tmp_path, monkeypatch, private_key_pem):
@@ -159,6 +259,7 @@ def test_unreachable_google_is_reported_as_a_network_problem(tmp_path, monkeypat
 
     assert "network problem" in str(exc.value)
     assert "rejected" not in str(exc.value)
+    assert exc.value.transient is True
 
 
 def test_default_service_account_key_path_is_anchored_to_the_project_root(monkeypatch, tmp_path):

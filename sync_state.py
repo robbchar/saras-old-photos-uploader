@@ -40,9 +40,9 @@ def sync_hash(metadata: dict[str, str]) -> str:
     described. json.dumps rather than concatenation because "xy"+"z" and
     "x"+"yz" must not collide.
 
-    The full 64-character digest is stored. It lands in a hidden column no
-    one reads, so there is nothing to gain by truncating it and a collision
-    would silently withhold a correction."""
+    The full 64-character digest is stored. Nobody reads it by eye - the cell
+    is only ever cleared to force a re-sync - so there is nothing to gain by
+    truncating it and a collision would silently withhold a correction."""
     payload = json.dumps(metadata, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -98,7 +98,7 @@ def locate_sync_columns(column_map: ColumnMap) -> SyncColumns:
             f"the Sheet has no column(s) named {', '.join(missing)}. `sync-metadata` "
             f"records what it last pushed in {', '.join(SYNC_STATE_COLUMNS)} so it can send "
             "only the rows that actually changed; add them as header cells (any position, "
-            "spelling exactly as shown - far right and hidden is fine) before syncing."
+            "spelling exactly as shown - far right is fine) before syncing."
         )
 
     return SyncColumns(

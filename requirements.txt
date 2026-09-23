@@ -1,3 +1,4 @@
+# Requires Python 3.10+ (google-auth, google-api-core). macOS system python3 is 3.9.6.
 internetarchive>=5.0
 urllib3>=2.0
 pytest>=8.0

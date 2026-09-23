@@ -25,8 +25,11 @@ import requests
 from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
+import deployment
 import google_auth
+import launch_agent
 import log_tab
+import platform_probe
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -42,7 +45,12 @@ from column_map import (
 )
 from ia_fields import PIPELINE_OWNED_FIELDS, metadata_to_send, suggest_standard_fields
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
-from project_config import ProjectConfig, load_project_config, unregistered_project_error
+from project_config import (
+    ConfigError,
+    ProjectConfig,
+    load_project_config,
+    unregistered_project_error,
+)
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
 from sync_state import (
@@ -52,6 +60,9 @@ from sync_state import (
     stamp_updates,
     sync_hash,
 )
+
+# Shared by build_deployment_checks and cmd_setup - one computed root, not two.
+REPO_ROOT = Path(__file__).resolve().parent
 
 REQUIRED_UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
 # Deliberately excludes "identifier" only - do not "fix" this back to
@@ -164,6 +175,9 @@ def read_csv(csv_path: str | Path) -> CsvData:
         reader = csv.DictReader(f)
         rows = list(reader)
         return CsvData(fieldnames=list(reader.fieldnames or []), rows=rows)
+
+
+DEFAULT_REGISTRY = "projects_registry.json"
 
 
 def load_registry(registry_path: str | Path) -> dict:
@@ -2349,6 +2363,13 @@ def sheet_sharing_target() -> str:
     )
 
 
+NO_DATA_ROWS = (
+    "the Sheet has no data rows (only a header, or nothing at all) - check that "
+    "'sheet_tab' in the project's registry entry names the right tab, and that "
+    "the Sheet has actually been populated and shared"
+)
+
+
 def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command: str) -> SheetRead:
     """Everything all three Sheet-path commands do between printing their
     banner and starting their own work.
@@ -2418,11 +2439,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
         if structure_results:
             print("\n".join(_format_result_lines(structure_results)))
             print()
-        print(
-            "the Sheet has no data rows (only a header, or nothing at all) - check that "
-            "'sheet_tab' in the project's registry entry names the right tab, and that "
-            "the Sheet has actually been populated and shared"
-        )
+        print(NO_DATA_ROWS)
         raise SheetSetupFailed
 
     return SheetRead(
@@ -2485,6 +2502,260 @@ def validate_sheet_content(
     return validate_sheet_grid(
         sheet.rows, sheet.registry, sheet.config, sheet.structure_results, file_outcomes
     )
+
+
+def build_deployment_checks(args, *, include_network: bool) -> list[deployment.Check]:
+    """The one check list. `doctor` runs it; `setup` runs it and applies fix()."""
+    registry = load_registry(args.registry)
+    config = load_project_config(registry, args.project)
+    live = bool(args.live)
+    repo_root = REPO_ROOT
+    key_path = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
+    install = install_command_for(args)
+
+    checks = [
+        deployment.python_version_check(sys.version_info[:2], install),
+        deployment.dependencies_check(install),
+        deployment.key_present_check(key_path),
+        deployment.key_mode_check(key_path),
+        deployment.ia_credentials_check(),
+        deployment.ia_credentials_mode_check(),
+        deployment.sheet_id_check(config, live, args.registry),
+        deployment.drive_check(Path(config.files_dir)),
+    ]
+
+    if include_network:
+        # A closure, not an import: build_sheet_client stays the only place
+        # credentials are loaded, and deployment.py never imports ia_bulk.
+        # Memoized because both Sheet checks share it: two clients meant two
+        # token fetches and two full reads of a 10,000-row Sheet per `doctor`.
+        cached_grid: dict[str, list[list[str]]] = {}
+
+        def read_grid() -> list[list[str]]:
+            # Reading a placeholder ID only earns a 404 and a misleading "share it" remedy.
+            if config.sheet_id_for(live).startswith(PLACEHOLDER_SHEET_ID_PREFIX):
+                mode = "live" if live else "test"
+                raise deployment.SheetNotChecked(f"the {mode}-mode sheet_id is still a placeholder")
+            if "grid" not in cached_grid:
+                cached_grid["grid"] = build_sheet_client(config, live).read_grid()
+            return cached_grid["grid"]
+
+        def sync_refusal(grid: list[list[str]]) -> str | None:
+            # read_sheet's refusal first, then sync_from_sheet's, in the order the agent meets them.
+            column_map, rows = grid_to_rows(grid)
+            if not rows:
+                return NO_DATA_ROWS
+            refusal = sync_header_refusal(column_map, config, args.registry)
+            if refusal is None:
+                return None
+            message, details = refusal
+            return "; ".join([message, *details])
+
+        checks.extend(
+            [
+                deployment.sheet_reachable_check(read_grid, sheet_sharing_target()),
+                deployment.sync_columns_check(read_grid, sync_refusal),
+            ]
+        )
+
+    spec = launch_agent.sync_agent_spec(repo_root, config.project_id, args.registry)
+    checks.extend(
+        [
+            deployment.agent_plist_check(spec, Path.home(), install),
+            deployment.agent_loaded_check(spec, install),
+        ]
+    )
+    return checks
+
+
+def install_command_for(args) -> deployment.InstallCommand:
+    """The ./install.sh line that repeats this run. install.sh runs setup from
+    REPO_ROOT, so only a registry other than REPO_ROOT's own needs --registry."""
+    registry = Path(args.registry).resolve()
+    is_default = registry == REPO_ROOT / DEFAULT_REGISTRY
+    return deployment.InstallCommand(args.project, None if is_default else registry)
+
+
+# {command} is install_command_for(args).render(enable_agent=True).
+ENABLE_AGENT_NEEDS_LIVE = (
+    "--enable-agent loads an agent that runs `sync-metadata --live`, so it refuses to run "
+    "without --live: without it setup would verify the TEST Sheet and then start an hourly "
+    "live sync against a real Sheet whose ID, sharing and sync columns were never checked. "
+    "Run: {command}"
+)
+
+ENABLE_AGENT_NEEDS_NETWORK = (
+    "--enable-agent cannot be combined with --offline: the Sheet checks --offline skips are "
+    "exactly the ones that gate enabling a live agent. Re-run on a machine with network. "
+    "Run: {command}"
+)
+
+AGENT_NOT_ENABLED = (
+    "{names} failed - the hourly sync agent was NOT enabled and nothing was loaded. Fix those "
+    "[FAIL] lines above, then re-run: {command}"
+)
+
+AGENT_NOT_ENABLED_UNVERIFIED = (
+    "the live Sheet could not be verified ({names} came back UNKNOWN, not PASS) - the hourly "
+    "sync agent was NOT enabled and nothing was loaded. It would run `sync-metadata --live` "
+    "unattended against a Sheet whose sharing and sync columns were never confirmed. Each "
+    "UNKNOWN line above says why - most often no network, or Google briefly unavailable. "
+    "Resolve that, then re-run: {command}"
+)
+
+
+def agent_not_enabled_message(
+    blocking: list[str], unverified: list[str], install: deployment.InstallCommand
+) -> str:
+    """FAILs are named first: an UNKNOWN Sheet check is often only their
+    consequence. A merely offline machine reaches the same reduced assurance
+    --offline is refused for, so UNKNOWN on the two Sheet checks blocks too.
+    This rule lives here, not in deployment.exit_code."""
+    command = install.render(enable_agent=True)
+    if not blocking:
+        return AGENT_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified), command=command)
+    message = AGENT_NOT_ENABLED.format(names=", ".join(blocking), command=command)
+    if unverified:
+        message += f" ({' and '.join(unverified)} came back UNKNOWN too, and must PASS as well.)"
+    return message
+
+AGENT_NOT_LOADED = (
+    "the hourly sync agent was not loaded - see the message above. A plist written above still "
+    "loads at this account's next login; `doctor --live` shows what is loaded now."
+)
+
+AGENT_ENABLED_DESPITE_FAILS = (
+    "the hourly sync agent IS enabled: the [FAIL] lines above are for other work, not for it."
+)
+
+
+def enable_agent_refusal(args) -> str | None:
+    """`--enable-agent` is the one flag that starts unattended live traffic, so
+    it refuses rather than infers what the operator meant."""
+    if not args.enable_agent:
+        return None
+    command = install_command_for(args).render(enable_agent=True)
+    if not args.live:
+        return ENABLE_AGENT_NEEDS_LIVE.format(command=command)
+    if args.offline:
+        return ENABLE_AGENT_NEEDS_NETWORK.format(command=command)
+    return None
+
+
+def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
+    """Write the plist and load the hourly agent, replacing an already-loaded
+    one. True when launchd took it. Bootout first because launchd holds its own
+    copy of the plist from bootstrap time, so a rewritten plist otherwise never
+    takes effect."""
+    registry = load_registry(args.registry)
+    config = load_project_config(registry, args.project)
+    spec = launch_agent.sync_agent_spec(REPO_ROOT, config.project_id, args.registry)
+    plist = launch_agent.plist_path(spec, Path.home())
+
+    # RunAtLoad means bootstrapping starts a live sync immediately, so say so
+    # before acting, not after.
+    announce(f"loading {spec.label} for {platform_probe.current_user()}")
+    announce("  this starts a live sync run now, and again at every login")
+
+    # Written here and nowhere else: launchd loads every plist in LaunchAgents at login.
+    try:
+        announce(f"  {launch_agent.write_plist(spec, Path.home())}")
+    except OSError as exc:
+        announce(f"  could not write {plist} ({exc})")
+        return False
+
+    if platform_probe.launchctl_print(spec.label) is not None:
+        announce(
+            "  it is already loaded - unloading it first so the new plist takes effect; "
+            "a sync running right now is stopped"
+        )
+        # Waited on even when bootout reports failure: it exits 36 ("in progress")
+        # while a running job is still stopping. Only a job still listed is fatal.
+        _unloaded, bootout_message = platform_probe.launchctl_bootout(spec.label)
+        announce(f"  {bootout_message}")
+        if not platform_probe.wait_until_unloaded(spec.label):
+            announce(
+                f"  {spec.label} was still registered "
+                f"{platform_probe.UNLOAD_TIMEOUT_SECONDS:.0f}s after bootout - not loading over it"
+            )
+            return False
+
+    loaded, bootstrap_message = platform_probe.launchctl_bootstrap(plist)
+    announce(f"  {bootstrap_message}")
+    return loaded
+
+
+# What reading the registry can raise in `doctor` and `setup`.
+# ValueError covers malformed JSON and a registry that is not UTF-8.
+REGISTRY_READ_ERRORS = (ConfigError, ValueError, OSError)
+
+
+def report_unreadable_registry(args, exc: Exception) -> int:
+    # `doctor` and `setup` are the commands you talk someone through over the
+    # phone; a traceback is the one output that helps nobody.
+    print(f"could not read the project registry {args.registry}: {exc}", file=sys.stderr)
+    return 1
+
+
+def cmd_doctor(args) -> int:
+    try:
+        checks = build_deployment_checks(args, include_network=not args.offline)
+    except REGISTRY_READ_ERRORS as exc:
+        return report_unreadable_registry(args, exc)
+    results = deployment.run_checks(checks)
+    print(deployment.format_report(results))
+    return deployment.exit_code(results)
+
+
+def cmd_setup(args) -> int:
+    refusal = enable_agent_refusal(args)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 1
+
+    changes: list[str] = []
+
+    def announce(line: str) -> None:
+        changes.append(line)
+        print(line)
+
+    try:
+        checks = build_deployment_checks(args, include_network=not args.offline)
+    except REGISTRY_READ_ERRORS as exc:
+        return report_unreadable_registry(args, exc)
+    results = deployment.converge(checks, announce)
+    agent_failed = False
+
+    if args.enable_agent:
+        # "Verify first, then enable" is the whole reason --enable-agent is a
+        # separate flag, so it consults the verification it just performed.
+        blocking = deployment.agent_blocking_failures(results)
+        unverified = deployment.unverified_sheet_checks(results)
+        if blocking or unverified:
+            print(deployment.format_report(results))
+            print(
+                agent_not_enabled_message(blocking, unverified, install_command_for(args)),
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            agent_failed = not load_sync_agent(args, announce)
+        except REGISTRY_READ_ERRORS as exc:
+            return report_unreadable_registry(args, exc)
+        results = deployment.run_checks(checks)
+
+    if not changes:
+        if deployment.exit_code(results) == 0:
+            print("nothing to change; this machine already matches the checkout.")
+        else:
+            print("nothing setup can change on its own; each [FAIL] below says what to do.")
+    print(deployment.format_report(results))
+    if agent_failed:
+        print(AGENT_NOT_LOADED, file=sys.stderr)
+        return 1
+    if args.enable_agent and deployment.exit_code(results) != 0:
+        print(AGENT_ENABLED_DESPITE_FAILS, file=sys.stderr)
+    return deployment.exit_code(results)
 
 
 def cmd_validate(args) -> int:
@@ -4813,6 +5084,58 @@ def cmd_sync_metadata(args) -> int:
     return sync_from_sheet(args)
 
 
+def sync_header_refusal(
+    column_map: ColumnMap, config: ProjectConfig, registry_path: str
+) -> tuple[str, list[str]] | None:
+    """(message, detail lines) for the first header-row reason sync-metadata
+    refuses a Sheet, or None. The `sync state columns` deployment check runs it
+    too, after read_sheet's no-data-rows refusal, so --enable-agent refuses the
+    Sheets the agent would."""
+    # A header defect corrupts every row's field names identically, and unlike
+    # upload there is no per-row way around it.
+    header_errors = check_column_map(column_map)
+    if header_errors:
+        return (
+            "the Sheet's header row has problems that affect every row - refusing to send "
+            "metadata until they are fixed",
+            header_errors,
+        )
+
+    # All three checks are before anything is sent, and all three apply in
+    # test mode as well as live: a rehearsal that passes where the real run
+    # refuses is a false negative on the one run an operator trusts.
+    try:
+        locate_sync_columns(column_map)
+    except MissingSyncColumns as exc:
+        return str(exc), []
+
+    # _verified() re-checks this same thing before every stamp write, because
+    # a column can vanish mid-run - but relying on that alone lets a Sheet
+    # that never had ia_identifier_bib through the front door: ia_identifier
+    # and ia_uploaded absent means no row classifies DONE (refused in
+    # sync_from_sheet, at "no row is marked uploaded yet"), and ia_url absent
+    # means every row is a reported problem, but ia_identifier_bib absent is
+    # invisible there - rows plan, hash-gate, and push, and only then does
+    # _verified() catch it, per chunk, forever, stamping nothing while
+    # permanent metadata keeps going out. Checked here for the same reason
+    # check_file_template is.
+    try:
+        locate_write_back_columns(column_map)
+    except MissingWriteBackColumns as exc:
+        return f"project '{config.project_id}': {exc}", []
+
+    # The moved-row guard fingerprints a row by its file_template columns.
+    # A template naming a column the Sheet lacks fingerprints EVERY row as
+    # "", which never matches - so nothing would ever be stamped and every
+    # row would re-push forever, silently. Header check only; no disk access.
+    try:
+        check_file_template(config.file_template, column_map)
+    except TemplateError as exc:
+        return f"project '{config.project_id}': {exc} - fix 'file_template' in {registry_path}", []
+
+    return None
+
+
 def sync_from_sheet(args) -> int:
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
@@ -4863,54 +5186,14 @@ def sync_from_sheet(args) -> int:
 
     column_map, rows = sheet.column_map, sheet.rows
 
-    # A header defect corrupts every row's field names identically, and unlike
-    # upload there is no per-row way around it.
-    header_errors = check_column_map(column_map)
-    if header_errors:
-        print("\n".join(f"    - {error}" for error in header_errors))
-        print(
-            "the Sheet's header row has problems that affect every row - refusing to send "
-            "metadata until they are fixed",
-            file=sys.stderr,
-        )
+    refusal = sync_header_refusal(column_map, config, args.registry)
+    if refusal is not None:
+        message, details = refusal
+        if details:
+            print("\n".join(f"    - {detail}" for detail in details))
+        print(message, file=sys.stderr)
         return 1
-
-    # All three checks are before anything is sent, and all three apply in
-    # test mode as well as live: a rehearsal that passes where the real run
-    # refuses is a false negative on the one run an operator trusts.
-    try:
-        sync_columns = locate_sync_columns(column_map)
-    except MissingSyncColumns as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-
-    # _verified() re-checks this same thing before every stamp write, because
-    # a column can vanish mid-run - but relying on that alone lets a Sheet
-    # that never had ia_identifier_bib through the front door: ia_identifier
-    # and ia_uploaded absent means no row classifies DONE (refused above, at
-    # "no row is marked uploaded yet"), and ia_url absent means every row is
-    # a reported problem, but ia_identifier_bib absent is invisible here -
-    # rows plan, hash-gate, and push, and only then does _verified() catch
-    # it, per chunk, forever, stamping nothing while permanent metadata keeps
-    # going out. Checked here for the same reason check_file_template is.
-    try:
-        locate_write_back_columns(column_map)
-    except MissingWriteBackColumns as exc:
-        print(f"project '{config.project_id}': {exc}", file=sys.stderr)
-        return 1
-
-    # The moved-row guard fingerprints a row by its file_template columns.
-    # A template naming a column the Sheet lacks fingerprints EVERY row as
-    # "", which never matches - so nothing would ever be stamped and every
-    # row would re-push forever, silently. Header check only; no disk access.
-    try:
-        check_file_template(config.file_template, column_map)
-    except TemplateError as exc:
-        print(
-            f"project '{config.project_id}': {exc} - fix 'file_template' in {args.registry}",
-            file=sys.stderr,
-        )
-        return 1
+    sync_columns = locate_sync_columns(column_map)
 
     targets, problems = plan_sync_targets(
         rows, column_map, live, config.project_id, config.file_template
@@ -5541,7 +5824,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "--files-dir", default=".", help="Base directory the CSV's 'file' column is resolved against (--csv only)"
     )
-    validate_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    validate_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     validate_parser.add_argument(
         "--live",
         action="store_true",
@@ -5575,7 +5858,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Base directory the 'file' column is resolved against (--csv only; the Sheet path takes it from the registry)",
     )
-    upload_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    upload_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     upload_parser.add_argument("--live", action="store_true", help="Target the real Sheet and the registry's real collection instead of the test Sheet and test_collection")
     upload_parser.add_argument(
         "--collection",
@@ -5651,7 +5934,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sync_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    sync_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    sync_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     sync_parser.add_argument("--live", action="store_true", help="Read the project's real Sheet and target the real, permanent items instead of the test Sheet and its zztest- rehearsal items")
     sync_parser.add_argument(
         "--dry-run",
@@ -5689,7 +5972,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Find rows whose filename does not resolve against the drive and correct them",
     )
     reconcile_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    reconcile_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    reconcile_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     reconcile_parser.add_argument("--live", action="store_true", help="Read and write the project's real Sheet instead of its test Sheet")
     reconcile_parser.add_argument("--dry-run", action="store_true", help="Print what would be proposed; prompt for nothing and write nothing")
     reconcile_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
@@ -5699,10 +5982,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append a skeleton row for every photo file on the drive that no row claims",
     )
     append_parser.add_argument("--project", required=True, help="Project ID from the registry")
-    append_parser.add_argument("--registry", default="projects_registry.json", help="Path to the project registry JSON")
+    append_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     append_parser.add_argument("--live", action="store_true", help="Read and write the project's real Sheet instead of its test Sheet")
     append_parser.add_argument("--dry-run", action="store_true", help="Print the rows that would be appended and write nothing")
     append_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check that this machine is set up to run the pipeline. Reads only; changes nothing",
+    )
+    doctor_parser.add_argument("--project", required=True, help="Project ID from the registry")
+    doctor_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
+    doctor_parser.add_argument("--live", action="store_true", help="Check the project's real Sheet instead of its test Sheet")
+    doctor_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
+
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Bring this machine to the state this checkout needs, then verify. Safe to re-run",
+    )
+    setup_parser.add_argument("--project", required=True, help="Project ID from the registry")
+    setup_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
+    setup_parser.add_argument("--live", action="store_true", help="Converge against the project's real Sheet instead of its test Sheet")
+    setup_parser.add_argument("--offline", action="store_true", help="Skip the checks that need the network")
+    setup_parser.add_argument(
+        "--enable-agent",
+        action="store_true",
+        help=(
+            "Load the hourly sync LaunchAgent for the account running this. Run it from the "
+            "operating account, after the first live runs have been verified"
+        ),
+    )
 
     return parser
 
@@ -5721,6 +6030,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_reconcile_files(args)
     if args.command == "append-rows":
         return cmd_append_rows(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
+    if args.command == "setup":
+        return cmd_setup(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2

@@ -120,14 +120,24 @@ matches. It bought real simplicity — no per-row state, no extra `ia_` column,
 no second place for the Sheet and the item to drift apart.
 
 It does not survive either of the two things that changed. At ~4,000 items on
-the hourly schedule of issue #27 it is ~4,000 pointless writes an hour. And it
+the hourly schedule of issue #27 — now the LaunchAgent that
+`./install.sh --project <project> --live --enable-agent` installs, see
+[`DEPLOYMENT.md`](../DEPLOYMENT.md#12-enabling-the-hourly-sync) — it is
+~4,000 pointless writes an hour. And it
 makes the run log useless, which is the worse half: a real edit is
 indistinguishable from the background noise, so the log cannot answer the one
 question anybody asks it.
 
-So each row now carries a hash of what it last successfully pushed, in a
-hidden `ia_sync_hash` column, with `ia_last_synced` beside it for a human to
-read. A row is sent only when its current content hashes differently.
+So each row now carries a hash of what it last successfully pushed, in an
+`ia_sync_hash` column, with `ia_last_synced` beside it for a human to read. A
+row is sent only when its current content hashes differently.
+
+Both columns were originally to be hidden, like the tool's other columns.
+**Reversed 2026-09-21:** they stay visible with a red background instead. The
+red carries the same "don't type here" signal hiding did, while keeping the
+two things hiding threw away — `ia_last_synced` is worth glancing at, and
+clearing an `ia_sync_hash` cell is the only way to force a row to re-send,
+which needs a cell an operator can actually select.
 
 The state lives in the Sheet, not a local file: it survives the machine being
 wiped or replaced, and it gives a non-technical operator a recovery lever that

@@ -1,9 +1,11 @@
+import argparse
 import contextlib
 import dataclasses
 import io
 import json
 import csv
 import re
+import shlex
 import tempfile
 from argparse import Namespace
 from pathlib import Path
@@ -16,7 +18,9 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
+import deployment
 import google_auth
+import ia_bulk
 from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
     read_csv,
@@ -4200,6 +4204,1022 @@ def test_main_dispatches_to_cmd_validate(monkeypatch, tmp_path):
 
     assert exit_code == 0
     assert calls == [str(csv_path)]
+
+
+def test_build_parser_accepts_doctor():
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert args.command == "doctor"
+
+
+def test_doctor_defaults_to_test_mode_like_every_other_command():
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert args.live is False
+
+
+def test_main_dispatches_to_cmd_doctor(monkeypatch):
+    called = []
+    monkeypatch.setattr(ia_bulk, "cmd_doctor", lambda args: called.append(args.command) or 0)
+    assert ia_bulk.main(["doctor", "--project", "demo"]) == 0
+    assert called == ["doctor"]
+
+
+def test_doctor_subparser_exposes_no_mutating_flags():
+    """Documents the parser surface only - does not by itself prove `doctor`
+    never mutates. See test_cmd_doctor_never_calls_a_failing_checks_fix for
+    the behavioral guarantee."""
+    parser = ia_bulk.build_parser()
+    doctor = next(
+        action.choices["doctor"]
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    flags = {action.dest for action in doctor._actions}
+    assert "enable_agent" not in flags
+    assert "fix" not in flags
+
+
+def test_cmd_doctor_never_calls_a_failing_checks_fix(monkeypatch):
+    """The property that actually matters: cmd_doctor must call run_checks,
+    never converge, so a FAIL never triggers that check's fix(). A FAIL with
+    a fix is the only shape where the two implementations differ."""
+    fix_calls = []
+
+    def fix() -> str:
+        fix_calls.append(True)
+        return "fixed"
+
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="invented",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "nope"),
+                remedy="do the thing",
+                fix=fix,
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    exit_code = ia_bulk.cmd_doctor(args)
+
+    assert fix_calls == []
+    assert exit_code == 1
+
+
+def test_cmd_doctor_returns_one_when_a_check_fails(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="invented",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "nope"),
+                remedy="do the thing",
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert ia_bulk.cmd_doctor(args) == 1
+    assert "do the thing" in capsys.readouterr().out
+
+
+def test_cmd_doctor_returns_zero_when_everything_passes(monkeypatch):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="invented",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
+                remedy="none",
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    assert ia_bulk.cmd_doctor(args) == 0
+
+
+def test_build_parser_accepts_setup_with_enable_agent():
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo", "--enable-agent"])
+    assert args.command == "setup"
+    assert args.enable_agent is True
+
+
+def test_setup_does_not_enable_the_agent_by_default():
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert args.enable_agent is False
+
+
+def test_main_dispatches_to_cmd_setup(monkeypatch):
+    called = []
+    monkeypatch.setattr(ia_bulk, "cmd_setup", lambda args: called.append(args.command) or 0)
+    assert ia_bulk.main(["setup", "--project", "demo"]) == 0
+    assert called == ["setup"]
+
+
+def test_cmd_setup_without_enable_agent_never_calls_launchctl(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: pytest.fail("setup loaded the agent without --enable-agent"),
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert ia_bulk.cmd_setup(args) == 0
+
+
+def test_cmd_setup_with_enable_agent_bootstraps_it(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    loaded = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (loaded.append(path), (True, "loaded"))[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "sarasoldphotos", "--live", "--enable-agent"]
+    )
+    ia_bulk.cmd_setup(args)
+    assert len(loaded) == 1
+
+
+def test_cmd_setup_reports_when_it_changed_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="already fine",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
+                remedy="none",
+            )
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert ia_bulk.cmd_setup(args) == 0
+    assert "nothing to change" in capsys.readouterr().out
+
+
+def test_cmd_setup_converges_and_reports_what_it_fixed(monkeypatch, capsys):
+    """Companion to the quiet-path test above: a check that starts FAIL and has
+    a fix() that clears it. This is the only case that exercises cmd_setup's
+    own `changes` bookkeeping - the quiet-path test's single PASSing check
+    never calls announce() at all, so it can't tell a working closure from a
+    broken one."""
+    fixed_calls = []
+
+    def fix() -> str:
+        fixed_calls.append(True)
+        return "fixed it"
+
+    attempts = []
+
+    def probe() -> deployment.CheckOutcome:
+        attempts.append(True)
+        if len(attempts) == 1:
+            return deployment.CheckOutcome(deployment.Status.FAIL, "not yet")
+        return deployment.CheckOutcome(deployment.Status.PASS, "fine now")
+
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(name="needs a fix", probe=probe, remedy="do the thing", fix=fix)
+        ],
+    )
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert ia_bulk.cmd_setup(args) == 0
+    out = capsys.readouterr().out
+    assert fixed_calls == [True]
+    assert "nothing to change" not in out
+    assert "fixing" in out
+    assert "fixed it" in out
+
+
+def test_cmd_setup_with_enable_agent_announces_before_it_bootstraps(monkeypatch, capsys):
+    """Both risky actions on a shared machine - permission changes and loading
+    the agent - must be announced before they happen, never only after. The
+    fake bootstrap asserts at call time (not on final stdout order), so it
+    catches a version that hoists launchctl_bootstrap(plist) into a variable
+    assigned before the two announce() calls: the real side effect would fire
+    before anything is printed, even though the final stdout text order would
+    look identical."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+
+    def fake_bootstrap(path):
+        already_printed = capsys.readouterr().out
+        assert "loading" in already_printed
+        assert "starts a live sync run now, and again at every login" in already_printed
+        return True, "loaded it"
+
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", fake_bootstrap)
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    monkeypatch.setattr(ia_bulk.platform_probe, "current_user", lambda: "sarasoldphotos")
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "sarasoldphotos", "--live", "--enable-agent"]
+    )
+    ia_bulk.cmd_setup(args)
+
+
+# ---------------------------------------------------------------------------
+# --enable-agent: verify first, then enable. Every test below exists because
+# the alternative is an unattended live sync nobody asked for, against a Sheet
+# nothing checked - and an Internet Archive identifier cannot be renamed.
+# ---------------------------------------------------------------------------
+
+
+def _setup_args(*extra):
+    return ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "sarasoldphotos", *extra]
+    )
+
+
+# What _setup_args' operator pastes back into zsh; `<project>` there is a redirect.
+RUNNABLE_ENABLE_COMMAND = "./install.sh --project sarasoldphotos --live --enable-agent"
+
+
+def _stub_plist_write(monkeypatch, written=None):
+    """load_sync_agent writes the plist; never into the real ~/Library/LaunchAgents."""
+
+    def fake_write(spec, home):
+        if written is not None:
+            written.append(spec.label)
+        return f"wrote {spec.label}.plist"
+
+    monkeypatch.setattr(ia_bulk.launch_agent, "write_plist", fake_write)
+
+
+def _explode_on_launchctl(monkeypatch):
+    """Any launchctl call, or any plist write, is a failure for the refusal tests.
+    The write comes first in load_sync_agent and would land in the real home."""
+    for name in ("launchctl_bootstrap", "launchctl_bootout", "launchctl_print"):
+        monkeypatch.setattr(
+            ia_bulk.platform_probe,
+            name,
+            lambda *a, _name=name: pytest.fail(f"setup called {_name}"),
+        )
+    monkeypatch.setattr(
+        ia_bulk.launch_agent,
+        "write_plist",
+        lambda *a: pytest.fail("setup wrote the plist"),
+    )
+
+
+def test_cmd_setup_refuses_enable_agent_without_live(monkeypatch, capsys):
+    """The agent's ProgramArguments end in --live, but the checks gating it run
+    in whatever mode setup was given. Implying --live here is the silent
+    widening that makes a live write surprising, so it refuses instead."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    assert ia_bulk.cmd_setup(_setup_args("--enable-agent")) == 1
+    err = capsys.readouterr().err
+    assert "--live" in err
+    assert RUNNABLE_ENABLE_COMMAND in err
+
+
+def test_cmd_setup_refuses_enable_agent_with_offline(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--offline", "--enable-agent")) == 1
+    err = capsys.readouterr().err
+    assert "--offline" in err
+    assert RUNNABLE_ENABLE_COMMAND in err
+
+
+def test_cmd_setup_still_allows_offline_without_enable_agent(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    assert ia_bulk.cmd_setup(_setup_args("--offline")) == 0
+
+
+def test_cmd_setup_does_not_enable_the_agent_when_a_check_failed(monkeypatch, capsys):
+    """CRITICAL: a machine with a FAILing key or FAILing sync columns used to
+    bootstrap a plist with RunAtLoad and --live anyway."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="service account key",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "no key"),
+                remedy="download the key",
+            )
+        ],
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    captured = capsys.readouterr()
+    assert "NOT enabled" in captured.err
+    assert RUNNABLE_ENABLE_COMMAND in captured.err
+    assert "[FAIL] service account key" in captured.out
+
+
+def test_cmd_setup_enables_the_agent_when_every_check_passes(monkeypatch):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="fine",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
+                remedy="none",
+            ),
+            *_sheet_checks_that(deployment.Status.PASS),
+        ],
+    )
+    _stub_plist_write(monkeypatch)
+    loaded = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (loaded.append(path), (True, "loaded"))[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+    assert len(loaded) == 1
+
+
+def _sheet_checks_that(status, detail="fine"):
+    return [
+        deployment.Check(
+            name=name,
+            probe=lambda _status=status, _detail=detail: deployment.CheckOutcome(_status, _detail),
+            remedy="check the Sheet",
+        )
+        for name in deployment.LIVE_SHEET_CHECKS
+    ]
+
+
+def test_cmd_setup_does_not_enable_the_agent_when_the_live_sheet_is_unverified(monkeypatch, capsys):
+    """An install-day machine on someone else's wifi: both Sheet probes raise,
+    _probe turns each into UNKNOWN, exit_code stays 0 - and a RunAtLoad --live
+    agent used to bootstrap without the sheet_id, the sharing or the sync
+    columns ever having been confirmed. Same hole as the two Criticals, reached
+    by a different route, and the reason --offline is refused."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="python version",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "3.12"),
+                remedy="none",
+            ),
+            *_sheet_checks_that(deployment.Status.UNKNOWN, "could not reach the Sheet"),
+        ],
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    err = capsys.readouterr().err
+    assert "could not be verified" in err
+    assert "NOT enabled" in err
+    assert RUNNABLE_ENABLE_COMMAND in err
+    for name in deployment.LIVE_SHEET_CHECKS:
+        assert name in err
+
+
+def test_doctor_still_exits_zero_on_the_same_unverified_sheet(monkeypatch):
+    """The stricter rule is the --enable-agent gate's alone. UNKNOWN keeps its
+    meaning everywhere else, doctor included."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: _sheet_checks_that(
+            deployment.Status.UNKNOWN, "could not reach the Sheet"
+        ),
+    )
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "sarasoldphotos", "--live"])
+    assert ia_bulk.cmd_doctor(args) == 0
+
+
+def test_cmd_setup_enables_the_agent_when_a_check_is_only_unknown(monkeypatch):
+    """UNKNOWN outside the two Sheet checks still does not block - the files
+    drive being unplugged is no reason to refuse to enable the agent."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="files drive",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.UNKNOWN, "unplugged?"),
+                remedy="plug it in",
+            ),
+            *_sheet_checks_that(deployment.Status.PASS),
+        ],
+    )
+    _stub_plist_write(monkeypatch)
+    loaded = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (loaded.append(path), (True, "loaded"))[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+    assert len(loaded) == 1
+
+
+def test_cmd_setup_returns_non_zero_when_the_bootstrap_failed(monkeypatch, capsys):
+    """agent_loaded_check reports "not loaded" as UNKNOWN by design, so exit_code
+    stays 0 - the one command whose purpose is loading the agent could not fail."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (False, "launchctl bootstrap failed: Bootstrap failed: 5"),
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    assert "not loaded" in capsys.readouterr().err
+
+
+def test_cmd_setup_boots_out_an_already_loaded_agent_before_bootstrapping(monkeypatch, capsys):
+    """launchd holds its own copy of the plist from bootstrap time, so after
+    `git pull && ./install.sh` changes ProgramArguments the running job still
+    executes the old command while doctor reports both checks PASS."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_print", lambda label: "\tlast exit code = 0\n"
+    )
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "wait_until_unloaded",
+        lambda label: (calls.append("wait"), True)[1],
+    )
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootout",
+        lambda label: (calls.append("bootout"), (True, "unloaded"))[1],
+    )
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (calls.append("bootstrap"), (True, "loaded"))[1],
+    )
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+    assert calls == ["bootout", "wait", "bootstrap"]
+    out = capsys.readouterr().out
+    assert "unloading it first" in out
+    assert "a sync running right now is stopped" in out
+
+
+def test_cmd_setup_announces_the_bootout_before_it_happens(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_print", lambda label: "\tlast exit code = 0\n"
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "wait_until_unloaded", lambda label: True)
+
+    def fake_bootout(label):
+        assert "unloading it first" in capsys.readouterr().out
+        return True, "unloaded"
+
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootout", fake_bootout)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: (True, "loaded")
+    )
+    ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent"))
+
+
+def test_cmd_setup_does_not_bootout_an_agent_that_is_not_loaded(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootout",
+        lambda label: pytest.fail("booted out an agent that was never loaded"),
+    )
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: (True, "loaded")
+    )
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+
+
+def test_cmd_setup_writes_the_plist_only_when_enabling_and_before_bootstrapping(monkeypatch):
+    """launchd loads every plist in LaunchAgents at login, so a plain install
+    that wrote one started a live agent nobody enabled."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    calls = []
+    monkeypatch.setattr(
+        ia_bulk.launch_agent,
+        "write_plist",
+        lambda spec, home: (calls.append("write"), "wrote it")[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (calls.append("bootstrap"), (True, "loaded"))[1],
+    )
+
+    assert ia_bulk.cmd_setup(_setup_args("--live")) == 0
+    assert calls == []
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+    assert calls == ["write", "bootstrap"]
+
+
+def test_cmd_setup_does_not_bootstrap_when_the_plist_cannot_be_written(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+
+    def unwritable(spec, home):
+        raise PermissionError("Operation not permitted")
+
+    _explode_on_launchctl(monkeypatch)
+    monkeypatch.setattr(ia_bulk.launch_agent, "write_plist", unwritable)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    captured = capsys.readouterr()
+    assert "could not write" in captured.out
+    assert "not loaded" in captured.err
+
+
+def test_cmd_setup_does_not_bootstrap_when_a_failed_bootout_leaves_the_agent_loaded(
+    monkeypatch, capsys
+):
+    """Bootstrapping over a still-loaded agent fails anyway, and hides why."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_print", lambda label: "\tlast exit code = 0\n"
+    )
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootout",
+        lambda label: (False, "launchctl bootout failed: Boot-out failed: 5"),
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "wait_until_unloaded", lambda label: False)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: pytest.fail("bootstrapped over an agent that is still loaded"),
+    )
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    captured = capsys.readouterr()
+    assert "Boot-out failed: 5" in captured.out
+    assert "not loaded" in captured.err
+
+
+def test_cmd_setup_bootstraps_once_an_in_progress_bootout_finishes(monkeypatch):
+    """launchctl bootout exits 36 while a running job is still stopping."""
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_print", lambda label: "\tlast exit code = 0\n"
+    )
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootout",
+        lambda label: (False, "launchctl bootout failed: Boot-out failed: 36: Operation now in progress"),
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "wait_until_unloaded", lambda label: True)
+    loaded = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (loaded.append(path), (True, "loaded"))[1],
+    )
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+    assert len(loaded) == 1
+
+
+def test_cmd_setup_does_not_bootstrap_until_the_old_agent_is_gone(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    _stub_plist_write(monkeypatch)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe, "launchctl_print", lambda label: "\tlast exit code = 0\n"
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootout", lambda label: (True, "unloaded"))
+    monkeypatch.setattr(ia_bulk.platform_probe, "wait_until_unloaded", lambda label: False)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: pytest.fail("bootstrapped while the old agent was still registered"),
+    )
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    assert "still registered" in capsys.readouterr().out
+
+
+def _write_registry(path):
+    path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    return path
+
+
+def test_enable_agent_points_the_agent_at_the_registry_setup_checked(tmp_path, monkeypatch):
+    """The gate reads --registry; an agent reading projects_registry.json instead
+    would run an hourly live sync against a Sheet the gate never saw."""
+    registry_path = _write_registry(tmp_path / "alt.json")
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: _sheet_checks_that(deployment.Status.PASS),
+    )
+    written = []
+    monkeypatch.setattr(
+        ia_bulk.launch_agent,
+        "write_plist",
+        lambda spec, home: (written.append(spec), f"wrote {spec.label}.plist")[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", lambda path: (True, "loaded"))
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "astoriaphotos", "--registry", str(registry_path),
+         "--live", "--enable-agent"]
+    )
+
+    assert ia_bulk.cmd_setup(args) == 0
+    arguments = written[0].program_arguments
+    assert arguments[arguments.index("--registry") + 1] == str(registry_path.resolve())
+
+
+def _plist_check_outcome(registry_path, home, monkeypatch):
+    monkeypatch.setattr(ia_bulk.Path, "home", lambda: home)
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    checks = ia_bulk.build_deployment_checks(args, include_network=False)
+    (plist_check,) = [check for check in checks if check.name == "launch agent plist"]
+    return plist_check.probe()
+
+
+def test_doctor_passes_the_plist_enable_agent_wrote_for_the_same_registry(tmp_path, monkeypatch):
+    registry_path = _write_registry(tmp_path / "alt.json")
+    home = tmp_path / "home"
+    ia_bulk.launch_agent.write_plist(
+        ia_bulk.launch_agent.sync_agent_spec(ia_bulk.REPO_ROOT, "astoriaphotos", registry_path), home
+    )
+    assert _plist_check_outcome(registry_path, home, monkeypatch).status is deployment.Status.PASS
+
+
+def test_doctor_flags_a_plist_enabled_for_a_different_registry(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    ia_bulk.launch_agent.write_plist(
+        ia_bulk.launch_agent.sync_agent_spec(
+            ia_bulk.REPO_ROOT, "astoriaphotos", _write_registry(tmp_path / "alt.json")
+        ),
+        home,
+    )
+    outcome = _plist_check_outcome(_write_registry(tmp_path / "other.json"), home, monkeypatch)
+    assert outcome.status is deployment.Status.FAIL
+    assert "registry" in outcome.detail
+
+
+def test_cmd_setup_reenables_an_agent_whose_last_run_failed(tmp_path, monkeypatch):
+    """The loaded check's FAIL used to block the very reload its remedy prescribes."""
+    spec = ia_bulk.launch_agent.sync_agent_spec(tmp_path, "sarasoldphotos", tmp_path / "registry.json")
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.agent_loaded_check(spec, deployment.InstallCommand("sarasoldphotos")),
+            *_sheet_checks_that(deployment.Status.PASS),
+        ],
+    )
+    _stub_plist_write(monkeypatch)
+    launchd: dict[str, str | None] = {"listing": "\tlast exit code = 1\n"}
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda label: launchd["listing"])
+
+    def bootout(label):
+        launchd["listing"] = None
+        return True, "unloaded"
+
+    def bootstrap(path):
+        launchd["listing"] = "\tpid = 42\n\tlast exit code = (never exited)\n"
+        return True, "loaded"
+
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootout", bootout)
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_bootstrap", bootstrap)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
+    assert launchd["listing"] == "\tpid = 42\n\tlast exit code = (never exited)\n"
+
+
+def test_cmd_setup_enables_the_agent_despite_a_failing_files_drive(tmp_path, monkeypatch, capsys):
+    """sync-metadata never reads the drive, so its FAIL is reported but does not gate."""
+    not_a_directory = tmp_path / "files"
+    not_a_directory.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.drive_check(not_a_directory),
+            *_sheet_checks_that(deployment.Status.PASS),
+        ],
+    )
+    _stub_plist_write(monkeypatch)
+    loaded = []
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (loaded.append(path), (True, "loaded"))[1],
+    )
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    captured = capsys.readouterr()
+    assert len(loaded) == 1
+    assert "NOT enabled" not in captured.err
+    assert ia_bulk.AGENT_ENABLED_DESPITE_FAILS in captured.err
+    assert "[FAIL] files drive" in captured.out
+
+
+def test_cmd_setup_names_the_failures_rather_than_the_network_when_both_block(monkeypatch, capsys):
+    """An offline machine with a FAIL: the FAIL leads, and the Sheet checks are still named."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="service account key",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "no key"),
+                remedy="download the key",
+            ),
+            *_sheet_checks_that(deployment.Status.UNKNOWN, "could not authenticate"),
+        ],
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 1
+    err = capsys.readouterr().err
+    assert err.index("service account key failed") < err.index("came back UNKNOWN too")
+    for name in deployment.LIVE_SHEET_CHECKS:
+        assert name in err
+    assert "no network" not in err
+
+
+@pytest.mark.parametrize(
+    "content",
+    [pytest.param(b"{not json", id="malformed"), pytest.param(b'{"x": "caf\xe9"}', id="not_utf8")],
+)
+def test_cmd_setup_reports_a_broken_registry_instead_of_a_traceback(tmp_path, capsys, content):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_bytes(content)
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    assert ia_bulk.cmd_setup(args) == 1
+    assert str(registry_path) in capsys.readouterr().err
+
+
+def test_cmd_setup_does_not_claim_the_machine_matches_when_a_check_failed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="ia credentials",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "no ia config"),
+                remedy="run ia configure",
+            )
+        ],
+    )
+    assert ia_bulk.cmd_setup(_setup_args()) == 1
+    out = capsys.readouterr().out
+    assert "already matches" not in out
+    assert "[FAIL] ia credentials" in out
+
+def test_cmd_doctor_reports_a_broken_registry_instead_of_a_traceback(tmp_path, capsys):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text("{not json", encoding="utf-8")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    assert ia_bulk.cmd_doctor(args) == 1
+    assert str(registry_path) in capsys.readouterr().err
+
+
+def test_cmd_doctor_reports_a_missing_registry_instead_of_a_traceback(tmp_path, capsys):
+    missing = tmp_path / "nope.json"
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(missing)]
+    )
+    assert ia_bulk.cmd_doctor(args) == 1
+    assert str(missing) in capsys.readouterr().err
+
+
+def test_cmd_doctor_reports_an_unregistered_project_instead_of_a_traceback(tmp_path, capsys):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "nosuchproject", "--registry", str(registry_path)]
+    )
+    assert ia_bulk.cmd_doctor(args) == 1
+    assert capsys.readouterr().err.strip()
+
+
+def test_build_deployment_checks_reads_the_sheet_once_for_both_sheet_checks(tmp_path, monkeypatch):
+    """Two closures each building their own client meant two token fetches and
+    two full reads of a ~10,000-row Sheet per read-only `doctor` run."""
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    clients_built = []
+
+    class _OneGrid:
+        def read_grid(self):
+            header = [*SHEET_HEADER, "ia_sync_hash", "ia_last_synced"]
+            return [header, ["a"] * len(header)]
+
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_sheet_client",
+        lambda config, live: (clients_built.append(live), _OneGrid())[1],
+    )
+    monkeypatch.setattr(ia_bulk, "sheet_sharing_target", lambda: "sa@example.invalid")
+
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    checks = ia_bulk.build_deployment_checks(args, include_network=True)
+    sheet_checks = [
+        check for check in checks if check.name in ("spreadsheet reachable", "sync state columns")
+    ]
+    assert len(sheet_checks) == 2
+    for check in sheet_checks:
+        assert check.probe().status is deployment.Status.PASS
+    assert len(clients_built) == 1
+
+
+def test_build_deployment_checks_covers_the_ia_credential(tmp_path):
+    """Ten checks covered Python, deps, the Google key, the Sheet, the drive and
+    the agent - and none covered the credential that grants write on Internet
+    Archive, the only one the hourly agent needs to do its actual job."""
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    names = [check.name for check in ia_bulk.build_deployment_checks(args, include_network=False)]
+    assert "ia credentials" in names
+    assert "ia credentials permissions" in names
+
+
+def test_build_deployment_checks_skips_the_sheet_read_while_the_sheet_id_is_a_placeholder(
+    tmp_path, monkeypatch
+):
+    """Reading it earned a 404 FAIL whose remedy said to share the Sheet."""
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(test_sheet_id="REPLACE_WITH_TEST_SHEET_ID")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ia_bulk, "build_sheet_client", lambda config, live: pytest.fail("read a placeholder ID")
+    )
+    monkeypatch.setattr(ia_bulk, "sheet_sharing_target", lambda: "sa@example.invalid")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    checks = ia_bulk.build_deployment_checks(args, include_network=True)
+    for check in checks:
+        if check.name in deployment.LIVE_SHEET_CHECKS:
+            outcome = check.probe()
+            assert outcome.status is deployment.Status.UNKNOWN
+            assert "placeholder" in outcome.detail
+
+
+@pytest.mark.parametrize(
+    "extra, dropped, data_rows, expected",
+    [
+        pytest.param([], None, 1, None, id="ready"),
+        pytest.param(["title"], None, 1, "both normalize", id="own_columns_collide"),
+        pytest.param([""], None, 1, "empty field name", id="blank_header"),
+        pytest.param([], "ia_last_synced", 1, "ia_last_synced", id="sync_column_missing"),
+        pytest.param([], "ia_identifier_bib", 1, "ia_identifier_bib", id="write_back_column_missing"),
+        pytest.param([], "file", 1, "file_template", id="file_template_column_missing"),
+        pytest.param([], None, 0, "no data rows", id="no_data_rows"),
+    ],
+)
+def test_the_sync_check_refuses_what_sync_metadata_refuses(
+    tmp_path, monkeypatch, extra, dropped, data_rows, expected
+):
+    """The gate used to PASS Sheets the agent then refused every hour."""
+    header = [*SHEET_HEADER, "ia_sync_hash", "ia_last_synced", *extra]
+    if dropped is not None:
+        header.remove(dropped)
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+
+    class _Grid:
+        def read_grid(self):
+            return [header, *(["a"] * len(header) for _ in range(data_rows))]
+
+    monkeypatch.setattr(ia_bulk, "build_sheet_client", lambda config, live: _Grid())
+    monkeypatch.setattr(ia_bulk, "sheet_sharing_target", lambda: "sa@example.invalid")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    sync_check = next(
+        check
+        for check in ia_bulk.build_deployment_checks(args, include_network=True)
+        if check.name == deployment.SYNC_COLUMNS_CHECK
+    )
+    outcome = sync_check.probe()
+    config = ia_bulk.load_project_config(make_sheet_registry(), "astoriaphotos")
+    refusal = ia_bulk.sync_header_refusal(build_column_map(header), config, str(registry_path))
+
+    if expected is None:
+        assert outcome.status is deployment.Status.PASS
+        assert refusal is None
+    else:
+        assert outcome.status is deployment.Status.FAIL
+        assert expected in outcome.detail
+        # The no-data-rows refusal is read_sheet's, not the header gate's.
+        assert (refusal is not None) == bool(data_rows)
+
+
+def test_cmd_setup_reuses_the_same_repo_root_build_deployment_checks_uses():
+    assert ia_bulk.REPO_ROOT == Path(ia_bulk.__file__).resolve().parent
+
+
+def test_every_install_sh_remedy_names_the_required_project_flag(tmp_path):
+    """setup's --project is required (build_parser), and install.sh execs
+    `ia_bulk.py setup "$@"` verbatim - so a remedy that tells the operator to
+    run ./install.sh (with or without --enable-agent) but leaves out
+    --project hands them a command argparse rejects before anything runs.
+    Built through the real build_deployment_checks(), not hand-made Check
+    objects, so this sees the actual remedy strings doctor/setup print."""
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
+    args = ia_bulk.build_parser().parse_args(
+        ["doctor", "--project", "astoriaphotos", "--registry", str(registry_path)]
+    )
+    checks = ia_bulk.build_deployment_checks(args, include_network=False)
+    install_sh_remedies = [check.remedy for check in checks if "install.sh" in check.remedy]
+
+    assert install_sh_remedies, "expected at least one check to remedy via install.sh"
+    for remedy in install_sh_remedies:
+        assert "./install.sh --project astoriaphotos" in remedy, (
+            f"remedy names install.sh but not the real --project: {remedy!r}"
+        )
+        # Pasted into zsh, `<project>` is a redirect from a file named "project".
+        assert "<" not in remedy and ">" not in remedy, f"remedy has a placeholder: {remedy!r}"
+        # Without it, re-running enables an agent on the default registry, and doctor still FAILs.
+        assert f"--registry {shlex.quote(str(registry_path.resolve()))}" in remedy, remedy
+
+
+def test_install_command_omits_the_checkouts_own_registry():
+    args = _setup_args("--registry", str(ia_bulk.REPO_ROOT / "projects_registry.json"))
+    assert ia_bulk.install_command_for(args).registry is None
+
+
+def test_cmd_setup_refusal_repeats_a_non_default_registry(tmp_path, monkeypatch, capsys):
+    """Run as printed, a refusal that dropped --registry would enable a live agent
+    on the default registry's Sheet instead."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
+    )
+    _explode_on_launchctl(monkeypatch)
+    registry_path = tmp_path / "alt.json"
+
+    assert ia_bulk.cmd_setup(_setup_args("--registry", str(registry_path), "--enable-agent")) == 1
+    assert (
+        "./install.sh --project sarasoldphotos "
+        f"--registry {shlex.quote(str(registry_path.resolve()))} --live --enable-agent"
+    ) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("blocking", "unverified"),
+    [
+        (["service account key"], []),
+        ([], ["spreadsheet reachable"]),
+        (["service account key"], ["spreadsheet reachable"]),
+    ],
+)
+def test_agent_not_enabled_message_names_the_real_project(blocking, unverified):
+    message = ia_bulk.agent_not_enabled_message(
+        blocking, unverified, deployment.InstallCommand("sarasoldphotos")
+    )
+    assert RUNNABLE_ENABLE_COMMAND in message
+    assert "<project>" not in message
 
 
 # ---------------------------------------------------------------------------
