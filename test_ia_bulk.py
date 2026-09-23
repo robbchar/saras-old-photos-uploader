@@ -444,6 +444,23 @@ def test_validate_sheet_rows_rejects_another_projects_identifier(tmp_path):
     assert any("otherproject" in e for e in results[0].errors)
 
 
+def test_validate_sheet_rows_flags_a_file_missing_from_disk(tmp_path):
+    """The disk re-check after file resolution; see docs/KNOWN-ISSUES.md #5."""
+    rows = [
+        {
+            "ia_identifier": "",
+            "file": "does-not-exist.jpg",
+            "mediatype": "image",
+            "title": "First photo",
+        }
+    ]
+
+    results = validate_sheet_rows(rows, tmp_path, make_registry(), "astoriaphotos")
+
+    assert not results[0].is_valid
+    assert results[0].errors == [f"file not found: {tmp_path / 'does-not-exist.jpg'}"]
+
+
 def test_validate_identifiers_rejects_another_projects_identifier():
     """sync-metadata's own path. It writes metadata to whatever identifier
     the row names, so a wrong-project identifier here overwrites another
@@ -5816,6 +5833,53 @@ def test_cmd_upload_live_writes_back_even_without_write_identifier(tmp_path, mon
     ]
 
 
+@pytest.mark.parametrize(
+    "live,expected_uploaded_as",
+    [
+        (False, f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"),
+        (True, "lcps-astoriaphotos-00001"),
+    ],
+)
+def test_cmd_upload_sheet_path_logs_the_item_each_row_was_uploaded_as(
+    tmp_path, monkeypatch, capsys, live, expected_uploaded_as
+):
+    """`identifier` stays the real one; `uploaded_as` is the stamped target in
+    test mode and the bare identifier live."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=live))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    entry = _row_records(next((tmp_path / "logs").glob("upload-*.jsonl")))[0]
+    assert entry["identifier"] == "lcps-astoriaphotos-00001"
+    assert entry["uploaded_as"] == expected_uploaded_as
+    assert entry["status"] == "success"
+
+
+def test_cmd_upload_sheet_path_prints_a_progress_line_per_row(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert f"[1/2] uploading zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001 (photo1.jpg)" in out
+    assert f"[2/2] uploading zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002 (photo2.jpg)" in out
+
+
 def _target(identifier, newly_minted=True, row_number=2):
     """An UploadTarget carrying only what check_claimed_identifiers reads."""
     from ia_bulk import UploadTarget
@@ -10303,6 +10367,31 @@ def test_sync_from_sheet_counts_an_unchanged_item_as_unchanged_not_a_failure(
 
     assert "0 item(s) updated successfully, 1 unchanged, 0 error(s)" in out
     assert exit_code == 0
+
+
+def test_sync_from_sheet_logs_an_already_current_item_as_unchanged(tmp_path, monkeypatch, capsys):
+    """Row 2's item already matches; row 3's takes the edit."""
+    from ia_bulk import MetadataUnchanged, cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
+
+    def unchanged_for_the_first_item(metadata, target):
+        if target.endswith("-00001"):
+            raise MetadataUnchanged(target)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", unchanged_for_the_first_item)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    log_file = next((tmp_path / "logs").glob("sync-metadata-*.jsonl"))
+    statuses = {entry["identifier"]: entry["status"] for entry in _row_records(log_file)}
+    assert statuses == {
+        "lcps-astoriaphotos-00001": "unchanged",
+        "lcps-astoriaphotos-00002": "success",
+    }
 
 
 def test_sync_from_sheet_dry_run_shows_what_would_change_not_just_field_names(
