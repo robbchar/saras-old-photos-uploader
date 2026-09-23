@@ -14,6 +14,30 @@ def test_format_identifier_zero_pads_to_five_digits():
     assert format_identifier("lcps", "sarasoldphotos", 9) == "lcps-sarasoldphotos-00009"
 
 
+@pytest.mark.parametrize(
+    "collection_key, project_id",
+    [
+        ("lcps", "astoria-maps"),   # extra hyphen
+        ("lcps", "Astoria"),        # uppercase
+        ("lcps ", "astoria"),       # trailing whitespace
+        (" lcps", "astoria"),       # parses after strip, but not back to itself
+    ],
+)
+def test_format_identifier_refuses_output_that_does_not_parse_back(collection_key, project_id):
+    with pytest.raises(ValueError, match="does not parse back"):
+        format_identifier(collection_key, project_id, 1)
+
+
+def test_parse_identifier_refuses_non_ascii_digits():
+    assert parse_identifier("lcps-sarasoldphotos-٠٠٠٠٩") is None
+
+
+def test_next_identifiers_does_not_count_non_ascii_digits():
+    existing = ["lcps-sarasoldphotos-00002", "lcps-sarasoldphotos-٩٩٩٩٩"]
+
+    assert next_identifiers(existing, "lcps", "sarasoldphotos", 1) == ["lcps-sarasoldphotos-00003"]
+
+
 def test_parse_number_reads_the_trailing_segment():
     assert parse_number("lcps-sarasoldphotos-00042") == 42
 

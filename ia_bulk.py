@@ -49,6 +49,7 @@ from project_config import (
     ConfigError,
     ProjectConfig,
     load_project_config,
+    registry_id_error,
     unregistered_project_error,
 )
 from reconcile import AmbiguousMatch, Proposal, propose_match
@@ -258,8 +259,10 @@ def refuse_unregistered_project(registry: dict, project_id: str) -> bool:
     fails every single row with "belongs to project 'astoriaphotos', but
     this run is --project astoriaphoto": true, useless, and repeated once
     per row, with the flag that is actually wrong named only in passing.
+    A registry id off the identifier scheme fails every row the same way,
+    so it is refused here too.
     """
-    message = unregistered_project_error(registry, project_id)
+    message = unregistered_project_error(registry, project_id) or registry_id_error(registry)
     if message is None:
         return False
     print(message, file=sys.stderr)
