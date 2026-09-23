@@ -814,10 +814,16 @@ What a manual pass cannot show:
 ## Development
 
 ```bash
-python -m pytest test_ia_bulk.py -v
+python -m pytest
 python -m ruff check .
-python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py
+python -m pyright
 ```
+
+Each runs over the whole repository; none takes a file list. `pyright` is the
+command-line engine behind the Pylance VS Code extension, so it reports what
+the editor would. `pyrightconfig.json` pins it to macOS and Python 3.10, the
+deployment target and the oldest supported version, so the macOS-only calls in
+`platform_probe.py` type-check on Windows too.
 
 Tests are pure-offline, and `conftest.py` enforces it. From the start of the
 run, any lookup of, connection to, or UDP send to a host that is not this
