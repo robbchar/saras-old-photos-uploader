@@ -50,8 +50,8 @@ against a Sheet edited mid-run, and how corrections get back out.
 - [A row's identity is its `file_template` columns, not its `ia_identifier`](decisions/SHEET-PROTOCOL.md#a-rows-identity-is-its-file_template-columns-not-its-ia_identifier)
 - [The Sheet is the correction](decisions/SHEET-PROTOCOL.md#the-sheet-is-the-correction)
 - [A row pushes only when its content changed](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed)
-- [`sync-metadata --csv` reads its targets from the upload log](decisions/SHEET-PROTOCOL.md#sync-metadata---csv-reads-its-targets-from-the-upload-log)
-- [`--resume-from` filters on run mode](decisions/SHEET-PROTOCOL.md#--resume-from-filters-on-run-mode)
+- [`sync-metadata --csv` reads its targets from the upload log](decisions/SHEET-PROTOCOL.md#sync-metadata---csv-reads-its-targets-from-the-upload-log) (retired 2026-09-23)
+- [`--resume-from` filters on run mode](decisions/SHEET-PROTOCOL.md#--resume-from-filters-on-run-mode) (retired 2026-09-23)
 - [A fingerprint only proves identity while it is unique](decisions/SHEET-PROTOCOL.md#a-fingerprint-only-proves-identity-while-it-is-unique)
 - [The Sheet's log tabs are telemetry, never an input](decisions/SHEET-PROTOCOL.md#the-sheets-log-tabs-are-telemetry-never-an-input)
 - [The rehearsal reset is a hand edit, not a command](decisions/SHEET-PROTOCOL.md#the-rehearsal-reset-is-a-hand-edit-not-a-command)
@@ -177,3 +177,5 @@ run writes down about itself.
   2026-09-18** — see [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person).
 - Automating the Sheet → CSV *export* was raised and deferred pending maintainer
   input. **Superseded 2026-08-08** by reading the Sheet directly (above).
+  **2026-09-23:** the offline CSV paths themselves were removed — see
+  [The Sheet is read live; the CSV becomes the offline path](decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).

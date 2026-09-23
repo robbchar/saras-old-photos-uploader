@@ -22,6 +22,10 @@ Cost: the tool re-implements chunking and progress reporting that the CLI
 would
 have handled.
 
+**2026-09-23:** `--resume-from` was removed with the CSV paths (#44). The
+per-row outcome now feeds the per-row confirm write (`ia_uploaded`,
+`ia_url`), which is what lets a rerun resume by itself, and the audit log.
+
 ## Generic to "a project", not hardcoded to photos
 
 A second LCPS project is expected to reuse this pipeline, which is why the
@@ -50,6 +54,12 @@ The same reasoning puts `files_dir` and `file_template` there. A row's file
 path is assembled from a root plus one or more Sheet columns, which is
 plumbing; the people maintaining the Sheet should never have to think about
 it.
+
+**Completed 2026-09-23 (#44).** `--collection` and `--files-dir` had survived
+as overrides on the `--csv` path, where `--collection` was still used as typed
+and never checked against the registry. They were removed with that path.
+The registry is now the only source of the collection and the files
+directory, with no flag to override either.
 
 ## The Sheet is reached as a service account, not as a person
 
@@ -92,9 +102,11 @@ The final build review named these and chose to leave them. They are recorded
 in [`KNOWN-ISSUES.md`](../KNOWN-ISSUES.md) with reproduction details:
 
 - Chunking has no real pacing or checkpoint behavior
-- `--files-dir` does not constrain path resolution
+- ~~`--files-dir` does not constrain path resolution~~ **Closed 2026-09-23**
+  — the flag went with the CSV paths (#44)
 - ~~`--collection` keeps its `"lcps"` default and stays unvalidated~~
   **Reversed 2026-08-08** — see "Technical configuration lives in the
 registry"
   below
-- Ragged-CSV handling relies on a broad `except` in `run_rows`
+- ~~Ragged-CSV handling relies on a broad `except` in `run_rows`~~ **Closed
+  2026-09-23** — `run_rows` went with the CSV paths (#44)

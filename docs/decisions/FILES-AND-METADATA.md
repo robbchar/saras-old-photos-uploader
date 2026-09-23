@@ -65,7 +65,8 @@ that lands back inside `files_dir` never left, and is allowed. A candidate
 whose folder
 segment is empty is refused too — searching `files_dir`'s own root would turn
 a blank required cell into a search of the wrong place instead of a failure.
-`KNOWN-ISSUES.md` §5 describes the `--csv` path, which has neither guard.
+**2026-09-23:** the `--csv` paths, which had neither guard (`KNOWN-ISSUES.md`,
+Fixed, was #4), were removed (#44). Every file is now found this way.
 
 **Cell values are stripped before templating.** A folder cell with a stray
 trailing space is otherwise a landmine on Windows: `Path.is_dir()` normalizes
@@ -95,6 +96,11 @@ what may be uploaded, and already excluding both categories) and adding the
 generated `identifier-bib` and `mediatype`. Filtering here rather than inside
 `upload_row` leaves the CSV path's behavior untouched and keeps the rule next
 to the ColumnMap that defines it.
+
+**2026-09-23:** the CSV path is removed (#44), so `upload_row` now receives
+only Sheet rows. The decision stands on its second reason: the filter lives
+next to the ColumnMap that defines it. Whether it should now move into
+`upload_row` is an open code question, not decided here.
 
 `identifier` and `file` are subtracted too, via `DROPPED_BY_UPLOAD_ROW`. Those
 are the two keys `upload_row` strips on its own — `file` is a local path and
@@ -136,6 +142,11 @@ the request entirely rather than sending `""`.
 Deleting a field therefore needs an explicit sentinel: the literal string
 `REMOVE_TAG`, which is what the official `ia` CLI's `--modify field:REMOVE_TAG`
 uses. Not invented here — matching IA's own convention.
+
+**2026-09-23:** the `sync-metadata` CSV is gone (#44), and with it the
+original reason. The rule stands on the Sheet's reason instead: an accidental
+clear must never strip metadata from a permanent item — see
+[The Sheet is the correction](SHEET-PROTOCOL.md#the-sheet-is-the-correction).
 
 ## Blank `date` becomes `[n.d.]` rather than being omitted
 

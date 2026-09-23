@@ -17,10 +17,10 @@ project" so a second LCPS project can reuse this pipeline — see
 ## Sheet source and column mapping
 `validate`/`upload` read a project's Sheet (its test Sheet by default, its
 real one with `--live`) via `build_sheet_client()` → `SheetClient.read_grid()`,
-then `grid_to_rows()` turns the grid into the same `list[dict[str, str]]`
-shape `read_csv()` produces for the CSV path, so every downstream function
+then `grid_to_rows()` turns the grid into a `list[dict[str, str]]`, one dict
+per row keyed by normalized header, which every downstream function
 (`validate_rows`, `upload_row`, `effective_identifier`, the whole `zztest-`
-safety rail) is unaware of which source a row came from.
+safety rail) takes as its input.
 
 **Header normalization.** `normalize_header()` (`column_map.py`) is the one
 rule that turns a Sheet header into an IA metadata field name: lowercase,
@@ -32,10 +32,8 @@ misspelled header ships as-is — see
 `ColumnMap.field_names` is the resulting `{raw header: normalized name}` map
 for every header the Sheet had that run; `check_column_map()` rejects two
 headers that normalize to the same field name (a silent per-row overwrite)
-and a header that normalizes to an empty name, filing both under row 1
-(mirroring `header_validation()`'s CSV-path row-1 convention). `check_grid_shape()`
-mirrors `check_row_shape()`: a data row with more fields than the header is
-flagged with its real row number, since the Sheets API already omits trailing
+and a header that normalizes to an empty name, filing both under row 1.
+`check_grid_shape()` flags a data row with more fields than the header, with its real row number, since the Sheets API already omits trailing
 empty cells (a short row is not a defect) but never inserts anything.
 
 **Held-back columns.** A header containing `(LCPS Internal)`, matched
@@ -89,68 +87,25 @@ stem — see
 The resolved name (which can differ from what the Sheet cell says) becomes
 both `row["file"]` and `ia_identifier_bib`.
 
-## CSV schemas
-This section covers the offline `--csv` path (`validate --csv`/`upload --csv`)
-and `sync-metadata`, which always takes a CSV — there is no Sheet-reading path
-for metadata corrections; see "`sync-metadata` is CSV-only" below.
-
-### `validate --csv` / `upload --csv`
-Required columns: `identifier`, `file`, `mediatype`, `title`.
-All other columns pass through untouched as IA item metadata.
-
-`read_csv()` returns a `CsvData` carrying the header and the rows together,
-because validating either alone misses the failure that matters:
-`check_row_shape()` can only see a row/header field-count mismatch, and
-`check_header()` can only see the header text. Both must pass before any
-network call.
-
-- `identifier`: pre-assigned in the CSV, permanent, never generated or
-  renamed by this tool. Must match `COLLECTIONKEY-PROJECTID-NUMBER`,
-  lowercase, hyphen-separated, 5-digit zero-padded NUMBER.
-- `file`: filename (optionally with a relative subpath), resolved against
-  `--files-dir`.
-- `mediatype`, `title`: required, non-empty.
-- `date`: optional and free-form — IA doesn't enforce a date format.
-  `upload` fills a blank `date` cell with `[n.d.]` (the standard archival
-  "no date" abbreviation) rather than omitting the field, so every IA item
-  ends up with a date value either way.
-
-On the Sheet path these same four concepts exist but split differently:
-`mediatype` is injected from the registry (structurally required, never a
-Sheet column); `file` is resolved, not required, since its presence is fully
-determined by file resolution (see "Readiness" below); `title` moves into the
-project's `required_for_upload` list; `identifier` is `ia_identifier` instead,
-optional until `upload` mints one. `SHEET_REQUIRED_COLUMNS` is `("mediatype",)`
-— everything else that used to be a hard requirement is now either resolved
-or a readiness question.
-
-### `sync-metadata` is CSV-only
-`sync-metadata` always takes a CSV positional argument (`identifier` plus
-whichever metadata columns changed) and never reads a Sheet — `cmd_sync_metadata`
-calls `load_registry()` directly and builds no `ColumnMap`, unlike `validate`/
-`upload`. `--project` is required on the command line (for consistency with
-the other two commands) but the CSV's own columns are what gets sent; there is
-no per-project Sheet, `file_template`, or `required_for_upload` rule in play
-here. See [`DECISIONS.md`](decisions/FILES-AND-METADATA.md#blank-cell-means-leave-alone-not-clear).
-
-Only requires an `identifier` column plus whichever metadata columns changed.
-Does not require `file`, `mediatype`, `title`, or `date`.
-A blank cell means "leave this field alone" — `update_metadata_row` drops
-blank cells from the request entirely rather than sending an empty string,
-since the whole point of this CSV shape is to list only what changed. To
-actually delete an existing field on the IA item, put the literal value
-`REMOVE_TAG` in that cell: the `internetarchive` library (and the official
-`ia` CLI's `--modify field:REMOVE_TAG`) treats that exact string as a
-delete sentinel and issues a metadata "remove" op for the field.
+**Required columns.** `mediatype` is injected from the registry
+(structurally required, never a Sheet column); `file` is resolved, not
+required, since its presence is fully determined by file resolution (see
+"Readiness" below); `title` is in the project's `required_for_upload` list;
+`ia_identifier` is optional until `upload` mints one. `SHEET_REQUIRED_COLUMNS`
+is `("mediatype",)` — everything else is either resolved or a readiness
+question. `date` is optional and free-form (IA doesn't enforce a date
+format): `upload_row` fills a blank `date` with `[n.d.]` (the standard
+archival "no date" abbreviation) rather than omitting the field, so every IA
+item ends up with a date value either way.
 
 ## Identifier scheme
 See `.claude/CLAUDE.md` for the full identifier scheme and project
 registry rationale. `projects_registry.json` holds each project's
 `ia_collection`, Sheet IDs, `file_template`, and `required_for_upload` list,
-plus the shared `collection_key`; `validate` and `sync-metadata --csv` reject
-any identifier whose prefix isn't registered there — and, since issue #2, any
+plus the shared `collection_key`; `validate` rejects any `ia_identifier`
+whose prefix isn't registered there — and, since issue #2, any
 whose `PROJECTID` names a registered project other than the run's own
-`--project`. `sync-metadata` on the Sheet path targets the item `ia_url`
+`--project`. `sync-metadata` targets the item `ia_url`
 names rather than an identifier column, so it makes the `--project` half of
 that check against that item and does not run the registry-prefix check at
 all. See
@@ -158,12 +113,11 @@ all. See
 
 The permanent identifier always holds the real, permanent value — `check_identifier`
 only accepts the registry's actual `collection_key` as the first segment.
-There is no separate "test" identifier form in the CSV or the Sheet; see
-"Safety rail" below for how test runs are kept safe instead. On the Sheet
-path the permanent identifier is minted by `upload` and written to
+There is no separate "test" identifier form in the Sheet; see
+"Safety rail" below for how test runs are kept safe instead. The permanent
+identifier is minted by `upload` and written to
 `ia_identifier` (see "Sheet source and column mapping" above and
-[`DECISIONS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet));
-on the CSV path it is pre-assigned and simply named `identifier`.
+[`DECISIONS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet)).
 
 ## Readiness
 A row can be **not-ready** (a human hasn't filled in what it needs yet) or
@@ -263,27 +217,19 @@ A row is chosen for this run based on its own two tool-owned columns
 never re-mint), both set means skip entirely.
 
 ## Chunking
-The **Sheet path** processes targets in batches of 500 (IA's per-run batch
+`upload` processes targets in batches of 500 (IA's per-run batch
 limit) by default, via `chunk_rows()`. This is a real checkpoint boundary:
 each chunk gets its own re-read of the Sheet, reserve write, uploads and
-confirm write. It is not a literal separate CSV file per chunk — each row is
-uploaded individually through the `internetarchive` Python library so
+confirm write. It is not one `ia upload --spreadsheet` call per chunk — each
+row is uploaded individually through the `internetarchive` Python library so
 outcomes are captured per-row. `upload --chunk-size N` overrides the batch
 size for that run (`SheetUploadRun.chunk_size`, threaded into `chunk_rows()`).
 
-The **`--csv` path does not chunk at all.** `run_rows()` is a flat loop; it
-previously iterated `chunk_rows()` and then the rows within each chunk,
-which was exactly equivalent — nothing happened at a boundary — while
-implying a batching guarantee that path does not have. This is why `--csv`
-has no `--chunk-size`: there is no per-chunk Sheet write for a batch size to
-change.
+A run may not exceed `DAILY_ITEM_CAP` (5,000, IA's per-account daily
+limit). It refuses rather than silently capping and names the fix,
+`--limit`, with `--allow-over-daily-cap` as the explicit override.
 
-Neither path may exceed `DAILY_ITEM_CAP` (5,000, IA's per-account daily
-limit) in one run. Both refuse rather than silently capping and name the fix
-— `--limit` on the Sheet path, splitting the file on `--csv` — with
-`--allow-over-daily-cap` as the explicit override.
-
-`upload --limit N` (Sheet path only) caps how many *planned* upload targets
+`upload --limit N` caps how many *planned* upload targets
 (valid, ready, not already done — `plan_upload_targets()`'s own output) a
 single invocation processes at all, applied before chunking: `--limit 10
 --chunk-size 3` means 10 items total, in batches of 3. It counts targets
@@ -306,8 +252,8 @@ before the final `log written to <path>` line, so a run is never silently
 quiet. `upload_row` also passes `verbose=True` through to
 `internetarchive.upload()`, which prints its own `tqdm` byte-progress bar
 per file — that's IA's own upload status, not something this tool
-fabricates. It also passes `checksum=True`, so re-running `upload` against
-a CSV whose files haven't changed skips re-uploading (and re-triggering
+fabricates. It also passes `checksum=True`, so re-running `upload` over
+rows whose files haven't changed skips re-uploading (and re-triggering
 IA's `derive` task) for anything already present with a matching MD5.
 
 ## Correcting an uploaded item
@@ -322,7 +268,8 @@ different stamps is handled without the command knowing that happened.
 The fields sent come from `sheet_metadata_fields()`, shared with `upload`, so
 a column that uploads but does not sync cannot exist. Blank cells are dropped
 by `update_metadata_row()` — blank means "leave this field alone", and
-`REMOVE_TAG` deletes.
+`REMOVE_TAG` deletes: the `internetarchive` library (like the `ia` CLI's
+`--modify field:REMOVE_TAG`) treats that exact string as a delete sentinel.
 
 A DONE row is sent only when its content changed since its last successful
 push. `plan_sync_targets()` hashes each row's `metadata_to_send()` output
@@ -343,13 +290,6 @@ failure — it stamps `ia_sync_hash`/`ia_last_synced` just like a real change
 would, since the item now provably matches the Sheet. `sync-metadata` refuses
 to run at all without both columns present as Sheet headers, in every mode —
 see "Tool-owned columns" above.
-
-The `--csv` path is the offline fallback and is the only one that needs
-`--from-log`: a CSV carries real identifiers, so in test mode the stamped
-target has to come from the upload log's `uploaded_as` field. It has no
-per-row hash gate — every row the CSV names is sent every run, since a
-hand-prepared correction file is already the small, deliberate set of rows to
-touch. See [`DECISIONS.md`](DECISIONS.md), "The Sheet is the correction".
 
 ## Reconciling filenames
 
@@ -479,7 +419,7 @@ Local time repeats an hour during the DST fall-back transition, so a run
 spanning it would stamp a later chunk with an earlier wall-clock time — the
 same reason `run_stamp()` uses UTC.
 
-On the Sheet path, `log_run_header()` writes one more record as the log's
+`upload`'s `log_run_header()` writes one more record as the log's
 **first** line, before any row result: `{record: "run_header", timestamp,
 project, live, dry_run, sheet_id, collection, files_dir, file_template,
 columns, held_back, required_for_upload, limit, chunk_size, batch,
@@ -511,7 +451,7 @@ them. An upload has no `unchanged` — it either created the item or did
 not — and a sync has no `unconfirmed`, since it writes nothing to the
 Sheet that could fail to land.
 
-#### `sync-metadata` — Sheet path and `--csv` alike
+#### `sync-metadata`
 
 `{… checked, pushed, changed, unchanged, already_synced, failures,
 skipped}`. The counts mean:
@@ -522,11 +462,11 @@ skipped}`. The counts mean:
 | `pushed` | rows actually sent to Internet Archive. Always `changed + unchanged + len(failures)`. |
 | `changed` | sends IA accepted as a change. |
 | `unchanged` | IA's *no changes to `_meta.xml`* — the idempotence signal a full re-sync is run to see, kept as its own count rather than folded into `changed`. |
-| `already_synced` | rows the hash gate found already matching their last push and never sent at all — Sheet path only, always `0` on `--csv`, which has no hash gate. On the steady state this is nearly the whole Sheet; see `DECISIONS.md`, "A row pushes only when its content changed". |
+| `already_synced` | rows the hash gate found already matching their last push and never sent at all. On the steady state this is nearly the whole Sheet; see `DECISIONS.md`, "A row pushes only when its content changed". |
 | `failures` | `{identifier, error}` per row IA refused. |
 | `skipped` | `{identifier, error}` per row the run declined to send at all. |
 
-#### `upload` — Sheet path
+#### `upload`
 
 `{… attempted, succeeded, failures, unconfirmed, not_attempted,
 rate_limited, skipped}`. The counts mean:
@@ -580,24 +520,12 @@ failure on stderr instead of raising. It is a record *of* the run, not a
 step *in* it, and by the time it is written permanent metadata has already
 changed — reporting a successful sync as failed would invite a rerun.
 
-`load_prior_successes()` skips **any** line carrying a `record` field, so
-neither run-level record is mistaken for a row result. Skipping on the
-presence of `record` rather than on each type's name means a record type
-added later cannot arrive there as damage; skipping explicitly rather than
-by a missing `status` or `identifier` key leaves both schemas free to grow
-a field of that name later without silently turning this into a bug. That
-mattered immediately: a summary carries no `identifier`, and a record
-naming no identifier is exactly what `_read_log_results()` counts as a
-damaged line — left unhandled, the summary would have made `--resume-from`
-announce every log as truncated.
-
-`load_prior_successes()` also **skips any line it cannot read** rather than
-raising, and reports the count on stderr. `log_result()` appends per row
-with no atomic write, so a run killed mid-write leaves a truncated final
-line — raising on it made the log permanently unusable as a resume source,
-disabling the only recovery mechanism the `--csv` path has using the exact
-crash it exists to recover from. A skipped line means that row is attempted
-again, which is safe: IA matches on MD5.
+The logs are audit records. Nothing in the tool reads them back: since
+2026-09-23, when the CSV paths and their `--resume-from`/`--from-log` flags
+were removed, the Sheet's `ia_uploaded` and `ia_url` cells are the only
+record a run consults. `log_result()` appends per row with no atomic write,
+so a run killed mid-write can leave a truncated final line; read a log with
+that in mind.
 
 **`dry_run` is always `False` in a real log.** `upload_from_sheet` returns
 on the `if dry_run:` branch (nothing uploaded, nothing logged) before
@@ -606,34 +534,14 @@ produces can show `dry_run: true` — that value is real and exercised by
 `log_run_header()`'s own unit tests calling it directly with `dry_run=True`,
 but it is not something to expect varying in `logs/*.jsonl`.
 
-`identifier` is always the real CSV identifier. `uploaded_as` is the
+`identifier` is always the real, permanent identifier. `uploaded_as` is the
 identifier actually sent to IA for that row (see "Safety rail" below), so
 you can see exactly what landed on the site. `live` records which mode
 (test vs. `--live`) produced that row's result.
 
-`--resume-from <log>` reads identifiers marked `"status": "success"` or
-`"status": "unchanged"` from a prior log **written in the same mode as the
-current run** and skips them; `load_prior_successes(log_path, live)` filters
-on the log's `live` field before matching. This is deliberate, not
-incidental: since the CSV's `identifier` column is identical for a test run
-and a `--live` run of the same file (only `uploaded_as` differs), a success
-recorded in `test_collection` says nothing about whether the real item
-exists — treating it as interchangeable with a `--live` success would let a
-`--live --resume-from <test-run-log>` silently skip a real upload while
-still reporting it as successful. Log lines written before this `live`
-field existed have no mode recorded and are treated as matching neither
-mode, so old-format logs are simply not used to skip anything rather than
-skip in the wrong mode. The new run still writes its own complete log
-(carrying forward the skipped identifiers as pre-recorded successes), so
-each log is a self-contained record of what happened by that point.
-`--resume-from` is a `--csv`-path flag only — the Sheet path's `ia_uploaded`
-column is already the record of what is done, so a rerun resumes by itself.
-
-Rows carried over via `--resume-from` also skip re-validation in
-`validate_rows`/`validate_identifiers` (their identifiers already passed a
-prior run's checks) - `skip_identifiers` short-circuits the per-row
-checks but still records the identifier for duplicate detection, and row
-numbers stay aligned with the full CSV either way.
+A rerun resumes by itself: `ia_uploaded` is the record of what is done, so
+done rows are skipped and a reserved row is retried under its existing
+identifier.
 
 ## The Sheet's log tabs
 The same `run_summary` record is also mirrored into the spreadsheet, so a
@@ -670,11 +578,11 @@ IA's metadata-update endpoint returns an HTTP 400 with
 `{"error": "no changes to _meta.xml"}` when every field in the request
 already matches what's on the item — i.e. nothing was wrong, there was
 just nothing to do. `update_metadata_row` detects that specific error and
-raises `MetadataUnchanged` instead of `RuntimeError`; `cmd_sync_metadata`
-catches it separately, logs the row as `"status": "unchanged"` (not
-`"failure"`), and reports it in its own summary bucket
-(`X updated successfully, Y unchanged, Z error(s)`) so a CSV row that's
-already correct doesn't inflate the error count or flip the exit code.
+raises `MetadataUnchanged` instead of `RuntimeError`; the sync run catches
+it separately, logs the row as `"status": "unchanged"` (not `"failure"`),
+counts it in `SyncSummary`'s `unchanged`, and stamps `ia_sync_hash` as for a
+real change, so a row that's already correct doesn't inflate the error count
+or flip the exit code.
 
 ## Safety rail
 Default target is `test_collection`; `--live` is required to target the
@@ -682,9 +590,9 @@ real collection and use the real identifier as-is. When not `--live`,
 `effective_identifier()` prepends `zztest-<run's stamp>-` to the real
 identifier for every network call (e.g.
 `zztest-20260819t144907-lcps-sarasoldphotos-00001`) — this happens
-automatically, in code, rather than requiring the CSV or Sheet to already
-contain test-prefixed identifiers. Neither the CSV nor the Sheet's
-`ia_identifier` column ever needs to change between a test run and a
+automatically, in code, rather than requiring the Sheet to already
+contain test-prefixed identifiers. The Sheet's
+`ia_identifier` column never needs to change between a test run and a
 `--live` run.
 
 The stamp (`run_stamp()`) is computed once per invocation and shared by
@@ -693,11 +601,9 @@ collide with a previous rehearsal's — see
 [`docs/DECISIONS.md`](decisions/IDENTIFIERS.md#test-identifiers-carry-a-per-run-stamp)
 for why a bare `zztest-` prefix made every fresh-Sheet rehearsal collide
 with the last one. (A *resumed* run is its own invocation with its own
-stamp, so its items land under a second stamp, not the original run's —
-`--resume-from` still recognizes them as done since it matches on the real
-`identifier`, never on the stamped `uploaded_as`.) `--live` identifiers
-never carry a stamp: they are the permanent, public ones and must stay a
-pure function of the Sheet/CSV.
+stamp, so its items land under a second stamp, not the original run's.)
+`--live` identifiers never carry a stamp: they are the permanent, public
+ones and must stay a pure function of the Sheet.
 
 ## Known gaps
 Verified defects with reproductions live in
@@ -710,13 +616,10 @@ would just reject every real identifier), but it needs to be right before
 real uploads can pass `validate`.
 
 The target IA collection is the project's `ia_collection` in
-`projects_registry.json`. `upload`'s `--collection` flag no longer defaults
-to `"lcps"` — that string is not a real Internet Archive collection, and a
-`--live` run would have pushed real photographs at a collection that does
-not exist and reported success. The flag survives only as an explicit
-override on the `--csv` path, where `--live` now refuses to run without it;
-on the Sheet path passing it is an error rather than a silently ignored
-value. Nothing still validates `ia_collection` against IA itself at
+`projects_registry.json`, and only there: there is no collection flag. (The
+old `--collection` flag defaulted to `"lcps"`, which is not a real Internet
+Archive collection; it was removed with the CSV paths on 2026-09-23.)
+Nothing still validates `ia_collection` against IA itself at
 runtime, so confirm it by hand once, in version control, before the first
 `--live` run — `upload --dry-run` prints everything the run would do
 without doing any of it. See `DECISIONS.md`, "Technical configuration lives
@@ -725,22 +628,9 @@ against archive.org on 2026-08-22 — see `DECISIONS.md`, "Still open" — but
 the tool itself still does not check this automatically, and a second
 project's registry entry would need the same manual confirmation.)
 
-The offline `--csv` path still requires a hand-prepared CSV matching the
-exact schema under "CSV schemas" above — including a `mediatype` column,
-which is not part of a raw Sheet export. That transformation is a
-deliberate, explicit step a human performs, not something this CLI does
-automatically; see [`CSV-PREPARATION.md`](CSV-PREPARATION.md) for the
-procedure and the failure modes it guards against. It does not apply to the
-default Sheet path, where header problems are structurally impossible in
-the same way (a header containing a comma is just a header containing a
-comma, never a CSV-parsing artifact) — see
-[`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).
+`validate` cannot tell whether a well-formed header is *semantically* right:
+a misspelled header ships as a misspelled IA field on every item. The header
+row is proofread by hand instead (`OPERATIONS.md` §1).
 
-`validate` backstops the structural half of the CSV transformation:
-`check_header()` rejects headers with surrounding whitespace, duplicates, or a
-case variant of a column the script reads by name, and `check_row_shape()`
-rejects any row whose field count disagrees with the header — which is what an
-unquoted comma in a header cell produces. Header problems are reported as
-row 1. It cannot check whether a correctly-formed header is *semantically*
-right, so the manual proofread in
-[`CSV-PREPARATION.md`](CSV-PREPARATION.md) still matters for that path.
+Repeated IA fields (`subject[0]`, `subject[1]`) cannot be written from the
+Sheet — see `KNOWN-ISSUES.md` §6.

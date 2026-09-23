@@ -48,6 +48,9 @@ anything. Both are recorded in the `run_header` log record (see
 or used a non-default `--chunk-size`, stays reconstructable from its own log
 alone.
 
+**2026-09-23:** the `--csv` path and `run_rows()` are removed (#44), so the
+rejection above is moot. Both flags now apply to every `upload`.
+
 ## A run is scoped to a batch by value; the column is registry configuration
 
 *Decided 2026-09-06.*
@@ -117,6 +120,10 @@ recorded in the `run_header` log line. That matters more here than for
 `--limit`: a scoped run uploads a fraction of the ready rows and looks, in
 every other field of that record, exactly like a run that found little to do.
 
+**2026-09-23:** the `--csv` paths are removed (#44). `--files-dir` and
+`--collection` no longer exist at all, and `--batch` applies to every
+`validate` and `upload` rather than being rejected anywhere.
+
 ## A run may not exceed Internet Archive's daily item cap
 
 *Decided 2026-08-23.*
@@ -145,6 +152,10 @@ choices went into that:
 
 It applies in test mode too. A rehearsal uploads to `test_collection` through
 the same account and spends the same quota.
+
+**2026-09-23:** the `--csv` path is removed (#44), so "either path" and "both
+paths" above now mean one `upload`, and the CSV path's fix (split the file)
+is gone. `--limit` is the one fix named.
 
 ## Rate-limit detection uses a parsed status code, never message text
 
@@ -352,6 +363,9 @@ whether a real `SlowDown` carries a `Retry-After`, and how a genuinely slow
 multi-megabyte transfer behaves. No `--live` run has ever happened. Those
 answers only arrive with real traffic.
 
+**2026-09-23:** `run_rows()` was removed with the CSV paths (#44). The run
+loops that get the retry are now `SheetUploadRun` and the Sheet sync.
+
 ## A status the metadata call strips is recovered, still without reading text
 
 *Decided 2026-09-02, alongside the retry work above.*
@@ -441,6 +455,9 @@ ambiguity is only resolvable by knowing which machine wrote it and what its
 clock was set to that day. `open_log()`'s filename stamp is UTC for the same
 reason, so a directory listing sorts in the order the runs actually happened.
 
+**2026-09-23:** `--resume-from` was removed with the CSV paths (#44). The
+tool no longer reads its logs back; only audits do.
+
 ## "Unchanged" is a third outcome, not a failure
 
 IA returns HTTP 400 with `{"error": "no changes to _meta.xml"}` when a
@@ -452,3 +469,8 @@ flip the exit code on a re-run of a correct CSV — which matters because
 
 `update_metadata_row` detects that exact error string and raises
 `MetadataUnchanged`, which `run_rows` counts and logs in its own bucket.
+
+**2026-09-23:** `run_rows` and the CSV path were removed (#44). The Sheet
+sync logs the row as `unchanged`, counts it in `SyncSummary`, and stamps
+`ia_sync_hash` as for a real change (see "A row pushes only when its content
+changed").

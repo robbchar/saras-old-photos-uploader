@@ -150,6 +150,10 @@ file appears or its metadata is fixed.
 The CSV path is unchanged and still refuses. The two sources have genuinely
 different shapes and deserve different answers.
 
+**2026-09-23:** the CSV path is removed (#44), so its all-or-nothing refusal
+is gone with it. Every `upload` now uploads the valid rows and reports the
+rest.
+
 ## A bad row is skipped; a bad header stops the whole run
 
 *Decided 2026-08-16, alongside "upload uploads the valid rows and reports the
@@ -187,3 +191,9 @@ an error rather than padding the row: `csv.DictReader` will happily fill the
 gap
 with `None`, but the gap means the header and the data disagree about column
 positions, and nothing can tell you which one is right.
+
+**2026-09-23:** `check_header()` and `check_row_shape()` were removed with
+`validate --csv` (#44). The decision stands for the Sheet. `normalize_header()`
+applies one fixed rule and never corrects a typo; `check_column_map()` rejects
+two headers that normalize to one name, or to nothing; `check_grid_shape()`
+rejects a data row longer than its header.

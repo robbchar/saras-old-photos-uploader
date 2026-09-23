@@ -20,7 +20,8 @@ back. Reading from the same place removes the "which copy is current" question
 outright instead of adding a dependency to answer it.
 
 And the export step was itself a source of defects. The traps documented in
-[`CSV-PREPARATION.md`](../CSV-PREPARATION.md) — above all a comma inside an
+`CSV-PREPARATION.md` (retired 2026-09-23; see the Fixed entries in
+[`KNOWN-ISSUES.md`](../KNOWN-ISSUES.md#fixed)) — above all a comma inside an
 unquoted header splitting one column into two and shifting every field after
 it
 — are artifacts of CSV *parsing*, not of the data. The Sheets API returns
@@ -30,6 +31,38 @@ That failure mode is structurally absent on this path.
 
 The CSV path stays for offline and dry-run work and keeps its own header
 validation, since the traps are real for anything hand-prepared.
+
+**Reversed 2026-09-23 (#44): the CSV paths are removed.** `upload --csv`,
+`sync-metadata --csv` and `validate --csv` are gone, with `--collection`,
+`--files-dir`, `--resume-from` and `--from-log`. The Sheet is the only input.
+The fallback had become a second pipeline that skipped every Sheet-path
+guard: it could upload identifiers the Sheet never recorded, so a later Sheet
+run could mint the same permanent number; it took an unchecked collection; it
+shipped CSV headers verbatim as IA field names; it resolved files from
+anywhere; it did not stop on a rate limit; and `sync-metadata --csv` ignored
+`--dry-run`. Every new guard had to be written twice, and one copy had
+already been missed. It had not been used since 2026-07-12, and never with
+`--live`.
+
+Nothing it did is lost. Dry runs are `upload --dry-run`, `sync-metadata
+--dry-run` and `validate`. A rerun resumes from `ia_uploaded`. Corrections go
+through the Sheet, and an item with no Sheet row is fixed with the raw `ia`
+CLI or the archive.org edit page. During a Google outage, wait.
+
+`validate --csv` went too. It checked the old upload-CSV schema (a
+pre-assigned `identifier`, plus `file` and `mediatype` columns), which
+nothing consumes once `upload --csv` is gone, and it would reject a CSV
+prepared for pasting into the Sheet. Its one unique value, validating with
+no network, was not worth keeping a second schema.
+
+One gap was the CSV path's alone to fill: repeated IA fields (`subject[0]`,
+`subject[1]`). The Sheet path cannot write them — see
+[`KNOWN-ISSUES.md`](../KNOWN-ISSUES.md#6-repeated-ia-fields-cannot-be-written-from-the-sheet) §6. That is not a reason to keep a
+CSV path, because hand-editing a file outside the Sheet defeats the source
+of truth.
+
+Run logs are still written, as audit records. The tool no longer reads them
+back.
 
 ## A row's identity is its `file_template` columns, not its `ia_identifier`
 
@@ -107,6 +140,11 @@ Four choices:
 
 `sheet_metadata_fields()` is shared with `upload`, so a column that uploads
 but does not sync — or the reverse — cannot exist.
+
+**2026-09-23:** with the `--csv` path removed, "as on the `--csv` path" and
+"across both paths" above describe one path. The blank-cell rule stands on
+its own reason: an accidental clear must never strip metadata from a
+permanent item.
 
 ## A row pushes only when its content changed
 
@@ -225,6 +263,12 @@ which rows to SKIP; `--from-log` says where the rows that remain should be
 SENT. A single flag doing both would make "skip what is done" and "correct
 what is done" the same instruction, which they are not.
 
+**Retired 2026-09-23 (#44).** `sync-metadata --csv`, `--from-log`,
+`load_uploaded_as()` and `check_uploaded_as()` are removed. The Sheet path
+never needed them: `ia_url` records the exact item each row became, stamp
+included (see "The Sheet is the correction" above). Upload logs still carry
+`uploaded_as`, for a human reading them.
+
 ## `--resume-from` filters on run mode
 
 A test-mode success and a live-mode success are indistinguishable by
@@ -235,6 +279,11 @@ report a successful live run that uploaded nothing.
 So `load_prior_successes()` matches on the log's `live` field. Log lines
 written before that field existed record no mode and match **neither**, so old
 logs simply never skip anything rather than skipping in the wrong direction.
+
+**Retired 2026-09-23 (#44).** `--resume-from` and `load_prior_successes()`
+are removed. `ia_uploaded` is the record of what is done, and the test and
+live Sheets are separate spreadsheets, so a test success can never mark a
+live row done.
 
 ## A fingerprint only proves identity while it is unique
 

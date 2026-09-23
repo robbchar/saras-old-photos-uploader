@@ -27,6 +27,10 @@ passed. **The same CSV file is used unchanged for both test and live runs.**
 `check_identifier` actively rejects a hand-written `zztest-` identifier, and
 there is a test asserting exactly that.
 
+**2026-09-23:** the CSV paths are removed (#44). The rule now governs the
+Sheet's `ia_identifier`: it holds the real, permanent identifier, the prefix
+is added in code, and the same cell serves test and live runs unchanged.
+
 ## Test identifiers carry a per-run stamp
 
 *Added 2026-08-19, after a rehearsal failed against the tool's own earlier test
@@ -64,6 +68,10 @@ function of the Sheet.
 `identifier`, not on `uploaded_as`, so resuming still works across runs whose
 stamps differ. The log's `uploaded_as` now records which stamped item a row
 actually landed on, which is the question you ask when checking a rehearsal.
+
+**2026-09-23:** `--resume-from` and `load_prior_successes` were removed with
+the CSV paths (#44). A rerun resumes from `ia_uploaded`, which is keyed to the
+row, not the stamp. The `uploaded_as` sentence above still holds.
 
 ## Identifiers are minted by `upload` and written back to the Sheet
 
@@ -252,6 +260,12 @@ and repeated once per row, naming the wrong file to go fix. So all three
 `--csv` entry points now refuse an unregistered `--project` up front, with
 the same wording the Sheet paths already used (`unregistered_project_error`
 in `project_config.py`).
+
+**2026-09-23:** the `--csv` paths are removed (#44), and with them
+`validate_csv_rows` and `validate_identifiers` from the list above. The
+decision is unchanged: every remaining command builds a `ProjectConfig`, so
+`load_project_config` refuses an unregistered `--project` before any row is
+checked.
 
 ### `sync-metadata` on the Sheet path checks the item, not a column
 
