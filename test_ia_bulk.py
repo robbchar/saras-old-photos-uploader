@@ -8700,12 +8700,27 @@ def test_metadata_changes_reports_a_field_internet_archive_does_not_have_yet():
     ]
 
 
-def test_metadata_changes_joins_a_repeated_ia_field_before_comparing():
-    """Internet Archive returns a list for a field that occurs more than once;
-    comparing that to a string would report every such field as changed."""
+def test_metadata_changes_reports_a_repeated_ia_field_as_changed_by_a_joined_cell():
+    """The real run replaces IA's list with the cell's single string, so the
+    preview must call it a change even though the two render alike."""
     from ia_bulk import metadata_changes
 
-    assert metadata_changes({"subject": "a; b"}, {"subject": ["a", "b"]}) == []
+    assert metadata_changes({"subject": "a; b"}, {"subject": ["a", "b"]}) == [
+        ("subject", "a; b", "a; b")
+    ]
+
+
+def test_metadata_changes_catches_an_edit_past_the_display_cutoff():
+    """A typo fixed near the end of a long description must not vanish just
+    because the display cuts both values at the same place."""
+    from ia_bulk import DRY_RUN_VALUE_WIDTH, metadata_changes
+
+    shared_prefix = "x" * DRY_RUN_VALUE_WIDTH
+    changes = metadata_changes(
+        {"description": shared_prefix + " fixed"}, {"description": shared_prefix + " fxied"}
+    )
+
+    assert [field_name for (field_name, _, _) in changes] == ["description"]
 
 
 def test_metadata_changes_elides_a_very_long_value():

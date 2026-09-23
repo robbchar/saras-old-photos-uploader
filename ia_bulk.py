@@ -3392,12 +3392,13 @@ def metadata_changes(
     run. A blank cell is dropped there, so it means "leave this field alone"
     and is not a change here. REMOVE_TAG deletes there, so it shows as a
     deletion here - and only when the field actually exists on the item, since
-    removing what is not present changes nothing."""
+    removing what is not present changes nothing.
+
+    Raw values are compared, never their rendered text: two long values that
+    differ only past the display cutoff are still a change, and a string
+    against IA's list is one too, since the real run replaces the list."""
     changes: list[tuple[str, str, str]] = []
-    for field_name, raw in sorted(sheet_metadata.items()):
-        value = (raw or "").strip()
-        if not value:
-            continue
+    for field_name, value in sorted(metadata_to_send(sheet_metadata).items()):
         current = remote.get(field_name)
         if value == REMOVE_TAG_SENTINEL:
             if current is not None:
@@ -3405,7 +3406,7 @@ def metadata_changes(
             continue
         if current is None:
             changes.append((field_name, "(not set)", _render(value)))
-        elif _render(current) != _render(value):
+        elif current != value:
             changes.append((field_name, _render(current), _render(value)))
     return changes
 
