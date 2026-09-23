@@ -27,9 +27,16 @@ those happen to share the word.
 
 **Python commands run the checkout's own interpreter, `.venv/bin/python`.**
 macOS has no `python` command, and its `python3` is too old and has none of
-the dependencies. `.venv` exists once `./install.sh` (§10) has run. Where
-[`OPERATIONS.md`](OPERATIONS.md) says `python ia_bulk.py …`, type
-`.venv/bin/python ia_bulk.py …` on this Mac.
+the dependencies. `.venv` exists once `./install.sh` (§10) has run. Wherever
+[`OPERATIONS.md`](OPERATIONS.md) says `python` — `python ia_bulk.py …`, or
+`python -m …` at the end of a pipe — type `.venv/bin/python` in its place on
+this Mac: `.venv/bin/python ia_bulk.py …`,
+`… | .venv/bin/python -m json.tool`. The same goes for `ia`, which is
+`./.venv/bin/ia` here (§6).
+
+**Every command after the clone (§2) runs from the checkout's root.** A new
+Terminal window starts in your home folder, so `cd` back into the checkout
+first.
 
 ## 1. Who this is for
 
@@ -85,6 +92,29 @@ account by mistake writes no plist — only `--enable-agent` does (§12).
 `~/Library/LaunchAgents`, and launchd loads every plist in that folder at
 login, so the agent would start at that account's next login too. §13 says
 how to remove it.
+
+### Getting the checkout
+
+Logged in as the operating account, open Terminal and clone the repository
+into its home folder:
+
+```bash
+git clone <repo-url>
+```
+
+`<repo-url>` is the repository's clone address, from the **Code** button on
+its GitHub page. On a Mac that has never had developer tools, that first `git`
+opens a dialog offering to install the Command Line Tools instead; accept it,
+then run the command again. Then `cd` into the folder the clone just created —
+it is the name `git` printed in `Cloning into '…'`:
+
+```bash
+cd <checkout-folder>
+```
+
+**Clone it where it will stay.** The agent's plist (§12) records the
+checkout's full path, so once the agent is enabled, moving or re-cloning the
+checkout means re-running §12 from the new one.
 
 ## 3. Python
 
@@ -185,41 +215,31 @@ can see or fix.
 The `ia` credentials need to be created once, against the shared org account
 (`admin@lcpsociety.org`) — no environment variables, no per-user credentials.
 
-**First, find an `ia` to run.** There are two possibilities and it does not
-matter which you use:
-
-```bash
-command -v ia
-```
-
-- **If that prints a path**, the machine already has `ia` installed globally.
-  Use it.
-- **If it prints nothing**, the Mac does not have it — and you do not need to
-  install it separately. `ia` is a command-line script that ships inside the
-  `internetarchive` Python package, which is one of this pipeline's own
-  dependencies. Run §10's `./install.sh` first and it arrives at
-  `./.venv/bin/ia`.
-
-Either copy writes to and reads from the same per-user config file, so they
-are interchangeable for this step.
+**Use the checkout's own `ia`, `./.venv/bin/ia`.** A stock Mac has no `ia`
+command, and you do not need to install one separately: `ia` is a
+command-line script that ships inside the `internetarchive` Python package,
+which is one of this pipeline's own dependencies, so §10's `./install.sh` puts
+it in `.venv` along with everything else. A global `ia` left on `PATH` by some
+earlier install reads and writes the same per-user config file, so it would do
+just as well — but nothing below depends on one.
 
 > **If you are installing in order, this is the one step that runs out of
-> sequence.** With no global `ia`, do §10 before this section. That first
-> `./install.sh` will report `ia credentials` as `FAIL` and exit non-zero —
-> that is correct and expected, because you have not created them yet. Come
-> back here, then re-run `./install.sh` and watch that check go green.
+> sequence.** Do §10 before this section. That first `./install.sh` will
+> report `ia credentials` as `FAIL` and exit non-zero — that is correct and
+> expected, because you have not created them yet. Come back here, then re-run
+> `./install.sh` and watch that check go green.
 
-Then, whichever `ia` you found:
+Then:
 
 ```bash
-ia configure
-# or, if it came from the pipeline's own dependencies:
 ./.venv/bin/ia configure
 ```
 
-This is interactive: it prompts for the org account's email and password
-(and, if the account has one, a 2FA code) and writes them to a config file. Do
-this once, as the operating account (§2).
+This is interactive: it prompts for `Email address:` and `Password:` — the
+org account's — and nothing else. It logs in with them, writes the keys
+archive.org hands back (not the password) to a config file, and ends by
+printing `Config saved to: <path>`, naming that file. Do this once, as the
+operating account (§2).
 
 **The pipeline itself never runs the `ia` command.** `ia_bulk.py` imports the
 `internetarchive` library directly and calls it in-process. The CLI matters
@@ -244,10 +264,14 @@ the actual machine rather than trusting this document blindly:
 
 ```bash
 ls -la ~/.config/internetarchive/ia.ini
-# expect: -rw-------  ...  ia.ini
 ```
 
-If nothing is there, `ia whoami` will tell you where it actually looked.
+Expect one line, starting `-rw-------` and ending `ia.ini`.
+
+If nothing is there, the `Config saved to:` line names the file `ia configure`
+actually wrote, and `doctor`'s `ia credentials` check (below) names the file
+the pipeline actually reads — `no ia credentials at <path>` when it finds
+nothing there.
 
 `doctor` covers this from Python's side with two checks, using
 `internetarchive`'s own path-precedence logic rather than a second copy of the
@@ -382,7 +406,7 @@ rm -rf .venv
 | Credential | Path | Grants | Rotate |
 |---|---|---|---|
 | Google service-account key | `.ignored/google-service-account.json` | Read/write on whatever Sheets are shared with its address as Editor — nothing else; it has no Google Cloud project roles (§4) | Create a new key on the service account's **Keys** tab in the Cloud console, replace the file, then delete the old key on that same tab |
-| `ia` config (§6) | `~/.config/internetarchive/ia.ini` (confirm on-machine) | Full access to the shared org Internet Archive account — upload, edit metadata, delete | Re-run `ia configure` with the org credentials; if the org password itself is rotated, do this immediately after |
+| `ia` config (§6) | `~/.config/internetarchive/ia.ini` (confirm on-machine) | Full access to the shared org Internet Archive account — upload, edit metadata, delete | Re-run `./.venv/bin/ia configure` with the org credentials; if the org password itself is rotated, do this immediately after |
 
 Neither credential ever belongs in the git checkout's tracked tree or in
 chat/email — both are gitignored or live outside the repo entirely.

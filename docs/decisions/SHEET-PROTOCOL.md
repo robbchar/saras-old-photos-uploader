@@ -120,7 +120,10 @@ matches. It bought real simplicity — no per-row state, no extra `ia_` column,
 no second place for the Sheet and the item to drift apart.
 
 It does not survive either of the two things that changed. At ~4,000 items on
-the hourly schedule of issue #27 it is ~4,000 pointless writes an hour. And it
+the hourly schedule of issue #27 — now the LaunchAgent that
+`./install.sh --project <project> --live --enable-agent` installs, see
+[`DEPLOYMENT.md`](../DEPLOYMENT.md#12-enabling-the-hourly-sync) — it is
+~4,000 pointless writes an hour. And it
 makes the run log useless, which is the worse half: a real edit is
 indistinguishable from the background noise, so the log cannot answer the one
 question anybody asks it.
