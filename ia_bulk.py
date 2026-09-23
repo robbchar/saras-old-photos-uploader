@@ -60,9 +60,8 @@ from sync_state import (
 # Shared by build_deployment_checks and cmd_setup - one computed root, not two.
 REPO_ROOT = Path(__file__).resolve().parent
 
-REQUIRED_UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
-# Deliberately excludes "identifier" only - do not "fix" this back to
-# REQUIRED_UPLOAD_COLUMNS, and do not add "identifier" back either.
+# Deliberately excludes "identifier", "file" and "title" - do not add any of
+# them back.
 #
 # "identifier": on the Sheet path this is ordinary donor metadata (the
 # real Sheet's own `Identifier` column holds an archival reference like
@@ -165,7 +164,7 @@ def check_identifier(
     registry: dict,
     project_id: str,
     seen_identifiers: dict[str, int],
-    column_name: str = "identifier",
+    column_name: str,
 ) -> list[str]:
     """project_id is the run's own --project, and it has no default on
     purpose. This function used to ask only whether a prefix belonged to
@@ -175,9 +174,9 @@ def check_identifier(
     renamed. A default here would let the next call site re-introduce
     exactly that, so every caller has to say which project it means.
 
-    column_name names the column being checked in every message. The Sheet
-    path passes
-    "ia_identifier" - on a Sheet that has BOTH its own `Identifier` column
+    column_name names the column being checked in every message, and has
+    no default either. The Sheet path passes "ia_identifier" - on a Sheet
+    that has BOTH its own `Identifier` column
     (donor metadata, untouched by this tool) and `ia_identifier` (the
     tool's minted one), a message that just says "identifier" leaves a
     volunteer unable to tell which column to go fix. Naming the actual
@@ -262,18 +261,20 @@ def validate_rows(
     files_dir: str | Path,
     registry: dict,
     project_id: str,
-    required_columns: tuple[str, ...] = REQUIRED_UPLOAD_COLUMNS,
+    *,
+    required_columns: tuple[str, ...],
+    identifier_column: str,
     check_file_exists: bool = True,
-    identifier_column: str = "identifier",
     required_for_upload: tuple[str, ...] = (),
 ) -> list[RowValidation]:
     """project_id is the run's own --project. It is threaded through to
     check_identifier and used nowhere else here - see that function for why
     it is required rather than defaulted (issue #2).
 
-    required_columns defaults to REQUIRED_UPLOAD_COLUMNS, but the Sheet path
-    passes SHEET_REQUIRED_COLUMNS, which excludes 'identifier' - see that
-    constant's comment for why.
+    required_columns and identifier_column have no defaults: the old ones
+    described the retired CSV schema, and on the Sheet they require the
+    donor's `identifier` column. The Sheet path passes SHEET_REQUIRED_COLUMNS
+    (see that constant's comment) and IA_IDENTIFIER_COLUMN.
 
     check_file_exists defaults to True, and the Sheet path passes True (see
     SHEET_REQUIRED_COLUMNS' comment): by the time this runs, cmd_validate
@@ -281,9 +282,8 @@ def validate_rows(
     so this check is a redundant safety net there rather than the primary
     signal, which is fine - it costs one cheap is_file() stat per row.
 
-    identifier_column defaults to "identifier". The Sheet path passes
-    "ia_identifier" instead - after Task 9 the Sheet's own 'identifier'
-    column holds the donor's original archival
+    identifier_column is "ia_identifier" on the Sheet path - after Task 9
+    the Sheet's own 'identifier' column holds the donor's original archival
     reference (e.g. "CD 1 01 53 58 1 Central SS"), not a minted IA
     identifier, and running check_identifier's COLLECTIONKEY-PROJECTID-
     NUMBER regex against a donor reference fails every row for the wrong
@@ -351,9 +351,8 @@ def validate_sheet_rows(
     project_id: str,
     required_for_upload: tuple[str, ...] = (),
 ) -> list[RowValidation]:
-    """The Sheet path's answer, named. It differs from validate_rows'
-    defaults in exactly three ways, all of which used to travel as loose
-    parameters at every call site:
+    """The Sheet path's answer, named. Its three choices used to travel as
+    loose parameters at every call site:
 
     - the tool's minted identifier lives in `ia_identifier`, never
       `identifier` (which on the real Sheet is the donor's own archival
@@ -2069,8 +2068,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
     Deliberately does NOT print the banner or run the per-command flag
     checks. Those happen first and differ per command - `upload` validates
     --limit, for one - and moving the placeholder check ahead of them would
-    change which
-    complaint an operator sees when both are wrong.
+    change which complaint an operator sees when both are wrong.
 
     `command` appears in the placeholder message only ("before running
     upload"), which is the sole text that differed between the three copies

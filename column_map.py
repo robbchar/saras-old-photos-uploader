@@ -172,9 +172,8 @@ def check_grid_shape(grid: list[list[str]]) -> list[str]:
     the row dict output without error, making it impossible to tell which values
     are missing data and which are present but attributed to the wrong field.
     Short rows (the Sheets API omitting trailing empty cells) are not an
-    error and produce no
-    message, but long rows are flagged here with row number and count of excess
-    cells."""
+    error and produce no message, but long rows are flagged here with row
+    number and count of excess cells."""
     if not grid:
         return []
 

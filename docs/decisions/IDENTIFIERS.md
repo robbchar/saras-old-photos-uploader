@@ -300,8 +300,8 @@ minted. `registry_id_error` checks the raw values (nothing is stripped) of
 `collection_key` and every registered project id, not just the one being run,
 against `identifiers.IDENTIFIER_PART`, the same pattern the parser is built
 from. The error names the offending characters. `load_project_config` raises
-it as a `ConfigError`. As a backstop, `format_identifier` raises if its output doesn't parse back to
-its own parts.
+it as a `ConfigError`. As a backstop, `format_identifier` raises if its
+output doesn't parse back to its own parts.
 
 NUMBER is matched as `[0-9]`, not `\d`. In Python `\d` also matches non-ASCII
 digits, which `format_identifier` never produces.

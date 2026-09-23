@@ -19,14 +19,16 @@ they go in the `identifier-bib` metadata field instead.
 - `ia` CLI (internetarchive Python package), authenticated via `ia configure`
   against the shared org account `admin@lcpsociety.org` — no env vars, no
   per-user credentials.
-- Upload: `ia upload --spreadsheet <csv>` (must include `identifier`, `file`,
-  `mediatype` columns at minimum — mediatype is NOT optional, defaults to
-  `data` and can't be changed after upload if omitted).
-- Metadata updates: `ia metadata --spreadsheet <csv>` (identifier column +
-  changed fields only) — fully decoupled from upload, safe to run repeatedly.
+- Upload: `ia_bulk.py upload` reads the Sheet and uploads through the
+  `internetarchive` library. Every item is sent with a `mediatype` — it is
+  NOT optional, defaults to `data` and can't be changed after upload if
+  omitted.
+- Metadata updates: `ia_bulk.py sync-metadata` pushes Sheet edits to
+  already-uploaded items — fully decoupled from upload, safe to run
+  repeatedly.
 - IA batch limits: 500 items per upload run, 5000/day — `ia_bulk.py upload`
-  chunks by 500 and refuses a run over 5000; never submit the full set in
-  one call.
+  chunks by 500 and refuses a run over 5000 unless
+  `--allow-over-daily-cap` is passed; never submit the full set in one call.
 - Testing: `ia_bulk.py` targets `collection:test_collection` (IA's sandbox,
   auto-expires ~30 days) by default, and automatically prepends
   `zztest-<run's stamp>-` to the real identifier for every network call

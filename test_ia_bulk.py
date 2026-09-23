@@ -190,6 +190,7 @@ def test_check_identifier_accepts_valid_registered_identifier():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert errors == []
 
@@ -201,6 +202,7 @@ def test_check_identifier_rejects_bad_scheme():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "does not match scheme" in errors[0]
@@ -213,6 +215,7 @@ def test_check_identifier_rejects_unknown_prefix():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "not found in project registry" in errors[0]
@@ -227,6 +230,7 @@ def test_check_identifier_rejects_zztest_prefix_since_rows_always_hold_real_iden
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "not found in project registry" in errors[0]
@@ -240,6 +244,7 @@ def test_check_identifier_rejects_duplicate():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers=seen,
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "duplicates row 2" in errors[0]
@@ -252,22 +257,9 @@ def test_check_identifier_rejects_empty():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert errors == ["missing required column 'identifier'"]
-
-
-def test_check_identifier_column_name_defaults_to_identifier():
-    """Pins the default column_name's wording exactly."""
-    errors = check_identifier(
-        "LCPS_astoriaphotos_1",
-        row_number=2,
-        registry=make_registry(),
-        project_id="astoriaphotos",
-        seen_identifiers={},
-    )
-    assert errors == [
-        "identifier 'LCPS_astoriaphotos_1' does not match scheme COLLECTIONKEY-PROJECTID-NUMBER"
-    ]
 
 
 def test_check_identifier_names_the_column_it_checked():
@@ -312,6 +304,7 @@ def test_check_identifier_rejects_another_registered_projects_identifier():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "otherproject" in errors[0]
@@ -325,6 +318,7 @@ def test_check_identifier_accepts_the_runs_own_project():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert errors == []
 
@@ -340,6 +334,7 @@ def test_check_identifier_keeps_unknown_prefix_distinct_from_wrong_project():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     wrong_project = check_identifier(
         "lcps-otherproject-00001",
@@ -347,6 +342,7 @@ def test_check_identifier_keeps_unknown_prefix_distinct_from_wrong_project():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert "not found in project registry" in unknown[0]
     assert "not found in project registry" not in wrong_project[0]
@@ -400,6 +396,10 @@ def test_validate_sheet_rows_flags_a_file_missing_from_disk(tmp_path):
     assert results[0].errors == [f"file not found: {tmp_path / 'does-not-exist.jpg'}"]
 
 
+# The columns validate_rows' own mechanism is exercised with below.
+UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
+
+
 def test_validate_rows_passes_a_fully_valid_row(tmp_path):
     (tmp_path / "photo1.jpg").write_bytes(b"fake-image-bytes")
     rows = [
@@ -413,7 +413,9 @@ def test_validate_rows_passes_a_fully_valid_row(tmp_path):
     ]
 
     results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert len(results) == 1
@@ -433,7 +435,9 @@ def test_validate_rows_flags_missing_file():
     ]
 
     results = validate_rows(
-        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert not results[0].is_valid
@@ -453,7 +457,9 @@ def test_validate_rows_flags_missing_required_metadata(tmp_path):
     ]
 
     results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert not results[0].is_valid
@@ -474,7 +480,9 @@ def test_validate_rows_does_not_require_date(tmp_path):
     ]
 
     results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert results[0].is_valid
@@ -492,7 +500,9 @@ def test_validate_rows_row_numbers_start_at_2_for_header():
     ]
 
     results = validate_rows(
-        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert results[0].row_number == 2
@@ -653,39 +663,13 @@ def test_survey_files_lists_an_uppercase_extension_as_a_candidate(tmp_path):
     assert survey.unclaimed == {"SOP CD 2 COE": ["001_seaside_beach.JPG"]}
 
 
-def test_validate_rows_default_required_columns_still_requires_identifier_and_file(tmp_path):
-    """Pins validate_rows' required_columns default at REQUIRED_UPLOAD_COLUMNS.
-    If the default were ever flipped to SHEET_REQUIRED_COLUMNS (which excludes
-    identifier only), a row with both blank would become "valid" for identifier,
-    and effective_identifier("", live=False, stamp) returns just
-    "zztest-<stamp>-" - not a real identifier."""
-    rows = [
-        {
-            "identifier": "",
-            "file": "",
-            "mediatype": "image",
-            "title": "First photo",
-            "date": "1958",
-        }
-    ]
-
-    results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
-    )
-
-    assert not results[0].is_valid
-    assert "missing required column 'identifier'" in results[0].errors
-    assert "missing required column 'file'" in results[0].errors
-
-
 def test_validate_rows_identifier_column_lets_the_sheet_path_read_ia_identifier(tmp_path):
     """After Task 9 the Sheet's own 'identifier' column holds a donor
     reference like 'CD 1 01 53 58 1 Central SS', not a minted IA
     identifier - running check_identifier's COLLECTIONKEY-PROJECTID-NUMBER
     regex against it would fail every row for the wrong reason.
     identifier_column lets the Sheet path point validate_rows at
-    'ia_identifier' instead; the default ('identifier') is pinned
-    separately above."""
+    'ia_identifier' instead."""
     (tmp_path / "photo1.jpg").write_bytes(b"x")
     rows = [
         {
