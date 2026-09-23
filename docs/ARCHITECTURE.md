@@ -164,12 +164,15 @@ actually in scope (ready, but failing validation) affects `upload`'s exit
 code.
 
 **One verdict, three readers.** `RowValidation.verdict` (`UploadVerdict.READY`/
-`INVALID`/`NOT_READY`) combines the two questions into the single answer to
-"will `upload` target this row": not-ready takes precedence over invalid.
-`validate`'s lifecycle summary buckets by it, `plan_upload_targets` targets
-only `READY`, and `upload_from_sheet` itemizes `INVALID` and counts
-`NOT_READY` from it — none of them recompute the rule, so the "N ready" that
-`validate` prints is the set `upload` targets. Filtering on `is_valid` alone
+`INVALID`/`NOT_READY`) combines the two questions into one answer to "is
+this row uploadable": not-ready takes precedence over invalid. It does not
+say whether the row is already uploaded — `classify_row` still does.
+`validate`'s lifecycle summary buckets by it within each lifecycle state,
+`plan_upload_targets` targets `READY` rows that are not `DONE`, and
+`upload_from_sheet` itemizes `INVALID` and counts `NOT_READY` from it — none
+of them recompute the rule, so `upload` targets exactly the rows `validate`
+reports as "ready to upload" plus those "reserved but unconfirmed".
+Filtering on `is_valid` alone
 once uploaded an uncatalogued row under a permanent identifier with no title;
 that is the drift this closes.
 

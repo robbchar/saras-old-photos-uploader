@@ -6512,6 +6512,39 @@ def test_row_validation_verdict_covers_every_combination(errors, missing_fields,
     assert result.verdict is expected
 
 
+def test_upload_targets_exactly_the_rows_validate_calls_ready_or_reserved():
+    # Every lifecycle state crossed with every verdict, so the two readers can only agree by rule.
+    from ia_bulk import plan_upload_targets
+
+    state_rows = {
+        "unassigned": {"ia_identifier": "", "ia_uploaded": ""},
+        "reserved": {"ia_identifier": "lcps-astoriaphotos-000{n:02d}", "ia_uploaded": ""},
+        "done": {"ia_identifier": "lcps-astoriaphotos-000{n:02d}", "ia_uploaded": "yes"},
+    }
+    verdict_fields = {
+        "ready": {},
+        "invalid": {"errors": ["bad filename"]},
+        "not_ready": {"missing_fields": ["title"]},
+    }
+    rows: list[dict[str, str]] = []
+    results: list[RowValidation] = []
+    for state, row_template in state_rows.items():
+        for verdict, fields in verdict_fields.items():
+            row_number = len(rows) + 2
+            rows.append({key: value.format(n=row_number) for key, value in row_template.items()})
+            results.append(RowValidation(row_number=row_number, identifier="", **fields))
+
+    summary = format_lifecycle_summary(rows, results)
+    targets = plan_upload_targets(
+        rows, results, _sheet_config(), live=False, fingerprints={}, stamp=FIXED_STAMP
+    )
+
+    assert "1 row ready to upload" in summary
+    assert "1 reserved but unconfirmed" in summary
+    # unassigned-ready is row 2, reserved-ready is row 5
+    assert [target.row_number for target in targets] == [2, 5]
+
+
 def test_required_for_upload_naming_a_missing_column_is_an_error():
     column_map = build_column_map(["Title", "Theme", "File Name"])
     config = _sheet_config(required_for_upload=("titel",))
