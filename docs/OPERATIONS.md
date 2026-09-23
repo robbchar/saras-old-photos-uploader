@@ -816,11 +816,19 @@ What a manual pass cannot show:
 ```bash
 python -m pytest test_ia_bulk.py -v
 python -m ruff check .
-python -m pyright ia_bulk.py test_ia_bulk.py
+python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py
 ```
 
-Tests are pure-offline, and `conftest.py` enforces it. Any test that resolves or
-connects to a non-loopback host fails at teardown, naming the host, even when
-the code under test swallows the error. Tests read an empty `ia` config and no
-`IA_*` credentials, never the developer's own. The guard covers the test
-process only, so a subprocess a test starts is not guarded.
+Tests are pure-offline, and `conftest.py` enforces it. From the start of the
+run, any lookup of, connection to, or UDP send to a host that is not this
+machine is refused with the error a real failure would raise. A test that tries
+it fails at teardown, naming the host, even when the code under test swallows
+the error; a test whose body already failed on it is not reported twice. An
+attempt in a shared (session- or module-scoped) fixture is charged to the first
+test that sets the fixture up, and one made while importing a test module fails
+collection. Proxy variables are cleared and `NO_PROXY=*` is set, so a local or
+Windows system proxy cannot hide a request.
+
+Tests read an empty `ia` config and no `IA_*` credentials, never the
+developer's own. The guard covers the test process only, so a subprocess a test
+starts is not guarded.

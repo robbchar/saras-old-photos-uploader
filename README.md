@@ -571,7 +571,7 @@ python -m pytest test_ia_bulk.py -v
 
 ```bash
 python -m ruff check .        # style/lint (unused imports, bug-prone patterns, ...)
-python -m pyright ia_bulk.py test_ia_bulk.py   # static type checking (same engine as VS Code's Pylance)
+python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py   # static type checking (same engine as VS Code's Pylance)
 ```
 
 `pyright` is the command-line engine behind the Pylance VS Code extension —
