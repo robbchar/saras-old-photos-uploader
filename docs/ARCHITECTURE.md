@@ -161,10 +161,17 @@ field is missing (derived from each result's own `missing_fields`, never a
 hardcoded list), printed by `validate`. `upload` does not print this
 breakdown — see `DECISIONS.md` as linked above — and only a row that was
 actually in scope (ready, but failing validation) affects `upload`'s exit
-code; `plan_upload_targets` excludes not-ready rows from that scope entirely
-(a row's own docstring note explains why filtering on `is_valid` alone would
-have uploaded an uncatalogued row under a permanent identifier with no
-title).
+code.
+
+**One verdict, three readers.** `RowValidation.verdict` (`UploadVerdict.READY`/
+`INVALID`/`NOT_READY`) combines the two questions into the single answer to
+"will `upload` target this row": not-ready takes precedence over invalid.
+`validate`'s lifecycle summary buckets by it, `plan_upload_targets` targets
+only `READY`, and `upload_from_sheet` itemizes `INVALID` and counts
+`NOT_READY` from it — none of them recompute the rule, so the "N ready" that
+`validate` prints is the set `upload` targets. Filtering on `is_valid` alone
+once uploaded an uncatalogued row under a permanent identifier with no title;
+that is the drift this closes.
 
 ## The reserve → upload → confirm protocol
 Per chunk, `SheetUploadRun.execute()` does four things in this order:

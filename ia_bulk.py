@@ -233,6 +233,15 @@ class Readiness(Enum):
     NOT_READY = "not_ready"
 
 
+class UploadVerdict(Enum):
+    """The one definition of "ready to upload" that `validate` counts and
+    `upload` targets. NOT_READY beats INVALID - see format_lifecycle_summary."""
+
+    READY = "ready"
+    INVALID = "invalid"
+    NOT_READY = "not_ready"
+
+
 @dataclass
 class RowValidation:
     row_number: int
@@ -254,6 +263,12 @@ class RowValidation:
         """Derived, never stored: `missing_fields` being non-empty IS what
         not-ready means, so a second stored field could only drift from it."""
         return Readiness.NOT_READY if self.missing_fields else Readiness.READY
+
+    @property
+    def verdict(self) -> UploadVerdict:
+        if self.readiness is Readiness.NOT_READY:
+            return UploadVerdict.NOT_READY
+        return UploadVerdict.READY if self.is_valid else UploadVerdict.INVALID
 
 
 def validate_rows(
@@ -560,12 +575,7 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
     buckets: dict[tuple[RowState, str], list[RowValidation]] = {key: [] for key in counts}
     for row, result in zip(rows, row_results):
         state = classify_row(row)
-        if result.readiness is Readiness.NOT_READY:
-            bucket = "not_ready"  # precedence: counted once, here - never also "invalid"
-        elif result.is_valid:
-            bucket = "ready"
-        else:
-            bucket = "invalid"
+        bucket = result.verdict.value
         buckets[(state, bucket)].append(result)
         counts[(state, bucket)] += 1
 
@@ -2988,16 +2998,8 @@ def plan_upload_targets(
 
     pending: list[tuple[int, dict[str, str], RowState]] = []
     for offset, (row, result) in enumerate(zip(rows, row_results)):
-        # Scope is valid AND ready - readiness is load-bearing here, not a
-        # nicety. SHEET_REQUIRED_COLUMNS no longer requires `title` or `file`,
-        # so a row nobody has catalogued yet is now perfectly VALID; it is
-        # merely NOT_READY. Filtering on is_valid alone uploaded it under a
-        # permanent, unrenameable identifier with no title - and, because its
-        # `file` is blank, with files_dir itself as the file argument (see the
-        # guard at the top of upload_row). This is also what makes `upload`'s
-        # scope agree with what `validate`'s lifecycle summary calls "ready to
-        # upload"; the two commands must not define that phrase differently.
-        if not result.is_valid or result.readiness is Readiness.NOT_READY:
+        # Not is_valid alone: an uncatalogued row is valid but NOT_READY (see UploadVerdict).
+        if result.verdict is not UploadVerdict.READY:
             continue
         if scope is not None and offset + 2 not in scope:
             continue
@@ -3647,12 +3649,8 @@ def upload_from_sheet(args) -> int:
         return 1
     reported = in_batch_scope(row_results, scope)
 
-    blocked = [
-        result
-        for result in reported
-        if not result.is_valid and result.readiness is Readiness.READY
-    ]
-    not_ready = [result for result in reported if result.readiness is Readiness.NOT_READY]
+    blocked = [result for result in reported if result.verdict is UploadVerdict.INVALID]
+    not_ready = [result for result in reported if result.verdict is UploadVerdict.NOT_READY]
     not_ready_broken = [result for result in not_ready if not result.is_valid]
 
     if blocked:

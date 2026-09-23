@@ -33,6 +33,7 @@ from ia_bulk import (
     validate_sheet_grid,
     RowValidation,
     Readiness,
+    UploadVerdict,
     effective_identifier,
     run_stamp,
     log_result,
@@ -6493,6 +6494,22 @@ def test_readiness_is_independent_of_validity():
     )
     assert result.readiness is Readiness.NOT_READY
     assert result.is_valid is False
+
+
+@pytest.mark.parametrize(
+    ("errors", "missing_fields", "expected"),
+    [
+        ([], [], UploadVerdict.READY),
+        (["bad filename"], [], UploadVerdict.INVALID),
+        ([], ["title"], UploadVerdict.NOT_READY),
+        # not-ready takes precedence over invalid
+        (["bad filename"], ["title"], UploadVerdict.NOT_READY),
+    ],
+    ids=["valid-ready", "invalid-ready", "valid-not-ready", "invalid-not-ready"],
+)
+def test_row_validation_verdict_covers_every_combination(errors, missing_fields, expected):
+    result = RowValidation(row_number=2, identifier="", errors=errors, missing_fields=missing_fields)
+    assert result.verdict is expected
 
 
 def test_required_for_upload_naming_a_missing_column_is_an_error():
