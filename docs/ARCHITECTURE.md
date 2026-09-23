@@ -580,9 +580,10 @@ already matches what's on the item — i.e. nothing was wrong, there was
 just nothing to do. `update_metadata_row` detects that specific error and
 raises `MetadataUnchanged` instead of `RuntimeError`; `SheetSyncRun.execute`
 catches it separately, logs the row as `"status": "unchanged"` (not `"failure"`),
-counts it in `SyncSummary`'s `unchanged`, and stamps `ia_sync_hash` as for a
-real change, so a row that's already correct doesn't inflate the error count
-or flip the exit code.
+counts it in `PushOutcome`'s `unchanged` (which `SyncSummary` reports), and
+stamps `ia_sync_hash` as for a real change — subject to the same late
+identity check (`_verified`) — so a row that's already correct doesn't
+inflate the error count or flip the exit code.
 
 ## Safety rail
 Default target is `test_collection`; `--live` is required to target the
@@ -609,11 +610,11 @@ ones and must stay a pure function of the Sheet.
 Verified defects with reproductions live in
 [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md). The design-level gaps are below.
 
-`projects_registry.json`'s `collection_key` value (`lcps`) was settled on
-2026-08-23 — see [`DECISIONS.md`](DECISIONS.md#still-open). Nothing in the
-tool pins it: a changed value would change the first segment of every
-identifier minted after the change, and `validate` would reject every
-identifier already in the Sheet.
+Nothing in the tool pins `projects_registry.json`'s `collection_key`. The
+value itself is settled (see
+[The collection key is `lcps`](decisions/IDENTIFIERS.md#the-collection-key-is-lcps),
+which also lists what a change would break), but a change to it is not
+detected.
 
 The target IA collection is the project's `ia_collection` in
 `projects_registry.json`, and only there: there is no collection flag. (The

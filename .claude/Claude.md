@@ -6,10 +6,8 @@ so keep things generic to "a project" rather than hardcoded to photos.
 
 ## Identifier scheme
 `COLLECTIONKEY-PROJECTID-NUMBER` — all lowercase, hyphen-separated.
-- COLLECTIONKEY: `lcps`, settled 2026-08-23 (see `docs/DECISIONS.md`,
-  "Still open"). An identifier namespace only, not the IA collection items
-  land in (`ia_collection`). Do not change it: every minted identifier
-  starts with it.
+- COLLECTIONKEY: `lcps`, settled — see `docs/DECISIONS.md`, "The collection
+  key is `lcps`". Not the IA collection items land in (`ia_collection`).
 - PROJECTID: short project code, e.g. `photosexample` (illustrative only —
   see `projects_registry.json` for the actual registered codes; tracked in
   a small project registry, not invented ad hoc per script run)

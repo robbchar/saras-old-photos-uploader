@@ -41,6 +41,7 @@ about not getting a number wrong once.
 - [`identifier-bib` is written back to the Sheet, not just generated](decisions/IDENTIFIERS.md#identifier-bib-is-written-back-to-the-sheet-not-just-generated)
 - [An identifier is checked against the run's project, not the whole registry](decisions/IDENTIFIERS.md#an-identifier-is-checked-against-the-runs-project-not-the-whole-registry)
 - [Registry ids must be lowercase letters and digits](decisions/IDENTIFIERS.md#registry-ids-must-be-lowercase-letters-and-digits)
+- [The collection key is `lcps`](decisions/IDENTIFIERS.md#the-collection-key-is-lcps)
 
 ## [The Sheet protocol](decisions/SHEET-PROTOCOL.md)
 
@@ -109,15 +110,8 @@ run writes down about itself.
 ## Still open
 
 
-- ~~`collection_key` has never been confirmed~~ **Settled 2026-08-23**:
-  `collection_key` is `"lcps"` — the first segment of every minted identifier
-  and of every item's permanent public URL
-  (`archive.org/details/lcps-sarasoldphotos-00001`). Confirmed as the most
-  specific pointer to the organization; `lcpsociety` (the IA account's domain)
-  and `lcpsdigitalcollection` (the parent collection) were both considered and
-  rejected as slightly off. This value never reaches Internet Archive — it is
-  purely the identifier namespace, used by `format_identifier()`,
-  `next_identifiers()` and `check_identifier()`.
+- ~~`collection_key` has never been confirmed~~ **Settled 2026-08-23** — see
+  [The collection key is `lcps`](decisions/IDENTIFIERS.md#the-collection-key-is-lcps).
   **Not to be confused with `ia_collection`** — see below; they are unrelated
   values, and both are now settled.
 - ~~The real IA collection has never been confirmed~~ **Settled 2026-08-22**:
