@@ -19,27 +19,31 @@ they go in the `identifier-bib` metadata field instead.
 - `ia` CLI (internetarchive Python package), authenticated via `ia configure`
   against the shared org account `admin@lcpsociety.org` — no env vars, no
   per-user credentials.
-- Upload: `ia upload --spreadsheet <csv>` (must include `identifier`, `file`,
-  `mediatype` columns at minimum — mediatype is NOT optional, defaults to
-  `data` and can't be changed after upload if omitted).
-- Metadata updates: `ia metadata --spreadsheet <csv>` (identifier column +
-  changed fields only) — fully decoupled from upload, safe to run repeatedly.
-- IA batch limits: 500 items per upload run, 5000/day — always chunk CSVs
-  accordingly, never submit the full set in one call.
+- Upload: `ia_bulk.py upload` reads the Sheet and uploads through the
+  `internetarchive` library. Every item is sent with a `mediatype` — it is
+  NOT optional, defaults to `data` and can't be changed after upload if
+  omitted.
+- Metadata updates: `ia_bulk.py sync-metadata` pushes Sheet edits to
+  already-uploaded items — fully decoupled from upload, safe to run
+  repeatedly.
+- IA batch limits: 500 items per upload run, 5000/day — `ia_bulk.py upload`
+  chunks by 500 and refuses a run over 5000 unless
+  `--allow-over-daily-cap` is passed; never submit the full set in one call.
 - Testing: `ia_bulk.py` targets `collection:test_collection` (IA's sandbox,
   auto-expires ~30 days) by default, and automatically prepends
   `zztest-<run's stamp>-` to the real identifier for every network call
   unless `--live` is passed. The stamp is unique per invocation (one stamp
   per run, shared by every row it touches), so a rehearsal never collides
   with a previous rehearsal's items — see `docs/DECISIONS.md`, "Test
-  identifiers carry a per-run stamp". The CSV always holds real, permanent
-  identifiers — never author a `zztest-` identifier by hand in the CSV
-  itself.
+  identifiers carry a per-run stamp". The Sheet's `ia_identifier` column
+  always holds real, permanent identifiers — never author a `zztest-`
+  identifier by hand in it.
 
 ## Source of truth
 Canonical metadata lives in a Google Sheet (replacing the old emailed-CSV
-workflow). CSV export from that Sheet is a deliberate, explicit step before
-any `ia` command runs — never treat a stale local CSV as current.
+workflow). Every `ia_bulk.py` command reads the Sheet live over the Sheets
+API; there is no CSV export step, and `ia_bulk.py` takes no CSV input (the
+`--csv` paths were removed 2026-09-23).
 
 ## temp/memory/your files
 Any file that is used only locally, that should not be part of the project, should be written to the .ignored/ directory. That includes any memory files, temp files (such as scripts or test files), and really anything that needs to be written to disk but is not part of the project.

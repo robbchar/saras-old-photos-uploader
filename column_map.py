@@ -1,6 +1,5 @@
-"""Turns a Google Sheet grid into the same row shape read_csv() produces, so
-everything downstream cannot tell where its rows came from. See
-docs/DECISIONS.md, "The Sheet is read live"."""
+"""Turns a Google Sheet grid into a ColumnMap and plain row dicts keyed by
+normalized header. See docs/DECISIONS.md, "The Sheet is read live"."""
 from __future__ import annotations
 
 import re
@@ -103,9 +102,8 @@ def grid_to_rows(grid: list[list[str]]) -> tuple[ColumnMap, list[dict[str, str]]
     API omits trailing empty cells - a row genuinely can be shorter than the
     header without being corrupt data. Long rows silently drop excess cells
     without raising; use check_grid_shape() to detect those defects before
-    upload. This mirrors the approach check_row_shape() takes for CSV rows: no
-    validation in the converter, errors reported separately so users see every
-    problem at once instead of one per run."""
+    upload. No validation in the converter: errors are reported separately so
+    users see every problem at once instead of one per run."""
     if not grid:
         return build_column_map([]), []
 
@@ -173,10 +171,9 @@ def check_grid_shape(grid: list[list[str]]) -> list[str]:
     cells than the header has columns, the excess cells silently vanish from
     the row dict output without error, making it impossible to tell which values
     are missing data and which are present but attributed to the wrong field.
-    This mirrors check_row_shape() for CSV rows: short rows (handled by the
-    Sheets API omitting trailing empty cells) are not an error and produce no
-    message, but long rows are flagged here with row number and count of excess
-    cells."""
+    Short rows (the Sheets API omitting trailing empty cells) are not an
+    error and produce no message, but long rows are flagged here with row
+    number and count of excess cells."""
     if not grid:
         return []
 

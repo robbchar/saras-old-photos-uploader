@@ -5,7 +5,8 @@ entry was reproduced, not inferred. Ordered by how much damage it can do to a
 `--live` run.
 
 These are the open ones. Issues fixed since this file was written are recorded
-at the bottom under [Fixed](#fixed), so the reasoning survives.
+at the bottom under [Fixed](#fixed), so the reasoning survives. Numbers are
+never reused, so a fixed entry leaves a gap (#3 and #4).
 
 ## 1. `noindex` cannot be changed by `sync-metadata`
 
@@ -18,8 +19,8 @@ IA treats `noindex` as read-only after upload:
 ```
 
 Recorded against items `00001`–`00005` in the 2026-07-08 sync logs. `noindex`
-*can* be set at upload time (`data/upload.csv` sets it to `true`), but it must
-be right the first time.
+*can* be set at upload time (a `noindex` column in the Sheet uploads like any
+other field), but it must be right the first time.
 
 **Implication:** decide the `noindex` policy for the collection before the live
 upload, not after.
@@ -32,12 +33,11 @@ upload, not after.
 still has no pacing (no sleep between batches) and no running counter *across*
 a day's separate runs — a second run started the same day does not know what
 the first one spent. What a single run can no longer do is exceed the
-5,000/day cap by itself: both `upload` paths refuse to start such a run and
-name the fix (`--limit` on the Sheet path, splitting the file on `--csv`),
-with `--allow-over-daily-cap` as the explicit override. Beyond that: the Sheet path's `upload --limit N`
+5,000/day cap by itself: `upload` refuses to start such a run and names the
+fix (`--limit`), with `--allow-over-daily-cap` as the explicit override.
+Beyond that: `upload --limit N`
 now caps how many items a single invocation uploads at all (an operator can
-size a day's runs by hand with a number the tool enforces, rather than by
-pre-splitting a CSV), `--chunk-size` makes the 500-per-run batch size an
+size a day's runs by hand with a number the tool enforces), `--chunk-size` makes the 500-per-run batch size an
 overridable flag instead of a constant, and a detected rate-limit response
 now stops a run cleanly instead of grinding through the rest of the batch as
 unexplained failures — though that detector is unverified against a real
@@ -46,51 +46,7 @@ code...".
 
 **Mitigation today:** pace `--limit` across the day's runs by hand — the tool
 enforces the cap per run, not per day; see
-[`OPERATIONS.md`](OPERATIONS.md#pacing-and-batch-limits). The `--csv` path
-still has neither `--limit` nor `--chunk-size` (see `DECISIONS.md`, "`--limit`
-counts planned targets...") — size those CSVs by hand, though a file over
-5,000 rows is now refused rather than attempted.
-
-## 3. `--collection` is unvalidated on `--live`
-
-**Severity: high if wrong, but requires operator error.**
-
-`--collection` defaults to `"lcps"` and is used as-is. Nothing checks it
-against `projects_registry.json` or against IA. A wrong value pushes real files
-into the wrong collection and reports success. The default was deliberately
-left in place during review as a documentation warning rather than a behavior
-change.
-
-Relatedly, `projects_registry.json`'s `collection_key` (`"lcps"`) has **never
-been confirmed** against LCPS's actual IA collection. A wrong value there is
-harmless — validation simply rejects every identifier — but it must be right
-before real uploads can pass.
-
-**Possible fix:** cross-check `--collection` against the registry's
-`collection_key` and refuse to run `--live` when they disagree.
-
-## 4. `--files-dir` does not constrain path resolution — **`--csv` path only**
-
-**Severity: low — trusted-input tool. Narrowed 2026-08-23: no longer true of
-the Sheet path.**
-
-On the **`--csv` path** this still holds: `Path(files_dir) / row["file"]` will
-happily resolve `../` or an absolute path outside the intended directory.
-Accepted during review — the CSV is authored by the same person running the
-tool.
-
-On the **Sheet path it is false**, and reading this section as a general
-statement about the tool gives the wrong answer. `resolve_file()` treats
-`files_dir` as a hard boundary rather than a starting point: the folder part is
-resolved and then checked to still be underneath it, so anything that *resolves
-outside* it — an absolute path, or a `..` that climbs past it — is refused with
-a message naming both paths. (A `..` that lands back inside is fine; it never
-left.) `Path(files_dir) / part` would otherwise discard `files_dir` entirely
-whenever `part` is itself absolute.
-
-It also refuses a candidate whose folder segment is empty (a blank folder cell,
-which would otherwise turn a missing required cell into a search of
-`files_dir`'s own root) rather than treating that as "look in the top level".
+[`OPERATIONS.md`](OPERATIONS.md#pacing-and-batch-limits).
 
 ## 5. `check_file_exists`'s `is_file()` catch has no test for the case it exists for
 
@@ -111,23 +67,19 @@ different mechanism" from the required-columns check nearby and that removing
 it "is a different (and wrong) change" from anything that constant's own
 shrink calls for.
 
-The block is **not** untested in general. `test_validate_rows_flags_missing_file`
-drives it through the CSV path with a genuine on-disk mismatch and asserts the
-`"file not found"` message. Deleting the `if check_file_exists:` block outright
-was tried during the 2026-08-22 review: three tests fail
-(`test_validate_rows_flags_missing_file`,
-`test_cmd_validate_returns_one_when_a_row_fails`, and
-`test_cmd_upload_fails_validation_before_touching_network` — the last of which
-then uploads a file that does not exist). A refactor that removed the call
-would not go green.
+The block is **not** untested in general.
+`test_validate_sheet_rows_flags_a_file_missing_from_disk` drives it through
+`validate_sheet_rows` with a genuine on-disk mismatch and asserts the
+`"file not found"` message. A refactor that removed the call would not go
+green. (Until 2026-09-23 the tests that pinned it all ran through the CSV
+path; they went with that path, and this Sheet-path test replaced them.)
 
 What *is* uncovered is narrower, and it is the scenario that makes the check
-load-bearing rather than merely redundant: the **Sheet path**, where an
-internal space in a multi-segment folder cell makes the earlier file
-resolution and this later disk re-check disagree. The existing test is a
-generic missing-file case on the CSV path, which the resolver alone would
-already have caught on the Sheet path. So the check's *ordinary* behavior is
-tested; its *reason for existing* is not.
+load-bearing rather than merely redundant: an internal space in a
+multi-segment folder cell that makes the earlier file resolution and this
+later disk re-check disagree. The existing test is a generic missing file,
+which the resolver alone would already have caught in a real run. So the
+check's *ordinary* behavior is tested; its *reason for existing* is not.
 
 An earlier version of this entry claimed nothing referenced `check_file_exists`
 or asserted that message at all, and that deleting the `is_file()` call "would
@@ -156,7 +108,48 @@ is itself part of why no test exists yet.
 **Mitigation today:** none — this is a test-coverage gap, not a behavior
 change. Recorded here so it is not lost the next time this file is reviewed.
 
+## 6. Repeated IA fields cannot be written from the Sheet
+
+**Severity: low — no current need, but it silently flattens.**
+
+*Found 2026-09-23, while removing the CSV paths.* Internet Archive stores a
+repeated field (several `subject` values, say) under indexed keys:
+`subject[0]`, `subject[1]`. Only the CSV paths could write those. From the
+Sheet, `normalize_header()` strips the brackets (`subject[0]` becomes
+`subject0`), and a cell like `a; b` ships as one string, not two values. The
+last CSV sync (2026-07-12) edited a repeated `colors` field on a test item.
+
+It matters if LCPS wants several subject or name values per item. The export
+already has `Subject Terms (Controlled Vocab)` and `Names (Last, First M.)`,
+which are naturally multi-valued.
+
+**Mitigation today:** the raw `ia` CLI —
+`ia metadata <identifier> --modify 'subject[1]:...'` — or the item's
+archive.org edit page. Neither is recorded in the Sheet.
+
 ## Fixed
+
+### `--collection` was unvalidated on `--live` (was #3)
+
+*Fixed 2026-09-23 by removing the CSV paths (#44).* `--collection` was used
+as typed and never checked against the registry or against IA, so a wrong
+value pushed real files into the wrong collection and reported success. By
+then its `"lcps"` default was already gone (2026-08-08) and passing it on the
+Sheet path was an error; it survived only on `upload --csv`. With that path
+removed the flag is gone, and the registry's `ia_collection` is the only
+source. See [`DECISIONS.md`](decisions/FOUNDATIONS.md#technical-configuration-lives-in-the-registry-not-the-command-line).
+
+The related `collection_key` question was settled 2026-08-23 — see
+[`DECISIONS.md`](DECISIONS.md#still-open).
+
+### `--files-dir` did not constrain path resolution (was #4)
+
+*Fixed 2026-09-23 by removing the CSV paths (#44).* On the `--csv` paths,
+`Path(files_dir) / row["file"]` would resolve `../` or an absolute path
+outside the intended directory. The Sheet path never had this problem after
+2026-08-23: `resolve_file()` treats `files_dir` as a hard boundary, refusing
+anything that resolves outside it and any blank folder cell. With the CSV
+paths gone, `--files-dir` is gone too, and every file is resolved that way.
 
 ### No retry or backoff on transient network failures
 
@@ -181,8 +174,8 @@ repeating it. `IA_RETRY` and a `__context__` walk recover the real status
 without reading message text. See
 [`DECISIONS.md`](decisions/QUOTA-AND-RUNS.md#a-status-the-metadata-call-strips-is-recovered-still-without-reading-text).
 
-Re-running with `--resume-from` is still the recovery for a row that fails all
-three attempts.
+Re-running is still the recovery for a row that fails all three attempts: it
+has no `ia_uploaded`, so the next run retries it.
 
 ### `validate` passed CSVs whose metadata was silently misaligned
 
@@ -211,3 +204,8 @@ visible in three real logs (`upload-20260708T131606`, `-20260708T132619`,
 been papered over by the `(value or "")` guards in `a0944be`, which stopped the
 crash without noticing the misalignment behind it. Both are now caught before
 any network call.
+
+*2026-09-23:* both CSV entries above are history. `check_header()` and
+`check_row_shape()` were removed with the CSV paths (#44). The Sheet path's
+`check_column_map()` and `check_grid_shape()` cover the same ground for a
+grid, where an unquoted comma cannot split a header.

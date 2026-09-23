@@ -3,7 +3,6 @@ import contextlib
 import dataclasses
 import io
 import json
-import csv
 import re
 import shlex
 import tempfile
@@ -23,7 +22,6 @@ import google_auth
 import ia_bulk
 from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
-    read_csv,
     load_registry,
     check_identifier,
     check_required_for_upload,
@@ -31,9 +29,7 @@ from ia_bulk import (
     claim_key,
     survey_files,
     validate_rows,
-    validate_csv_rows,
     validate_sheet_rows,
-    validate_identifiers,
     validate_sheet_grid,
     RowValidation,
     Readiness,
@@ -65,48 +61,12 @@ class FakeResponse:
         self.text = text
 
 
-def write_csv(path, fieldnames, rows):
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 # A fixed stand-in for run_stamp(), threaded into every test that needs a
 # deterministic non-live identifier - see docs/DECISIONS.md, "Test
 # identifiers carry a per-run stamp". Tests that instead need to prove the
 # stamp is computed once per run (not once per row/chunk) monkeypatch
 # ia_bulk.run_stamp with their own counting fake instead of this constant.
 FIXED_STAMP = "20260819t090000"
-
-
-def test_read_csv_returns_list_of_dicts(tmp_path):
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-
-    rows = read_csv(csv_path).rows
-
-    assert rows == [
-        {
-            "identifier": "lcps-astoriaphotos-00001",
-            "file": "photo1.jpg",
-            "mediatype": "image",
-            "title": "First photo",
-            "date": "1958",
-        }
-    ]
 
 
 def test_load_registry_reads_json(tmp_path):
@@ -230,6 +190,7 @@ def test_check_identifier_accepts_valid_registered_identifier():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert errors == []
 
@@ -241,6 +202,7 @@ def test_check_identifier_rejects_bad_scheme():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "does not match scheme" in errors[0]
@@ -253,21 +215,22 @@ def test_check_identifier_rejects_unknown_prefix():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "not found in project registry" in errors[0]
 
 
-def test_check_identifier_rejects_zztest_prefix_since_csv_always_holds_real_identifiers():
-    # The CSV's identifier column always holds the real, permanent
-    # identifier — "zztest-" prefixing is applied automatically by
-    # effective_identifier() at network-call time, never authored in the CSV.
+def test_check_identifier_rejects_zztest_prefix_since_rows_always_hold_real_identifiers():
+    # A row always holds the real, permanent identifier — "zztest-" prefixing
+    # is applied by effective_identifier() at network-call time, never authored.
     errors = check_identifier(
         "zztest-astoriaphotos-00001",
         row_number=2,
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "not found in project registry" in errors[0]
@@ -281,6 +244,7 @@ def test_check_identifier_rejects_duplicate():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers=seen,
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "duplicates row 2" in errors[0]
@@ -293,23 +257,9 @@ def test_check_identifier_rejects_empty():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert errors == ["missing required column 'identifier'"]
-
-
-def test_check_identifier_column_name_defaults_to_identifier_for_the_csv_path():
-    """Pins the CSV path's wording exactly - column_name existing as a
-    parameter must not change what the CSV path's messages say."""
-    errors = check_identifier(
-        "LCPS_astoriaphotos_1",
-        row_number=2,
-        registry=make_registry(),
-        project_id="astoriaphotos",
-        seen_identifiers={},
-    )
-    assert errors == [
-        "identifier 'LCPS_astoriaphotos_1' does not match scheme COLLECTIONKEY-PROJECTID-NUMBER"
-    ]
 
 
 def test_check_identifier_names_the_column_it_checked():
@@ -354,6 +304,7 @@ def test_check_identifier_rejects_another_registered_projects_identifier():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert len(errors) == 1
     assert "otherproject" in errors[0]
@@ -367,6 +318,7 @@ def test_check_identifier_accepts_the_runs_own_project():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert errors == []
 
@@ -382,6 +334,7 @@ def test_check_identifier_keeps_unknown_prefix_distinct_from_wrong_project():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     wrong_project = check_identifier(
         "lcps-otherproject-00001",
@@ -389,6 +342,7 @@ def test_check_identifier_keeps_unknown_prefix_distinct_from_wrong_project():
         registry=make_registry(),
         project_id="astoriaphotos",
         seen_identifiers={},
+        column_name="identifier",
     )
     assert "not found in project registry" in unknown[0]
     assert "not found in project registry" not in wrong_project[0]
@@ -408,25 +362,6 @@ def test_check_identifier_names_the_column_for_a_wrong_project_too():
     assert errors[0].startswith("ia_identifier ")
 
 
-def test_validate_csv_rows_rejects_another_projects_identifier(tmp_path):
-    """The leaf check is only useful if the run's project actually reaches
-    it - this pins the threading, not the comparison."""
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    rows = [
-        {
-            "identifier": "lcps-otherproject-00099",
-            "file": "a.jpg",
-            "mediatype": "image",
-            "title": "First",
-        }
-    ]
-
-    results = validate_csv_rows(rows, tmp_path, make_registry(), "astoriaphotos")
-
-    assert not results[0].is_valid
-    assert any("otherproject" in e for e in results[0].errors)
-
-
 def test_validate_sheet_rows_rejects_another_projects_identifier(tmp_path):
     (tmp_path / "a.jpg").write_bytes(b"x")
     rows = [
@@ -444,16 +379,25 @@ def test_validate_sheet_rows_rejects_another_projects_identifier(tmp_path):
     assert any("otherproject" in e for e in results[0].errors)
 
 
-def test_validate_identifiers_rejects_another_projects_identifier():
-    """sync-metadata's own path. It writes metadata to whatever identifier
-    the row names, so a wrong-project identifier here overwrites another
-    project's item rather than merely misfiling this one."""
-    rows = [{"identifier": "lcps-otherproject-00099"}]
+def test_validate_sheet_rows_flags_a_file_missing_from_disk(tmp_path):
+    """The disk re-check after file resolution; see docs/KNOWN-ISSUES.md #5."""
+    rows = [
+        {
+            "ia_identifier": "",
+            "file": "does-not-exist.jpg",
+            "mediatype": "image",
+            "title": "First photo",
+        }
+    ]
 
-    results = validate_identifiers(rows, make_registry(), "astoriaphotos")
+    results = validate_sheet_rows(rows, tmp_path, make_registry(), "astoriaphotos")
 
     assert not results[0].is_valid
-    assert any("otherproject" in e for e in results[0].errors)
+    assert results[0].errors == [f"file not found: {tmp_path / 'does-not-exist.jpg'}"]
+
+
+# The columns validate_rows' own mechanism is exercised with below.
+UPLOAD_COLUMNS = ("identifier", "file", "mediatype", "title")
 
 
 def test_validate_rows_passes_a_fully_valid_row(tmp_path):
@@ -469,7 +413,9 @@ def test_validate_rows_passes_a_fully_valid_row(tmp_path):
     ]
 
     results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert len(results) == 1
@@ -489,7 +435,9 @@ def test_validate_rows_flags_missing_file():
     ]
 
     results = validate_rows(
-        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert not results[0].is_valid
@@ -509,7 +457,9 @@ def test_validate_rows_flags_missing_required_metadata(tmp_path):
     ]
 
     results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert not results[0].is_valid
@@ -530,7 +480,9 @@ def test_validate_rows_does_not_require_date(tmp_path):
     ]
 
     results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert results[0].is_valid
@@ -548,7 +500,9 @@ def test_validate_rows_row_numbers_start_at_2_for_header():
     ]
 
     results = validate_rows(
-        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos"
+        rows, files_dir="/tmp", registry=make_registry(), project_id="astoriaphotos",
+        required_columns=UPLOAD_COLUMNS,
+        identifier_column="identifier",
     )
 
     assert results[0].row_number == 2
@@ -709,141 +663,13 @@ def test_survey_files_lists_an_uppercase_extension_as_a_candidate(tmp_path):
     assert survey.unclaimed == {"SOP CD 2 COE": ["001_seaside_beach.JPG"]}
 
 
-def test_validate_rows_skips_checks_but_keeps_row_numbers_for_skip_identifiers():
-    rows = [
-        {
-            # would otherwise fail every check - already validated + uploaded
-            # by a prior run, so re-checking it on --resume-from is wasted work
-            "identifier": "lcps-astoriaphotos-00001",
-            "file": "does-not-exist.jpg",
-            "mediatype": "",
-            "title": "",
-            "date": "",
-        },
-        {
-            "identifier": "lcps-astoriaphotos-00002",
-            "file": "does-not-exist.jpg",
-            "mediatype": "",
-            "title": "",
-            "date": "",
-        },
-    ]
-
-    results = validate_rows(
-        rows,
-        files_dir="/tmp",
-        registry=make_registry(),
-        project_id="astoriaphotos",
-        skip_identifiers=frozenset({"lcps-astoriaphotos-00001"}),
-    )
-
-    assert results[0].is_valid
-    assert results[0].row_number == 2
-    assert not results[1].is_valid
-    assert results[1].row_number == 3
-
-
-def valid_row(**overrides) -> dict:
-    row: dict = {
-        "identifier": "lcps-astoriaphotos-00001",
-        "file": "photo1.jpg",
-        "mediatype": "image",
-        "title": "First photo",
-    }
-    row.update(overrides)
-    return row
-
-
-def test_validate_rows_flags_a_row_with_more_fields_than_the_header(tmp_path):
-    # csv.DictReader collects surplus fields under the None restkey. Left
-    # unchecked this crashes upload_row with "'list' object has no attribute
-    # 'strip'" partway through a run.
-    (tmp_path / "photo1.jpg").write_bytes(b"x")
-    row = valid_row()
-    row[None] = ["surplus value"]
-
-    results = validate_rows(
-        [row], files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
-    )
-
-    assert not results[0].is_valid
-    assert any("more fields than the header" in e for e in results[0].errors)
-
-
-def test_validate_rows_flags_a_row_with_fewer_fields_than_the_header(tmp_path):
-    # A short row means the header and the data disagree about column
-    # positions, so every value after the gap is attributed to the wrong
-    # field. This is what a comma inside an unquoted header produces.
-    (tmp_path / "photo1.jpg").write_bytes(b"x")
-    rows = [valid_row(addresses=None)]
-
-    results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
-    )
-
-    assert not results[0].is_valid
-    assert any("fewer fields than the header" in e for e in results[0].errors)
-
-
-def test_validate_rows_names_the_column_a_short_row_is_missing(tmp_path):
-    (tmp_path / "photo1.jpg").write_bytes(b"x")
-    rows = [valid_row(addresses=None)]
-
-    results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
-    )
-
-    assert any("addresses" in e for e in results[0].errors)
-
-
-def test_validate_rows_accepts_a_row_whose_trailing_cell_is_merely_empty(tmp_path):
-    # An empty cell is "" and is fine; only None means the field was absent.
-    (tmp_path / "photo1.jpg").write_bytes(b"x")
-    rows = [valid_row(addresses="")]
-
-    results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
-    )
-
-    assert results[0].is_valid
-
-
-def test_validate_rows_default_required_columns_still_requires_identifier_and_file(tmp_path):
-    """Pins validate_rows' required_columns default at REQUIRED_UPLOAD_COLUMNS
-    - the CSV path, unchanged - since introducing that parameter for the
-    Sheet path means the CSV path's own correctness now depends on a
-    default value rather than on hardcoded behavior. If the default were
-    ever flipped to SHEET_REQUIRED_COLUMNS (which excludes identifier
-    only), a CSV row with both blank would become "valid" for identifier,
-    and effective_identifier("", live=False, stamp) returns just
-    "zztest-<stamp>-" - not a real identifier."""
-    rows = [
-        {
-            "identifier": "",
-            "file": "",
-            "mediatype": "image",
-            "title": "First photo",
-            "date": "1958",
-        }
-    ]
-
-    results = validate_rows(
-        rows, files_dir=tmp_path, registry=make_registry(), project_id="astoriaphotos"
-    )
-
-    assert not results[0].is_valid
-    assert "missing required column 'identifier'" in results[0].errors
-    assert "missing required column 'file'" in results[0].errors
-
-
 def test_validate_rows_identifier_column_lets_the_sheet_path_read_ia_identifier(tmp_path):
     """After Task 9 the Sheet's own 'identifier' column holds a donor
     reference like 'CD 1 01 53 58 1 Central SS', not a minted IA
     identifier - running check_identifier's COLLECTIONKEY-PROJECTID-NUMBER
     regex against it would fail every row for the wrong reason.
     identifier_column lets the Sheet path point validate_rows at
-    'ia_identifier' instead; the CSV path's default ('identifier') is
-    pinned separately above and is untouched by this parameter existing."""
+    'ia_identifier' instead."""
     (tmp_path / "photo1.jpg").write_bytes(b"x")
     rows = [
         {
@@ -868,210 +694,13 @@ def test_validate_rows_identifier_column_lets_the_sheet_path_read_ia_identifier(
     assert results[0].identifier == ""
 
 
-def test_check_header_accepts_a_clean_header():
-    from ia_bulk import check_header
-
-    assert check_header(["identifier", "file", "mediatype", "title", "date", "Theme"]) == []
-
-
-def test_check_header_rejects_a_column_with_surrounding_whitespace():
-    # "Place " uploads a metadata field literally named "Place ".
-    from ia_bulk import check_header
-
-    errors = check_header(["identifier", "file", "mediatype", "title", "Place "])
-
-    assert any("Place " in e and "whitespace" in e for e in errors)
-
-
-def test_check_header_rejects_duplicate_columns():
-    from ia_bulk import check_header
-
-    errors = check_header(["identifier", "file", "mediatype", "title", "Theme", "Theme"])
-
-    assert any("duplicate" in e and "Theme" in e for e in errors)
-
-
-def test_check_header_rejects_a_capitalized_variant_of_a_known_column():
-    # A "Date" column is passed through as an arbitrary field while the
-    # lowercase "date" upload_row reads stays empty, so the item gets both
-    # Date=1958 and date=[n.d.].
-    from ia_bulk import check_header
-
-    errors = check_header(["identifier", "file", "mediatype", "title", "Date"])
-
-    assert any("Date" in e and "date" in e for e in errors)
-
-
-def test_check_header_rejects_an_empty_header():
-    from ia_bulk import check_header
-
-    assert check_header([]) != []
-
-
-def test_check_header_does_not_object_to_unknown_columns():
-    from ia_bulk import check_header
-
-    assert check_header(["identifier", "file", "mediatype", "title", "Notes (LCPS Internal)"]) == []
-
-
-def test_read_csv_returns_fieldnames_alongside_rows(tmp_path):
-    from ia_bulk import read_csv
-
-    csv_path = tmp_path / "items.csv"
-    csv_path.write_text(
-        "identifier,file,mediatype,title\nlcps-astoriaphotos-00001,a.jpg,image,First\n",
-        encoding="utf-8",
-    )
-
-    data = read_csv(csv_path)
-
-    assert data.fieldnames == ["identifier", "file", "mediatype", "title"]
-    assert data.rows == [
-        {
-            "identifier": "lcps-astoriaphotos-00001",
-            "file": "a.jpg",
-            "mediatype": "image",
-            "title": "First",
-        }
-    ]
-
-
-def write_raw_csv(path, text):
-    path.write_text(text, encoding="utf-8")
-    return path
-
-
-def test_cmd_validate_fails_on_a_header_with_a_capitalized_known_column(tmp_path, capsys):
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    csv_path = write_raw_csv(
-        tmp_path / "items.csv",
-        "identifier,file,mediatype,title,Date\nlcps-astoriaphotos-00001,a.jpg,image,First,1958\n",
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    from ia_bulk import cmd_validate
-
-    exit_code = cmd_validate(
-        Namespace(
-            project="astoriaphotos",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-        )
-    )
-
-    assert exit_code == 1
-    assert "must be lowercase 'date'" in capsys.readouterr().out
-
-
-def test_cmd_validate_fails_on_an_unquoted_comma_in_the_header(tmp_path, capsys):
-    # The real failure from data/upload.csv: "Names (Last, First M.)" splits
-    # into two header cells, so the header is one field longer than the row
-    # and every later column is attributed to the wrong field.
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    csv_path = write_raw_csv(
-        tmp_path / "items.csv",
-        "identifier,file,mediatype,title,Names (Last, First M.),addresses\n"
-        "lcps-astoriaphotos-00001,a.jpg,image,First,,600 Marine Dr.\n",
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    from ia_bulk import cmd_validate
-
-    exit_code = cmd_validate(
-        Namespace(
-            project="astoriaphotos",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-        )
-    )
-
-    assert exit_code == 1
-    assert "fewer fields than the header" in capsys.readouterr().out
-
-
-def test_cmd_upload_refuses_a_bad_header_before_touching_the_network(tmp_path, monkeypatch):
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    csv_path = write_raw_csv(
-        tmp_path / "items.csv",
-        "identifier,file,mediatype,title,Date\nlcps-astoriaphotos-00001,a.jpg,image,First,1958\n",
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    # run_rows catches broad Exception, so a raising fake would be swallowed
-    # and logged as a row failure - recording the call is the only way to
-    # prove the network was never reached.
-    calls = []
-
-    def record_call(*args, **kwargs):
-        calls.append(args)
-        return []
-
-    monkeypatch.setattr(internetarchive, "upload", record_call)
-
-    from ia_bulk import cmd_upload
-
-    exit_code = cmd_upload(
-        Namespace(
-            project="astoriaphotos",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-            live=False,
-            collection="lcps",
-            log_dir=str(tmp_path / "logs"),
-            resume_from=None,
-        )
-    )
-
-    assert exit_code == 1
-    assert calls == []
-
-
-def test_cmd_sync_metadata_refuses_a_bad_header_before_touching_the_network(tmp_path, monkeypatch):
-    csv_path = write_raw_csv(
-        tmp_path / "updates.csv",
-        "identifier,Title\nlcps-astoriaphotos-00001,Renamed\n",
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    calls = []
-
-    def record_call(*args, **kwargs):
-        calls.append(args)
-        return FakeResponse(ok=True)
-
-    monkeypatch.setattr(internetarchive, "modify_metadata", record_call)
-
-    from ia_bulk import cmd_sync_metadata
-
-    exit_code = cmd_sync_metadata(
-        Namespace(
-            project="astoriaphotos",
-            csv=str(csv_path),
-            registry=str(registry_path),
-            live=False,
-            log_dir=str(tmp_path / "logs"),
-            resume_from=None,
-        )
-    )
-
-    assert exit_code == 1
-    assert calls == []
-
-
 def test_format_report_attributes_header_errors_to_row_1():
     from ia_bulk import format_report
 
-    report = format_report([RowValidation(row_number=1, identifier="", errors=["CSV has no header row"])])
+    report = format_report([RowValidation(row_number=1, identifier="", errors=["the header row is blank"])])
 
     assert "row 1" in report
-    assert "CSV has no header row" in report
+    assert "the header row is blank" in report
 
 
 def test_format_report_shows_pass_and_fail_with_summary():
@@ -1105,77 +734,6 @@ def test_format_report_does_not_duplicate_the_row_number_for_a_blank_identifier(
 
     assert "[PASS] row 2" in report
     assert "(row 2)" not in report
-
-
-def test_cmd_validate_returns_zero_when_all_rows_valid(tmp_path, capsys):
-    from ia_bulk import cmd_validate
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    args = Namespace(
-            project="astoriaphotos",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-        )
-
-    exit_code = cmd_validate(args)
-
-    assert exit_code == 0
-    assert "1/1 rows passed" in capsys.readouterr().out
-
-
-def test_cmd_validate_returns_one_when_a_row_fails(tmp_path, capsys):
-    from ia_bulk import cmd_validate
-
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "missing.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    args = Namespace(
-            project="astoriaphotos",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-        )
-
-    exit_code = cmd_validate(args)
-
-    assert exit_code == 1
-    assert "0/1 rows passed" in capsys.readouterr().out
 
 
 def test_field_receipt_lists_uploadable_fields_and_held_back_ones():
@@ -1677,7 +1235,7 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
     assert captured["key_path"] == google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
 
 
-def test_cmd_validate_reads_the_sheet_and_injects_mediatype_when_csv_is_omitted(
+def test_cmd_validate_reads_the_sheet_and_injects_mediatype(
     tmp_path, monkeypatch, capsys
 ):
     """Proves mandatory addition #2: mediatype is never a Sheet column, so
@@ -1697,7 +1255,7 @@ def test_cmd_validate_reads_the_sheet_and_injects_mediatype_when_csv_is_omitted(
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1711,8 +1269,7 @@ def test_cmd_validate_reads_the_sheet_and_injects_mediatype_when_csv_is_omitted(
 
 def test_cmd_validate_does_not_treat_a_blank_ia_identifier_as_an_error(tmp_path, monkeypatch, capsys):
     """A blank ia_identifier is the normal starting state of every new
-    Sheet row under minting, not an error like a pre-assigned CSV
-    identifier - this is the behavior SHEET_REQUIRED_COLUMNS (which
+    Sheet row under minting, not an error - this is the behavior SHEET_REQUIRED_COLUMNS (which
     excludes ia_identifier) exists to produce. Uses 'ia_identifier', not
     'identifier': after Task 9 the latter is ordinary donor metadata."""
     from ia_bulk import cmd_validate
@@ -1725,7 +1282,7 @@ def test_cmd_validate_does_not_treat_a_blank_ia_identifier_as_an_error(tmp_path,
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1760,7 +1317,7 @@ def test_cmd_validate_does_not_scheme_check_a_donor_identifier_column_and_says_i
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1795,7 +1352,7 @@ def test_cmd_validate_names_ia_identifier_not_identifier_in_a_duplicate_error(
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1831,7 +1388,7 @@ def test_cmd_validate_fails_a_row_whose_file_cannot_be_resolved_with_the_resolve
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1861,7 +1418,7 @@ def test_cmd_validate_fails_on_an_ambiguous_file_naming_both_candidates(tmp_path
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1886,7 +1443,7 @@ def test_cmd_validate_fails_fast_when_file_template_names_a_column_the_sheet_lac
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     err = capsys.readouterr().err
@@ -1920,7 +1477,7 @@ def test_cmd_validate_resolves_a_filename_missing_its_extension_and_writes_ident
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
 
@@ -1953,7 +1510,7 @@ def test_cmd_validate_resolves_using_a_two_column_file_template_like_the_real_re
         ),
         encoding="utf-8",
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -1979,7 +1536,7 @@ def test_cmd_validate_flags_colliding_sheet_headers(tmp_path, monkeypatch, capsy
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path / "no-photos-here"))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2006,7 +1563,7 @@ def test_cmd_validate_flags_a_sheet_row_longer_than_the_header(tmp_path, monkeyp
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path / "no-photos-here"))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2039,7 +1596,7 @@ def test_cmd_validate_reports_a_header_collision_and_a_shape_error_under_their_o
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2093,7 +1650,7 @@ def test_cmd_validate_reports_a_long_row_once_as_failed_not_twice_with_opposite_
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2137,7 +1694,7 @@ def test_cmd_validate_keeps_a_header_level_error_under_row_1_when_the_last_data_
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2175,7 +1732,7 @@ def test_cmd_validate_passes_live_flag_and_project_config_through_to_build_sheet
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=live)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=live)
 
     cmd_validate(args)
 
@@ -2196,7 +1753,7 @@ def test_cmd_validate_rejects_an_unknown_project_before_touching_the_sheet(tmp_p
 
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
-    args = Namespace(csv=None, project="nosuchproject", registry=str(registry_path), live=False)
+    args = Namespace(project="nosuchproject", registry=str(registry_path), live=False)
 
     with pytest.raises(ConfigError, match="nosuchproject"):
         cmd_validate(args)
@@ -2219,39 +1776,12 @@ def test_cmd_validate_rejects_a_project_id_off_the_identifier_scheme_before_touc
     registry["projects"] = {"astoria-maps": registry["projects"]["astoriaphotos"]}
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps(registry), encoding="utf-8")
-    args = Namespace(csv=None, project="astoria-maps", registry=str(registry_path), live=False)
+    args = Namespace(project="astoria-maps", registry=str(registry_path), live=False)
 
     with pytest.raises(ConfigError, match="lowercase letters and digits only"):
         cmd_validate(args)
 
     assert calls == []
-
-
-def test_cmd_validate_csv_rejects_a_project_id_off_the_identifier_scheme_before_reading_rows(
-    tmp_path, capsys
-):
-    from ia_bulk import cmd_validate
-
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title"],
-        [{"identifier": "lcps-astoria-maps-00001", "file": "a.jpg", "mediatype": "image", "title": "First"}],
-    )
-    registry = make_registry()
-    registry["projects"] = {"astoria-maps": registry["projects"]["astoriaphotos"]}
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(registry), encoding="utf-8")
-
-    exit_code = cmd_validate(
-        Namespace(project="astoria-maps", csv=str(csv_path), files_dir=str(tmp_path), registry=str(registry_path))
-    )
-
-    captured = capsys.readouterr()
-    assert exit_code == 1
-    assert "'astoria-maps' must be lowercase letters and digits only" in captured.err
-    assert "does not match scheme" not in captured.out
 
 
 def test_cmd_validate_rejects_an_unreplaced_placeholder_sheet_id_before_touching_the_network(
@@ -2274,7 +1804,7 @@ def test_cmd_validate_rejects_an_unreplaced_placeholder_sheet_id_before_touching
     registry_path.write_text(
         json.dumps(make_sheet_registry(test_sheet_id="REPLACE_WITH_TEST_SHEET_ID")), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     err = capsys.readouterr().err
@@ -2304,7 +1834,7 @@ def test_cmd_validate_turns_an_http_error_reading_the_sheet_into_an_actionable_m
     registry_path.write_text(
         json.dumps(make_sheet_registry(sheet_tab="Sheet1")), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     err = capsys.readouterr().err
@@ -2328,7 +1858,7 @@ def test_cmd_validate_turns_unavailable_google_credentials_into_a_clean_error(
     monkeypatch.setattr("ia_bulk.google_auth.load_service_account_credentials", _no_key)
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     err = capsys.readouterr().err
@@ -2353,7 +1883,7 @@ def test_sheet_read_error_names_the_service_account_to_share_with(tmp_path, monk
     )
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     err = capsys.readouterr().err
@@ -2378,7 +1908,7 @@ def test_sheet_read_error_names_the_key_path_when_the_key_cannot_be_read(
     )
     registry_path = tmp_path / "registry.json"
     registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
     err = capsys.readouterr().err
@@ -2406,7 +1936,7 @@ def test_cmd_validate_flags_a_header_only_sheet_as_an_error_not_a_false_green(
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path / "no-photos-here"))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2425,7 +1955,7 @@ def test_cmd_validate_flags_a_completely_empty_sheet_as_an_error(tmp_path, monke
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path / "no-photos-here"))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2451,7 +1981,7 @@ def test_cmd_validate_still_reports_a_header_collision_when_the_sheet_has_no_dat
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path / "no-photos-here"))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2478,7 +2008,7 @@ def test_cmd_validate_prints_test_mode_and_the_test_sheet_id_by_default(tmp_path
         ),
         encoding="utf-8",
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
     out = capsys.readouterr().out
@@ -2502,7 +2032,7 @@ def test_cmd_validate_prints_live_mode_and_the_real_sheet_id_when_live(tmp_path,
         ),
         encoding="utf-8",
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=True)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=True)
 
     cmd_validate(args)
     out = capsys.readouterr().out
@@ -2538,7 +2068,7 @@ def test_cmd_validate_injects_mediatype_from_the_registry_not_a_hardcoded_value(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path), mediatype="phonorecord")),
         encoding="utf-8",
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
 
@@ -2586,7 +2116,7 @@ def test_cmd_validate_passes_only_the_row_results_to_the_lifecycle_summary_not_t
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
 
@@ -2634,7 +2164,7 @@ def test_cmd_validate_prints_correct_lifecycle_counts_for_a_mix_of_states_end_to
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     exit_code = cmd_validate(args)
     out = capsys.readouterr().out
@@ -2670,7 +2200,7 @@ def test_cmd_validate_output_encodes_cleanly_under_a_restrictive_windows_console
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
     out = capsys.readouterr().out
@@ -2697,136 +2227,13 @@ def test_cmd_validate_prints_an_actual_suggestion_not_just_the_heading(tmp_path,
     registry_path.write_text(
         json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
     )
-    args = Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
 
     cmd_validate(args)
     out = capsys.readouterr().out
 
     assert "photographer" in out
     assert "creator" in out
-
-
-def test_cmd_validate_treats_an_empty_csv_flag_as_an_explicit_csv_path_not_the_sheet_path(monkeypatch):
-    """--csv "" must stay on the CSV branch (and fail there, opening a file
-    named "") rather than silently falling through to the Sheet path
-    because an empty string is falsy - `if csv_path:` was the bug,
-    `if csv_path is not None:` is the fix. Guarding build_sheet_client to
-    raise AssertionError if reached, and asserting specifically
-    FileNotFoundError (not a bare Exception), proves this fails for the
-    CSV-branch reason and not by tripping the guard."""
-    from ia_bulk import cmd_validate
-
-    def _must_not_reach_the_sheet_path(config, live):
-        raise AssertionError("--csv '' must stay on the CSV path, not fall through to the Sheet")
-
-    monkeypatch.setattr("ia_bulk.build_sheet_client", _must_not_reach_the_sheet_path)
-
-    args = Namespace(
-        csv="",
-        files_dir=".",
-        registry="projects_registry.json",
-        project="astoriaphotos",
-        live=False,
-    )
-
-    with pytest.raises(FileNotFoundError):
-        cmd_validate(args)
-
-
-def test_cmd_validate_csv_refuses_an_unregistered_project(tmp_path, capsys):
-    """The --csv paths never build a ProjectConfig, so they never got
-    load_project_config's unknown-project guard. That did not matter while
-    --project went unread there; since issue #2 every row is checked against
-    it, and an unregistered value would fail every row with a message
-    blaming the identifier instead of the flag."""
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title"],
-        [{"identifier": "lcps-astoriaphotos-00001", "file": "a.jpg", "mediatype": "image", "title": "First"}],
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    from ia_bulk import cmd_validate
-
-    exit_code = cmd_validate(
-        Namespace(
-            project="astoriaphoto",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-        )
-    )
-
-    captured = capsys.readouterr()
-    assert exit_code == 1
-    assert "unknown project 'astoriaphoto'" in captured.err
-    assert "astoriaphotos" in captured.err
-    # The rows were never reported on - the run stopped at the flag.
-    assert "lcps-astoriaphotos-00001" not in captured.out
-
-
-def test_cmd_upload_csv_refuses_an_unregistered_project_before_the_network(
-    tmp_path, monkeypatch, capsys
-):
-    (tmp_path / "a.jpg").write_bytes(b"x")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title"],
-        [{"identifier": "lcps-astoriaphotos-00001", "file": "a.jpg", "mediatype": "image", "title": "First"}],
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    calls = []
-    monkeypatch.setattr(internetarchive, "upload", lambda *a, **k: calls.append(a) or [])
-
-    from ia_bulk import cmd_upload
-
-    exit_code = cmd_upload(
-        Namespace(
-            project="astoriaphoto",
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            registry=str(registry_path),
-            live=False,
-            collection=None,
-            log_dir=str(tmp_path / "logs"),
-            resume_from=None,
-        )
-    )
-
-    assert exit_code == 1
-    assert calls == []
-    assert "unknown project 'astoriaphoto'" in capsys.readouterr().err
-
-
-def test_cmd_sync_metadata_csv_refuses_an_unregistered_project(tmp_path, capsys):
-    csv_path = tmp_path / "updates.csv"
-    write_csv(csv_path, ["identifier", "title"], [{"identifier": "lcps-astoriaphotos-00001", "title": "New"}])
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    from ia_bulk import cmd_sync_metadata
-
-    exit_code = cmd_sync_metadata(
-        Namespace(
-            project="astoriaphoto",
-            csv=str(csv_path),
-            registry=str(registry_path),
-            live=True,
-            log_dir=str(tmp_path / "logs"),
-            resume_from=None,
-            from_log=None,
-            dry_run=False,
-        )
-    )
-
-    assert exit_code == 1
-    assert "unknown project 'astoriaphoto'" in capsys.readouterr().err
 
 
 def test_chunk_rows_splits_into_groups_of_chunk_size():
@@ -2879,135 +2286,9 @@ def test_log_result_appends_one_json_line(tmp_path):
     assert second["error"] == "timeout"
 
 
-def test_load_prior_successes_returns_only_successful_identifiers(tmp_path):
-    from ia_bulk import log_result, load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_result(log_path, "lcps-astoriaphotos-00001", "photo1.jpg", "success", live=False)
-    log_result(log_path, "lcps-astoriaphotos-00002", "photo2.jpg", "failure", live=False, error="timeout")
-
-    successes = load_prior_successes(log_path, live=False)
-
-    assert successes == {"lcps-astoriaphotos-00001"}
-
-
-def test_load_prior_successes_ignores_entries_from_the_other_mode(tmp_path):
-    from ia_bulk import log_result, load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_result(log_path, "lcps-astoriaphotos-00001", "photo1.jpg", "success", live=False)
-    log_result(log_path, "lcps-astoriaphotos-00002", "photo2.jpg", "success", live=True)
-
-    assert load_prior_successes(log_path, live=False) == {"lcps-astoriaphotos-00001"}
-    assert load_prior_successes(log_path, live=True) == {"lcps-astoriaphotos-00002"}
-
-
-def test_load_prior_successes_ignores_pre_migration_entries_with_no_live_field(tmp_path):
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_path.write_text(
-        json.dumps({"identifier": "lcps-astoriaphotos-00001", "status": "success"}) + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_prior_successes(log_path, live=False) == set()
-    assert load_prior_successes(log_path, live=True) == set()
-
-
-def test_load_prior_successes_skips_a_truncated_final_line_instead_of_raising(
-    tmp_path, capsys
-):
-    """log_result appends one line per row with no atomic write, so a run
-    killed mid-write leaves a truncated last line. Raising on it made the log
-    permanently unusable as a resume source - disabling the only recovery
-    mechanism the CSV path has, using the exact crash it exists to recover
-    from."""
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_path.write_text(
-        json.dumps(
-            {"identifier": "lcps-astoriaphotos-00001", "status": "success", "live": True}
-        )
-        + "\n"
-        + json.dumps(
-            {"identifier": "lcps-astoriaphotos-00002", "status": "success", "live": True}
-        )
-        + "\n"
-        + '{"identifier": "lcps-astoriaphotos-00003", "status": "succ',
-        encoding="utf-8",
-    )
-
-    successes = load_prior_successes(log_path, live=True)
-
-    # every intact line before the damage is still a real record
-    assert successes == {"lcps-astoriaphotos-00001", "lcps-astoriaphotos-00002"}
-    # and the operator is told, because a lost line means a row will be
-    # attempted again and the run will be longer than they expect
-    assert "1 line" in capsys.readouterr().err
-
-
-def test_load_prior_successes_skips_a_line_of_valid_json_of_the_wrong_shape(tmp_path, capsys):
-    """A bare list or string parses cleanly and then has no .get()."""
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_path.write_text(
-        '["lcps-astoriaphotos-00001", "success"]\n'
-        + '"a stray string"\n'
-        + json.dumps(
-            {"identifier": "lcps-astoriaphotos-00002", "status": "success", "live": True}
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_prior_successes(log_path, live=True) == {"lcps-astoriaphotos-00002"}
-    assert "2 lines" in capsys.readouterr().err
-
-
-def test_load_prior_successes_skips_a_success_record_with_no_identifier(tmp_path, capsys):
-    """A success record naming no identifier cannot skip anything, and is
-    damage of the same kind as a line that will not parse - it must not
-    raise KeyError partway through reading the log."""
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_path.write_text(
-        json.dumps({"status": "success", "live": True}) + "\n"
-        + json.dumps(
-            {"identifier": "lcps-astoriaphotos-00002", "status": "success", "live": True}
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_prior_successes(log_path, live=True) == {"lcps-astoriaphotos-00002"}
-    assert "1 line" in capsys.readouterr().err
-
-
-def test_load_prior_successes_says_nothing_when_the_log_is_intact(tmp_path, capsys):
-    """The damage warning is a signal, not a banner - an undamaged log must
-    not print it."""
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "upload-test.jsonl"
-    log_path.write_text(
-        json.dumps(
-            {"identifier": "lcps-astoriaphotos-00001", "status": "success", "live": True}
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_prior_successes(log_path, live=True) == {"lcps-astoriaphotos-00001"}
-    assert capsys.readouterr().err == ""
-
-
 def test_recorded_timestamps_are_utc_with_an_explicit_offset(tmp_path, monkeypatch):
     """`ia_uploaded` is the permanent record of when an item was published
-    and the log is what --resume-from and any later audit read. Both were
+    and the log is what any later audit reads. Both were
     naive local time, which repeats an hour during the DST fall-back
     transition - so a run spanning it stamped a later chunk with an earlier
     wall-clock time, unrecoverably. run_stamp() already used UTC for exactly
@@ -3107,54 +2388,6 @@ def test_run_header_records_live_mode_and_the_real_sheet_id(tmp_path):
     assert header["sheet_id"] == "REAL_SHEET_ID"
 
 
-def test_resume_skips_the_run_header_record(tmp_path):
-    """The run header carries no "status" field, so it must never be
-    counted as a prior success/failure by load_prior_successes() - proven
-    here by resuming past a header-then-result log and getting back exactly
-    the one real identifier, not an error and not an empty set."""
-    from ia_bulk import log_run_header, load_prior_successes
-
-    log_path = tmp_path / "upload.jsonl"
-    column_map = build_column_map(["Title"])
-    config = _sheet_config(required_for_upload=("title",))
-
-    log_run_header(log_path, config, column_map, live=True, dry_run=False)
-    log_result(log_path, "lcps-astoriaphotos-00001", "a.jpg", "success", True)
-
-    assert load_prior_successes(log_path, live=True) == {"lcps-astoriaphotos-00001"}
-
-
-def test_load_prior_successes_skips_a_run_header_by_record_type_not_by_missing_status(tmp_path):
-    """The two tests above never actually force the `record == "run_header"`
-    check in load_prior_successes() to do any work, because a real header
-    also happens to lack a "status" key - the pre-existing `entry.get(
-    "status") in (...)` guard already throws it out for free. This test
-    writes a line that is tagged as a run_header but otherwise shaped
-    exactly like a matching success entry (same "status", "live", and
-    "identifier" as the real success line below), so it can only be excluded
-    by the explicit record-type check. Without that check this line would be
-    wrongly counted, and the assertion below would see two identifiers
-    instead of one."""
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "upload.jsonl"
-    log_path.write_text(
-        json.dumps(
-            {
-                "record": "run_header",
-                "identifier": "lcps-astoriaphotos-99999",
-                "status": "success",
-                "live": True,
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    log_result(log_path, "lcps-astoriaphotos-00001", "a.jpg", "success", True)
-
-    assert load_prior_successes(log_path, live=True) == {"lcps-astoriaphotos-00001"}
-
-
 def test_effective_identifier_prepends_zztest_and_the_given_stamp_when_not_live():
     """See docs/DECISIONS.md, "Test identifiers carry a per-run stamp" - a
     bare zztest- prefix made a test run's identifiers a pure function of the
@@ -3169,7 +2402,7 @@ def test_effective_identifier_prepends_zztest_and_the_given_stamp_when_not_live(
 def test_effective_identifier_ignores_the_stamp_and_returns_identifier_unchanged_when_live():
     """The single most important property this task can produce: a --live
     identifier is the permanent public address of an archival item and must
-    stay a pure function of the Sheet/CSV. A stamp leaking into it would be
+    stay a pure function of the Sheet. A stamp leaking into it would be
     worse than not doing this task at all - so this is asserted with the
     stamp parameter actually supplied (not omitted), proving the live branch
     receives it and still ignores it, rather than merely never being asked to
@@ -3291,9 +2524,7 @@ def test_upload_row_defaults_blank_date_to_undated_placeholder(tmp_path, monkeyp
 
 
 def test_upload_row_defaults_missing_date_key_to_undated_placeholder(tmp_path, monkeypatch):
-    """csv.DictReader sets a trailing column to None (not "") when a data
-    row is short that column entirely, e.g. a ragged hand-edited CSV row
-    that ends before the optional trailing 'date' cell."""
+    """A row dict with no 'date' key at all still uploads as undated."""
     from ia_bulk import upload_row
 
     (tmp_path / "photo1.jpg").write_bytes(b"data")
@@ -3361,8 +2592,7 @@ def test_update_metadata_row_succeeds_when_library_returns_ok_response(monkeypat
 
 
 def test_update_metadata_row_drops_blank_cells_instead_of_clearing_the_field(monkeypatch):
-    """A blank cell must mean 'leave this field alone', not 'clear it',
-    since a sync-metadata CSV only lists the columns that changed."""
+    """A blank cell must mean 'leave this field alone', not 'clear it'."""
     from ia_bulk import update_metadata_row
 
     row = {"identifier": "lcps-astoriaphotos-00001", "title": "Updated title", "description": ""}
@@ -3431,787 +2661,30 @@ def test_update_metadata_row_raises_metadata_unchanged_when_ia_reports_no_change
         update_metadata_row(row, target_identifier="zztest-lcps-astoriaphotos-00001")
 
 
-def test_validate_identifiers_passes_valid_unique_identifiers():
-    from ia_bulk import validate_identifiers
-
-    rows = [
-        {"identifier": "lcps-astoriaphotos-00001", "title": "New title"},
-        {"identifier": "lcps-astoriaphotos-00002", "title": "Another title"},
-    ]
-
-    results = validate_identifiers(rows, registry=make_registry(), project_id="astoriaphotos")
-
-    assert all(r.is_valid for r in results)
-
-
-def test_validate_identifiers_skips_checks_but_keeps_row_numbers_for_skip_identifiers():
-    from ia_bulk import validate_identifiers
-
-    rows = [
-        {"identifier": "lcps-unregisteredproject-00001", "title": "New title"},
-        {"identifier": "lcps-astoriaphotos-00002", "title": "Another title"},
-    ]
-
-    results = validate_identifiers(
-        rows,
-        registry=make_registry(),
-        project_id="astoriaphotos",
-        skip_identifiers=frozenset({"lcps-unregisteredproject-00001"}),
-    )
-
-    assert results[0].is_valid
-    assert results[0].row_number == 2
-    assert results[1].is_valid
-    assert results[1].row_number == 3
-
-
-def test_validate_identifiers_does_not_require_file_or_mediatype():
-    from ia_bulk import validate_identifiers
-
-    rows = [{"identifier": "lcps-astoriaphotos-00001", "title": "New title"}]
-
-    results = validate_identifiers(rows, registry=make_registry(), project_id="astoriaphotos")
-
-    assert results[0].is_valid
-
-
-def test_validate_identifiers_flags_bad_scheme():
-    from ia_bulk import validate_identifiers
-
-    rows = [{"identifier": "not-a-valid-id", "title": "New title"}]
-
-    results = validate_identifiers(rows, registry=make_registry(), project_id="astoriaphotos")
-
-    assert not results[0].is_valid
-
-
-def test_cmd_upload_prints_per_row_progress_and_summary(tmp_path, monkeypatch, capsys):
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    (tmp_path / "photo2.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            },
-            {
-                "identifier": "lcps-astoriaphotos-00002",
-                "file": "photo2.jpg",
-                "mediatype": "image",
-                "title": "Second photo",
-                "date": "1958",
-            },
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-
-    def fake_upload_row(row, target_identifier, collection, files_dir):
-        if row["identifier"].strip() == "lcps-astoriaphotos-00002":
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr("ia_bulk.upload_row", fake_upload_row)
-    monkeypatch.setattr("ia_bulk.run_stamp", lambda: FIXED_STAMP)
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=False,
-        collection="lcps",
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-    )
-
-    exit_code = cmd_upload(args)
-
-    out = capsys.readouterr().out
-    assert exit_code == 1
-    assert f"[1/2] uploading zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001 (photo1.jpg)" in out
-    assert f"[2/2] uploading zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002 (photo2.jpg)" in out
-    assert "1 file(s) uploaded successfully, 1 error(s)" in out
-
-
-def test_cmd_upload_writes_success_log_with_test_prefixed_target_when_not_live(tmp_path, monkeypatch):
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    log_dir = tmp_path / "logs"
-
-    monkeypatch.setattr("ia_bulk.upload_row", lambda row, target_identifier, collection, files_dir: None)
-    monkeypatch.setattr("ia_bulk.run_stamp", lambda: FIXED_STAMP)
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=False,
-        collection="lcps",
-        log_dir=str(log_dir),
-        resume_from=None,
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 0
-    log_files = list(log_dir.glob("upload-*.jsonl"))
-    assert len(log_files) == 1
-    entry = _row_records(log_files[0])[0]
-    assert entry["identifier"] == "lcps-astoriaphotos-00001"
-    assert entry["uploaded_as"] == f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"
-    assert entry["status"] == "success"
-
-
-def test_cmd_upload_csv_path_stamps_every_row_with_one_run_stamp_not_a_fresh_one_per_row(
-    tmp_path, monkeypatch
-):
-    """The CSV path shares run_rows/effective_identifier with the Sheet path
-    and has the same defect - see docs/DECISIONS.md, "Test identifiers carry
-    a per-run stamp". run_stamp() is faked to return a NEW value on every
-    call; if the implementation regressed to computing the stamp once per row
-    instead of once per run, row 2 would be logged under the second call's
-    value and this test would catch that mismatch instead of merely
-    confirming 'some stamp' is present."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    (tmp_path / "photo2.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            },
-            {
-                "identifier": "lcps-astoriaphotos-00002",
-                "file": "photo2.jpg",
-                "mediatype": "image",
-                "title": "Second photo",
-                "date": "1958",
-            },
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    log_dir = tmp_path / "logs"
-
-    monkeypatch.setattr("ia_bulk.upload_row", lambda row, target_identifier, collection, files_dir: None)
-    stamp_calls = []
-
-    def fake_run_stamp():
-        stamp_calls.append(len(stamp_calls))
-        return f"stamp{stamp_calls[-1]}"
-
-    monkeypatch.setattr("ia_bulk.run_stamp", fake_run_stamp)
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=False,
-        collection="lcps",
-        log_dir=str(log_dir),
-        resume_from=None,
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 0
-    assert stamp_calls == [0]
-    log_files = list(log_dir.glob("upload-*.jsonl"))
-    entries = _row_records(log_files[0])
-    assert [entry["uploaded_as"] for entry in entries] == [
-        "zztest-stamp0-lcps-astoriaphotos-00001",
-        "zztest-stamp0-lcps-astoriaphotos-00002",
-    ]
-
-
-def test_cmd_upload_uses_real_identifier_as_target_when_live(tmp_path, monkeypatch):
-    """Doubles as the CSV path's live-purity guard: run_stamp() is faked to
-    return an obviously-wrong value, so if a stamp ever leaked into the live
-    branch it would show up verbatim in this exact-match assertion instead of
-    being masked by a stamp that happens to look plausible."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    log_dir = tmp_path / "logs"
-
-    monkeypatch.setattr("ia_bulk.upload_row", lambda row, target_identifier, collection, files_dir: None)
-    monkeypatch.setattr("ia_bulk.run_stamp", lambda: "shouldneverappear")
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=True,
-        collection="lcps",
-        log_dir=str(log_dir),
-        resume_from=None,
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 0
-    entry = _row_records(next(log_dir.glob("upload-*.jsonl")))[0]
-    assert entry["uploaded_as"] == "lcps-astoriaphotos-00001"
-
-
-def test_cmd_upload_fails_validation_before_touching_network(tmp_path, monkeypatch):
-    from ia_bulk import cmd_upload
-
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "missing.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-
-    upload_calls = []
-    monkeypatch.setattr(
-        "ia_bulk.upload_row", lambda row, target_identifier, collection, files_dir: upload_calls.append(row)
-    )
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=False,
-        collection="lcps",
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 1
-    assert upload_calls == []
-
-
-def test_cmd_upload_resume_from_skips_prior_successes(tmp_path, monkeypatch):
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    (tmp_path / "photo2.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            },
-            {
-                "identifier": "lcps-astoriaphotos-00002",
-                "file": "photo2.jpg",
-                "mediatype": "image",
-                "title": "Second photo",
-                "date": "1958",
-            },
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    prior_log = tmp_path / "prior.jsonl"
-    log_result(prior_log, "lcps-astoriaphotos-00001", "photo1.jpg", "success", live=False)
-
-    uploaded = []
-    monkeypatch.setattr(
-        "ia_bulk.upload_row",
-        lambda row, target_identifier, collection, files_dir: uploaded.append(row["identifier"]),
-    )
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=False,
-        collection="lcps",
-        log_dir=str(tmp_path / "logs"),
-        resume_from=str(prior_log),
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 0
-    assert uploaded == ["lcps-astoriaphotos-00002"]
-
-
-def test_cmd_upload_resume_from_skips_a_row_whose_prior_log_entry_carries_a_different_stamp(
-    tmp_path, monkeypatch
-):
-    """load_prior_successes() matches on the real `identifier`, never on
-    `uploaded_as` - see docs/DECISIONS.md, "Test identifiers carry a per-run
-    stamp". This run's own stamp (FIXED_STAMP) deliberately differs from the
-    stamp already recorded in the prior log's `uploaded_as`
-    (zztest-19990101t000000-...), so if --resume-from ever started matching
-    on uploaded_as instead of identifier, row 1 would look "not yet done"
-    under this run's different stamp and get re-uploaded."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    (tmp_path / "photo2.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            },
-            {
-                "identifier": "lcps-astoriaphotos-00002",
-                "file": "photo2.jpg",
-                "mediatype": "image",
-                "title": "Second photo",
-                "date": "1958",
-            },
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    prior_log = tmp_path / "prior.jsonl"
-    log_result(
-        prior_log,
-        "lcps-astoriaphotos-00001",
-        "photo1.jpg",
-        "success",
-        live=False,
-        uploaded_as="zztest-19990101t000000-lcps-astoriaphotos-00001",
-    )
-
-    uploaded = []
-    monkeypatch.setattr(
-        "ia_bulk.upload_row",
-        lambda row, target_identifier, collection, files_dir: uploaded.append(row["identifier"]),
-    )
-    monkeypatch.setattr("ia_bulk.run_stamp", lambda: FIXED_STAMP)
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=False,
-        collection="lcps",
-        log_dir=str(tmp_path / "logs"),
-        resume_from=str(prior_log),
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 0
-    assert uploaded == ["lcps-astoriaphotos-00002"]
-
-
-def test_cmd_upload_resume_from_a_test_mode_log_does_not_skip_a_live_run(tmp_path, monkeypatch):
-    """A --resume-from log written by a non-live (test_collection) run only
-    proves the zztest-prefixed item landed in the sandbox, never the real
-    one - it must not be able to make a later --live run silently skip a
-    real upload."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    prior_log = tmp_path / "prior.jsonl"
-    log_result(prior_log, "lcps-astoriaphotos-00001", "photo1.jpg", "success", live=False)
-
-    uploaded = []
-    monkeypatch.setattr(
-        "ia_bulk.upload_row",
-        lambda row, target_identifier, collection, files_dir: uploaded.append(row["identifier"]),
-    )
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=True,
-        collection="lcps",
-        log_dir=str(tmp_path / "logs"),
-        resume_from=str(prior_log),
-    )
-
-    exit_code = cmd_upload(args)
-
-    assert exit_code == 0
-    assert uploaded == ["lcps-astoriaphotos-00001"]
-
-
-# The stamp of the *upload* run a sync-metadata test corrects. Deliberately
-# NOT FIXED_STAMP (which run_stamp() is pinned to): a sync run that recomputed
-# the target would produce FIXED_STAMP and name an item that never existed, so
-# keeping the two different is what makes these tests able to fail.
-UPLOAD_RUN_STAMP = "20260819t144907"
-
-
-def write_upload_log(path, identifiers, live=False, stamp=UPLOAD_RUN_STAMP):
-    """A prior upload run's log, in the shape sync-metadata --from-log reads."""
-    prefix = "" if live else f"zztest-{stamp}-"
-    path.write_text(
-        "\n".join(
-            json.dumps(
-                {
-                    "identifier": identifier,
-                    "file": "photo.jpg",
-                    "status": "success",
-                    "error": None,
-                    "uploaded_as": f"{prefix}{identifier}",
-                    "live": live,
-                    "timestamp": "2026-08-19T14:49:07Z",
-                }
-            )
-            for identifier in identifiers
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return path
-
-
-def test_cmd_sync_metadata_writes_success_log_with_test_prefixed_target_when_not_live(tmp_path, monkeypatch):
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(csv_path, ["identifier", "title"], [{"identifier": "lcps-astoriaphotos-00001", "title": "Corrected title"}])
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    log_dir = tmp_path / "logs"
-
-    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda row, target_identifier: None)
-    monkeypatch.setattr("ia_bulk.run_stamp", lambda: FIXED_STAMP)
-    upload_log = write_upload_log(tmp_path / "upload.jsonl", ["lcps-astoriaphotos-00001"])
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(registry_path),
-        live=False,
-        log_dir=str(log_dir),
-        resume_from=None,
-        from_log=str(upload_log),
-    )
-
-    exit_code = cmd_sync_metadata(args)
-
-    assert exit_code == 0
-    log_files = list(log_dir.glob("sync-metadata-*.jsonl"))
-    assert len(log_files) == 1
-    rows = [
-        json.loads(line)
-        for line in log_files[0].read_text(encoding="utf-8").strip().splitlines()
-        if "record" not in json.loads(line)
-    ]
-    assert len(rows) == 1
-    entry = rows[0]
-    assert entry["status"] == "success"
-    # The UPLOAD run's stamp, not this run's. Recomputing would give
-    # FIXED_STAMP and name an item that has never existed - which is exactly
-    # what this test asserted, and passed on, before --from-log existed.
-    assert entry["uploaded_as"] == f"zztest-{UPLOAD_RUN_STAMP}-lcps-astoriaphotos-00001"
-    assert FIXED_STAMP not in entry["uploaded_as"]
-
-
-def test_cmd_sync_metadata_treats_no_changes_as_unchanged_not_failure(tmp_path, monkeypatch, capsys):
-    from ia_bulk import cmd_sync_metadata, MetadataUnchanged
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "title"],
-        [
-            {"identifier": "lcps-astoriaphotos-00001", "title": "Already correct"},
-            {"identifier": "lcps-astoriaphotos-00002", "title": "New title"},
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-    log_dir = tmp_path / "logs"
-
-    def fake_update_metadata_row(row, target_identifier):
-        if row["identifier"].strip() == "lcps-astoriaphotos-00001":
-            raise MetadataUnchanged(target_identifier)
-
-    monkeypatch.setattr("ia_bulk.update_metadata_row", fake_update_metadata_row)
-    upload_log = write_upload_log(
-        tmp_path / "upload.jsonl",
-        ["lcps-astoriaphotos-00001", "lcps-astoriaphotos-00002"],
-    )
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(registry_path),
-        live=False,
-        log_dir=str(log_dir),
-        resume_from=None,
-        from_log=str(upload_log),
-    )
-
-    exit_code = cmd_sync_metadata(args)
-
-    assert exit_code == 0
-    out = capsys.readouterr().out
-    assert "1 item(s) updated successfully, 1 unchanged, 0 error(s)" in out
-
-    entries = [
-        json.loads(line)
-        for line in list(log_dir.glob("sync-metadata-*.jsonl"))[0].read_text(encoding="utf-8").strip().splitlines()
-    ]
-    statuses = {
-        entry["identifier"]: entry["status"] for entry in entries if "record" not in entry
-    }
-    assert statuses["lcps-astoriaphotos-00001"] == "unchanged"
-    assert statuses["lcps-astoriaphotos-00002"] == "success"
-
-
-def test_cmd_sync_metadata_does_not_require_file_or_mediatype_columns(tmp_path, monkeypatch):
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(csv_path, ["identifier", "title"], [{"identifier": "lcps-astoriaphotos-00001", "title": "Corrected title"}])
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-
-    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda row, target_identifier: None)
-    upload_log = write_upload_log(tmp_path / "upload.jsonl", ["lcps-astoriaphotos-00001"])
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(registry_path),
-        live=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=str(upload_log),
-    )
-
-    exit_code = cmd_sync_metadata(args)
-
-    assert exit_code == 0
-
-
-def test_cmd_sync_metadata_fails_identifier_validation_before_touching_network(tmp_path, monkeypatch):
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "title"],
-        [{"identifier": "lcps-unregisteredproject-00001", "title": "Corrected title"}],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-
-    update_calls = []
-    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda row, target_identifier: update_calls.append(row))
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(registry_path),
-        live=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-    )
-
-    exit_code = cmd_sync_metadata(args)
-
-    assert exit_code == 1
-    assert update_calls == []
-
-
 def test_build_parser_validate_subcommand_defaults():
     parser = build_parser()
-    args = parser.parse_args(["validate", "--project", "astoriaphotos", "--csv", "items.csv"])
+    args = parser.parse_args(["validate", "--project", "astoriaphotos"])
     assert args.command == "validate"
     assert args.project == "astoriaphotos"
-    assert args.csv == "items.csv"
-    assert args.files_dir == "."
     assert args.registry == "projects_registry.json"
     assert args.live is False
 
 
-def test_build_parser_validate_subcommand_omits_csv_to_select_the_sheet_path():
-    """--csv is optional and mutually exclusive with reading the Sheet -
-    omitting it must leave args.csv as None rather than requiring a path,
-    since that's what cmd_validate checks to decide which source to read."""
-    parser = build_parser()
-    args = parser.parse_args(["validate", "--project", "astoriaphotos"])
-    assert args.csv is None
-
-
-@pytest.mark.parametrize(
-    "subcommand,extra_args",
-    [
-        ("validate", []),
-        ("upload", ["--csv", "items.csv"]),
-        ("sync-metadata", ["--csv", "updates.csv"]),
-    ],
-)
-def test_build_parser_requires_project_on_every_subcommand(subcommand, extra_args):
+@pytest.mark.parametrize("subcommand", ["validate", "upload", "sync-metadata"])
+def test_build_parser_requires_project_on_every_subcommand(subcommand):
     parser = build_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args([subcommand, *extra_args])
+        parser.parse_args([subcommand])
 
 
-def test_build_parser_upload_subcommand_defaults_to_the_sheet_and_no_collection():
-    """`--collection` no longer defaults to "lcps" (not a real Internet
-    Archive collection) and `--files-dir` no longer defaults to "." - both are
-    --csv-path overrides now, and on the Sheet path they come from the
-    registry. `csv` is likewise no longer a required positional, so
-    `upload --project X` selects the Sheet rather than failing."""
+def test_build_parser_upload_subcommand_defaults():
     parser = build_parser()
     args = parser.parse_args(["upload", "--project", "astoriaphotos"])
     assert args.command == "upload"
     assert args.project == "astoriaphotos"
-    assert args.csv is None
     assert args.live is False
-    assert args.collection is None
-    assert args.files_dir is None
     assert args.write_identifier is False
     assert args.dry_run is False
-    assert args.resume_from is None
-
-
-def test_build_parser_upload_subcommand_accepts_live_and_resume_from():
-    parser = build_parser()
-    args = parser.parse_args(
-        [
-            "upload",
-            "--csv",
-            "items.csv",
-            "--project",
-            "astoriaphotos",
-            "--live",
-            "--resume-from",
-            "logs/upload-x.jsonl",
-        ]
-    )
-    assert args.csv == "items.csv"
-    assert args.live is True
-    assert args.resume_from == "logs/upload-x.jsonl"
 
 
 def test_build_parser_upload_subcommand_accepts_write_identifier_and_dry_run():
@@ -4225,35 +2698,48 @@ def test_build_parser_upload_subcommand_accepts_write_identifier_and_dry_run():
 
 def test_build_parser_sync_metadata_subcommand_defaults():
     parser = build_parser()
-    args = parser.parse_args(["sync-metadata", "--csv", "updates.csv", "--project", "astoriaphotos"])
+    args = parser.parse_args(["sync-metadata", "--project", "astoriaphotos"])
     assert args.command == "sync-metadata"
     assert args.project == "astoriaphotos"
-    assert args.csv == "updates.csv"
     assert args.live is False
-
-
-def test_build_parser_sync_metadata_defaults_to_the_sheet():
-    """--csv is the offline fallback here exactly as it is for validate and
-    upload. It was a REQUIRED POSITIONAL, so there was no way to ask for the
-    Sheet at all: `sync-metadata --project X` exited with "the following
-    arguments are required: csv"."""
-    parser = build_parser()
-    args = parser.parse_args(["sync-metadata", "--project", "astoriaphotos"])
-    assert args.csv is None
     assert args.dry_run is False
 
 
-def test_main_dispatches_to_cmd_validate(monkeypatch, tmp_path):
-    csv_path = tmp_path / "items.csv"
-    csv_path.write_text("identifier,file,mediatype,title,date\n", encoding="utf-8")
-
+def test_main_dispatches_to_cmd_validate(monkeypatch):
     calls = []
-    monkeypatch.setattr("ia_bulk.cmd_validate", lambda args: calls.append(args.csv) or 0)
+    monkeypatch.setattr("ia_bulk.cmd_validate", lambda args: calls.append(args.project) or 0)
 
-    exit_code = main(["validate", "--project", "astoriaphotos", "--csv", str(csv_path)])
+    exit_code = main(["validate", "--project", "astoriaphotos"])
 
     assert exit_code == 0
-    assert calls == [str(csv_path)]
+    assert calls == ["astoriaphotos"]
+
+
+@pytest.mark.parametrize(
+    "subcommand,removed_flag",
+    [
+        ("upload", ["--csv", "items.csv"]),
+        ("upload", ["--collection", "sarasoldphotos"]),
+        ("upload", ["--files-dir", "data"]),
+        ("upload", ["--resume-from", "logs/upload-x.jsonl"]),
+        ("sync-metadata", ["--csv", "updates.csv"]),
+        ("sync-metadata", ["--resume-from", "logs/sync-metadata-x.jsonl"]),
+        ("sync-metadata", ["--from-log", "logs/upload-x.jsonl"]),
+        ("validate", ["--csv", "items.csv"]),
+        ("validate", ["--files-dir", "data"]),
+    ],
+)
+def test_main_rejects_the_retired_csv_path_flags(monkeypatch, subcommand, removed_flag):
+    sent = []
+    monkeypatch.setattr("ia_bulk.upload_row", lambda *args, **kwargs: sent.append(args))
+    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda *args, **kwargs: sent.append(args))
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda *args, **kwargs: sent.append(args))
+
+    with pytest.raises(SystemExit) as excinfo:
+        main([subcommand, "--project", "astoriaphotos", *removed_flag])
+
+    assert excinfo.value.code == 2
+    assert sent == []
 
 
 def test_build_parser_accepts_doctor():
@@ -5428,16 +3914,12 @@ FIXED_TIMESTAMP = "2026-08-19T09:00:00"
 
 def make_upload_args(tmp_path, registry_path, **overrides):
     args = Namespace(
-        csv=None,
         project="astoriaphotos",
         registry=str(registry_path),
-        files_dir=None,
-        collection=None,
         live=False,
         write_identifier=False,
         dry_run=False,
         log_dir=str(tmp_path / "logs"),
-        resume_from=None,
     )
     for name, value in overrides.items():
         setattr(args, name, value)
@@ -5547,8 +4029,8 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     Driving the real entry point (cmd_upload -> upload_from_sheet, the same
     path the CLI takes) rather than calling log_run_header() directly is the
     point - a direct-call test could not have caught this. The header must be
-    line 1, not merely present somewhere in the file, since a resumed run and
-    a human doing `head -1` both depend on that exact position."""
+    line 1, not merely present somewhere in the file, since a human doing
+    `head -1` depends on that exact position."""
     from ia_bulk import cmd_upload
 
     grid = [
@@ -5723,7 +4205,7 @@ def test_cmd_upload_skips_a_done_row_entirely_and_mints_above_its_number(
 def test_cmd_upload_skips_an_invalid_row_uploads_the_valid_ones_and_exits_non_zero(
     tmp_path, monkeypatch, capsys
 ):
-    """The Sheet path's deliberate opposite of the CSV path: one typo in row
+    """One typo in row
     9,000 must not block the other 9,999, but a partial run must never be
     mistaken for a clean one. See docs/DECISIONS.md, "On the Sheet path,
     `upload` uploads the valid rows and reports the rest".
@@ -5864,6 +4346,53 @@ def test_cmd_upload_live_writes_back_even_without_write_identifier(tmp_path, mon
         ("E2", "https://archive.org/details/lcps-astoriaphotos-00001"),
         ("F2", "photo1.jpg"),
     ]
+
+
+@pytest.mark.parametrize(
+    "live,expected_uploaded_as",
+    [
+        (False, f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"),
+        (True, "lcps-astoriaphotos-00001"),
+    ],
+)
+def test_cmd_upload_sheet_path_logs_the_item_each_row_was_uploaded_as(
+    tmp_path, monkeypatch, capsys, live, expected_uploaded_as
+):
+    """`identifier` stays the real one; `uploaded_as` is the stamped target in
+    test mode and the bare identifier live."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=live))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    entry = _row_records(next((tmp_path / "logs").glob("upload-*.jsonl")))[0]
+    assert entry["identifier"] == "lcps-astoriaphotos-00001"
+    assert entry["uploaded_as"] == expected_uploaded_as
+    assert entry["status"] == "success"
+
+
+def test_cmd_upload_sheet_path_prints_a_progress_line_per_row(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert f"[1/2] uploading zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001 (photo1.jpg)" in out
+    assert f"[2/2] uploading zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002 (photo2.jpg)" in out
 
 
 def _target(identifier, newly_minted=True, row_number=2):
@@ -6081,12 +4610,10 @@ def test_cmd_upload_writes_the_resolved_path_to_ia_identifier_bib_not_the_sheets
     assert captured[0]["row"]["identifier-bib"] == "Liberty.tif"
 
 
-def test_cmd_upload_with_no_csv_runs_against_the_sheet_instead_of_erroring(
+def test_cmd_upload_through_main_runs_against_the_sheet(
     tmp_path, monkeypatch, capsys
 ):
-    """`upload --project X` used to fail with "the following arguments are
-    required: csv". Driven through main() so the parser change is what is
-    under test, not just cmd_upload."""
+    """Driven through main() so the parser is under test, not just cmd_upload."""
     grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
     recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
 
@@ -6175,41 +4702,6 @@ def test_cmd_upload_refuses_a_header_collision_before_uploading_anything(
     assert "normalize to field name 'title'" in captured.out
 
 
-def test_cmd_upload_sheet_path_refuses_a_collection_override(tmp_path, monkeypatch, capsys):
-    """--collection used to default to "lcps", which is not a real Internet
-    Archive collection - a --live run would have pushed real photographs at a
-    non-existent collection and reported success. On the Sheet path the value
-    comes from the registry, and silently ignoring an explicit --collection
-    would be its own trap."""
-    from ia_bulk import cmd_upload
-
-    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
-    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
-
-    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, collection="lcps"))
-    captured = capsys.readouterr()
-
-    assert exit_code == 1
-    assert recorder.events == []
-    assert "--collection" in captured.err
-
-
-def test_cmd_upload_sheet_path_refuses_resume_from(tmp_path, monkeypatch, capsys):
-    from ia_bulk import cmd_upload
-
-    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
-    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
-
-    exit_code = cmd_upload(
-        make_upload_args(tmp_path, registry_path, resume_from=str(tmp_path / "prior.jsonl"))
-    )
-    captured = capsys.readouterr()
-
-    assert exit_code == 1
-    assert recorder.events == []
-    assert "--resume-from" in captured.err
-
-
 def test_cmd_upload_sheet_path_refuses_an_unreplaced_placeholder_sheet_id(
     tmp_path, monkeypatch, capsys
 ):
@@ -6228,52 +4720,6 @@ def test_cmd_upload_sheet_path_refuses_an_unreplaced_placeholder_sheet_id(
     assert build_calls == []
     assert recorder.events == []
     assert "placeholder" in captured.err
-
-
-def test_cmd_upload_csv_path_refuses_live_without_an_explicit_collection(tmp_path, monkeypatch):
-    """The "lcps" default is gone; --live on the CSV path must now name the
-    collection rather than silently inventing one."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title", "date"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "First photo",
-                "date": "1958",
-            }
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}), encoding="utf-8"
-    )
-
-    uploaded = []
-    monkeypatch.setattr(
-        "ia_bulk.upload_row",
-        lambda row, target_identifier, collection, files_dir: uploaded.append(target_identifier),
-    )
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        files_dir=str(tmp_path),
-        registry=str(registry_path),
-        live=True,
-        collection=None,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-    )
-
-    assert cmd_upload(args) == 1
-    assert uploaded == []
 
 
 def test_cmd_upload_records_a_failed_upload_without_confirming_it(tmp_path, monkeypatch, capsys):
@@ -6908,11 +5354,8 @@ def test_cmd_upload_write_failure_names_the_service_account_to_share_with(
 # ---------------------------------------------------------------------------
 # Task 12: --limit, --chunk-size, and Internet Archive rate-limit detection.
 #
-# The brief this task started from predates SheetUploadRun/plan_upload_targets
-# and assumed a run_rows()-based upload path with a `sheet_setup` fixture that
-# no longer exists; these tests instead drive the real entry point
-# (cmd_upload -> upload_from_sheet -> SheetUploadRun.execute) through the same
-# setup_sheet_upload()/make_upload_args() helpers Task 10's tests use.
+# These drive the real entry point (cmd_upload -> upload_from_sheet ->
+# SheetUploadRun.execute) through setup_sheet_upload()/make_upload_args().
 # ---------------------------------------------------------------------------
 
 
@@ -7985,41 +6428,6 @@ def test_cmd_upload_rejects_a_non_positive_chunk_size(tmp_path, monkeypatch, cap
     ]
 
 
-def test_cmd_upload_rejects_chunk_size_alone_on_the_csv_path(tmp_path, capsys):
-    """The existing --csv rejection test only sets --limit; --chunk-size on
-    its own must trip the same guard, not silently do nothing because the
-    check happens to short-circuit on `limit is not None` first."""
-    from ia_bulk import cmd_upload
-
-    csv_path = tmp_path / "items.csv"
-    write_csv(csv_path, ["identifier", "file", "mediatype", "title"], [])
-
-    args = Namespace(
-        csv=str(csv_path),
-        project="astoriaphotos",
-        registry="projects_registry.json",
-        files_dir=None,
-        collection=None,
-        live=False,
-        write_identifier=False,
-        dry_run=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        limit=None,
-        chunk_size=3,
-    )
-
-    exit_code = cmd_upload(args)
-    err = capsys.readouterr().err
-
-    assert exit_code == 1
-    assert err.splitlines() == [
-        "--limit and --chunk-size describe the Sheet path's batching and quota-stopping "
-        "behavior, so they apply to the Sheet path only. Drop --csv to run against the "
-        "Sheet."
-    ]
-
-
 def test_run_header_records_limit_and_chunk_size_when_set(tmp_path, monkeypatch, capsys):
     """Task 11's header exists to make a run reconstructable; a run that
     stopped at --limit, or used a non-default --chunk-size, is not
@@ -8044,43 +6452,6 @@ def test_run_header_records_limit_and_chunk_size_when_set(tmp_path, monkeypatch,
     assert header["chunk_size"] == 1
 
 
-def test_cmd_upload_rejects_limit_and_chunk_size_on_the_csv_path(tmp_path, capsys):
-    """--limit and --chunk-size describe the Sheet path's own batching and
-    quota-stopping behavior; silently ignoring them on --csv would let an
-    operator believe a hand-prepared CSV run was capped or rechunked when it
-    was not - the same trap --write-identifier/--dry-run already guard
-    against just above."""
-    from ia_bulk import cmd_upload
-
-    csv_path = tmp_path / "items.csv"
-    write_csv(csv_path, ["identifier", "file", "mediatype", "title"], [])
-
-    args = Namespace(
-        csv=str(csv_path),
-        project="astoriaphotos",
-        registry="projects_registry.json",
-        files_dir=None,
-        collection=None,
-        live=False,
-        write_identifier=False,
-        dry_run=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        limit=5,
-        chunk_size=CHUNK_SIZE,
-    )
-
-    exit_code = cmd_upload(args)
-    err = capsys.readouterr().err
-
-    assert exit_code == 1
-    assert err.splitlines() == [
-        "--limit and --chunk-size describe the Sheet path's batching and quota-stopping "
-        "behavior, so they apply to the Sheet path only. Drop --csv to run against the "
-        "Sheet."
-    ]
-
-
 def test_cmd_upload_prints_the_field_receipt_before_uploading(tmp_path, monkeypatch, capsys):
     """`upload` is where something permanent happens, so it must show the same
     receipt `validate` does rather than assume the operator ran validate first
@@ -8098,29 +6469,6 @@ def test_cmd_upload_prints_the_field_receipt_before_uploading(tmp_path, monkeypa
     assert "will upload these metadata fields:\n  title\n" in out
     assert "NOT uploaded - Internet Archive reserves these names:\n  identifier" in out
     assert "held back (LCPS Internal):\n  Donor notes (LCPS Internal)" in out
-
-
-def test_validate_sheet_rows_and_validate_csv_rows_keep_their_two_different_answers(tmp_path):
-    """Part B split validate_rows' path-mode parameters into two named
-    wrappers. The wrappers must keep disagreeing in exactly the way the two
-    paths need: a blank ia_identifier is the normal start of a Sheet row,
-    while a blank identifier is a defect in a hand-prepared CSV."""
-    from ia_bulk import validate_csv_rows, validate_sheet_rows
-
-    (tmp_path / "photo1.jpg").write_bytes(b"x")
-    row = {
-        "identifier": "",
-        "ia_identifier": "",
-        "file": "photo1.jpg",
-        "mediatype": "image",
-        "title": "T",
-    }
-
-    sheet_results = validate_sheet_rows([dict(row)], tmp_path, make_registry(), "astoriaphotos")
-    csv_results = validate_csv_rows([dict(row)], tmp_path, make_registry(), "astoriaphotos")
-
-    assert sheet_results[0].errors == []
-    assert csv_results[0].errors == ["missing required column 'identifier'"]
 
 
 def test_row_validation_is_ready_when_no_fields_missing():
@@ -9082,49 +7430,6 @@ def test_cmd_upload_daily_cap_can_be_overridden_explicitly(tmp_path, monkeypatch
     assert exit_code == 0
 
 
-def test_cmd_upload_refuses_a_csv_run_over_the_daily_item_cap(tmp_path, monkeypatch, capsys):
-    """The CSV path has no --limit to trim with, so the fix there is to split
-    the file - but the cap is Internet Archive's and applies to this path
-    just as much. It was documented as an operator responsibility and
-    enforced nowhere."""
-    from ia_bulk import cmd_upload
-
-    monkeypatch.setattr("ia_bulk.DAILY_ITEM_CAP", 1)
-    for name in ("photo1.jpg", "photo2.jpg"):
-        (tmp_path / name).write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-0000%d" % n,
-                "file": "photo%d.jpg" % n,
-                "mediatype": "image",
-                "title": "Photo %d" % n,
-            }
-            for n in (1, 2)
-        ],
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-    uploaded = []
-    monkeypatch.setattr("ia_bulk.upload_row", lambda *a, **k: uploaded.append(a))
-
-    exit_code = cmd_upload(
-        make_upload_args(tmp_path, registry_path, csv=str(csv_path), files_dir=str(tmp_path))
-    )
-    err = capsys.readouterr().err
-
-    # The rows are valid: the cap check runs after validation, because an
-    # invalid file uploads nothing anyway and "fix your rows" has to come
-    # before "split your file".
-    assert uploaded == []
-    assert "would upload 2 items, over Internet Archive's 1/day cap" in err
-    assert "Split it" in err
-    assert exit_code == 1
-
-
 def test_sheet_upload_run_computes_the_uploadable_set_once_per_run(tmp_path):
     """The column map is fixed for a whole run, so deriving the uploadable
     set inside sheet_upload_metadata meant a 10,000-row upload rebuilding the
@@ -9168,165 +7473,6 @@ def _sync_registry(tmp_path):
     path = tmp_path / "projects_registry.json"
     path.write_text(json.dumps(make_registry()), encoding="utf-8")
     return path
-
-
-def test_cmd_sync_metadata_refuses_test_mode_without_from_log(tmp_path, capsys):
-    """Every test item carries the stamp of the run that created it, and a
-    stamp is unique per invocation. Recomputing the target here named an item
-    that has never existed and failed every row - a rehearsal mode that
-    cannot rehearse. Refusing is the only honest answer, since there is no
-    value the CSV could carry that would work."""
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(csv_path, ["identifier", "title"], [{"identifier": "lcps-astoriaphotos-00001", "title": "T"}])
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(_sync_registry(tmp_path)),
-        live=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=None,
-    )
-
-    exit_code = cmd_sync_metadata(args)
-    err = capsys.readouterr().err
-
-    assert exit_code == 1
-    assert "needs --from-log" in err
-    # No log directory is created: nothing ran.
-    assert not (tmp_path / "logs").exists()
-
-
-def test_cmd_sync_metadata_allows_live_without_from_log(tmp_path, monkeypatch):
-    """Live identifiers are unstamped, so there is nothing to look up."""
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(csv_path, ["identifier", "title"], [{"identifier": "lcps-astoriaphotos-00001", "title": "T"}])
-    seen = []
-    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda row, target: seen.append(target))
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(_sync_registry(tmp_path)),
-        live=True,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=None,
-    )
-
-    assert cmd_sync_metadata(args) == 0
-    assert seen == ["lcps-astoriaphotos-00001"]
-
-
-def test_cmd_sync_metadata_rejects_a_row_the_upload_log_never_uploaded(tmp_path, monkeypatch, capsys):
-    """A miss must never fall back to recomputing the target: that is the bug
-    --from-log exists to fix, and it fails silently by sending
-    modify_metadata to an identifier that has never existed."""
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "title"],
-        [
-            {"identifier": "lcps-astoriaphotos-00001", "title": "Fixed"},
-            {"identifier": "lcps-astoriaphotos-00009", "title": "Never uploaded"},
-        ],
-    )
-    upload_log = write_upload_log(tmp_path / "upload.jsonl", ["lcps-astoriaphotos-00001"])
-    seen = []
-    monkeypatch.setattr("ia_bulk.update_metadata_row", lambda row, target: seen.append(target))
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(_sync_registry(tmp_path)),
-        live=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=str(upload_log),
-    )
-
-    exit_code = cmd_sync_metadata(args)
-    out = capsys.readouterr().out
-
-    # All-or-nothing, like the rest of the CSV path: nothing is sent.
-    assert seen == []
-    assert exit_code == 1
-    assert "lcps-astoriaphotos-00009" in out
-    assert "is not recorded as uploaded in" in out
-    # row 3 of the CSV, not row 2 - the numbering must survive the check
-    assert "[FAIL] row 3" in out
-
-
-def test_cmd_sync_metadata_ignores_an_upload_log_from_the_other_mode(tmp_path, capsys):
-    """A test-mode log records where a zztest- item went; it says nothing
-    about the real one, and vice versa. Reusing it across modes would send a
-    live correction to a test item, or the reverse."""
-    from ia_bulk import cmd_sync_metadata
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(csv_path, ["identifier", "title"], [{"identifier": "lcps-astoriaphotos-00001", "title": "T"}])
-    # a LIVE log, handed to a TEST-mode run
-    upload_log = write_upload_log(tmp_path / "upload.jsonl", ["lcps-astoriaphotos-00001"], live=True)
-
-    args = Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(_sync_registry(tmp_path)),
-        live=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=str(upload_log),
-    )
-
-    assert cmd_sync_metadata(args) == 1
-    assert "is not recorded as uploaded in" in capsys.readouterr().out
-
-
-def test_load_uploaded_as_prefers_the_later_entry_for_a_reuploaded_row(tmp_path):
-    """A row re-uploaded by a resumed run is on Internet Archive under the
-    LATER stamp, so that is the item to correct."""
-    from ia_bulk import load_uploaded_as
-
-    log_path = tmp_path / "upload.jsonl"
-    log_path.write_text(
-        json.dumps({"identifier": "lcps-astoriaphotos-00001", "status": "success",
-                    "uploaded_as": "zztest-first-lcps-astoriaphotos-00001", "live": False})
-        + "\n"
-        + json.dumps({"identifier": "lcps-astoriaphotos-00001", "status": "success",
-                      "uploaded_as": "zztest-second-lcps-astoriaphotos-00001", "live": False})
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_uploaded_as(log_path, live=False) == {
-        "lcps-astoriaphotos-00001": "zztest-second-lcps-astoriaphotos-00001"
-    }
-
-
-def test_load_uploaded_as_skips_carried_over_records_that_name_no_target(tmp_path, capsys):
-    """upload_from_csv writes a "carried over from resumed log" success record
-    per skipped identifier, with no uploaded_as. Those are legitimate, not
-    damage, so they must not be counted as a damaged line."""
-    from ia_bulk import load_uploaded_as
-
-    log_path = tmp_path / "upload.jsonl"
-    log_path.write_text(
-        json.dumps({"identifier": "lcps-astoriaphotos-00001", "status": "success",
-                    "uploaded_as": None, "live": False,
-                    "error": "carried over from resumed log"})
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_uploaded_as(log_path, live=False) == {}
-    assert capsys.readouterr().err == ""
 
 
 SYNC_STAMP = "20260823t161331"
@@ -9501,13 +7647,10 @@ def test_split_unchanged_preserves_order():
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
     args = Namespace(
-        csv=None,
         project="astoriaphotos",
         registry=str(registry_path),
         live=False,
         log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=None,
         dry_run=False,
         chunk_size=CHUNK_SIZE,
     )
@@ -10157,7 +8300,7 @@ def test_sync_from_sheet_sends_the_sheets_own_metadata_to_the_recorded_item(
     tmp_path, monkeypatch, capsys
 ):
     """The round trip the Sheet-as-source-of-truth model promises: edit a
-    description in the Sheet, run this, it is on the site. No CSV, no log, no
+    description in the Sheet, run this, it is on the site. No log, no
     flags - ia_url is the Sheet's own record of which item the row became, so
     nothing has to be re-derived."""
     from ia_bulk import cmd_sync_metadata
@@ -10353,6 +8496,31 @@ def test_sync_from_sheet_counts_an_unchanged_item_as_unchanged_not_a_failure(
 
     assert "0 item(s) updated successfully, 1 unchanged, 0 error(s)" in out
     assert exit_code == 0
+
+
+def test_sync_from_sheet_logs_an_already_current_item_as_unchanged(tmp_path, monkeypatch, capsys):
+    """Row 2's item already matches; row 3's takes the edit."""
+    from ia_bulk import MetadataUnchanged, cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), sent)
+
+    def unchanged_for_the_first_item(metadata, target):
+        if target.endswith("-00001"):
+            raise MetadataUnchanged(target)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", unchanged_for_the_first_item)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    log_file = next((tmp_path / "logs").glob("sync-metadata-*.jsonl"))
+    statuses = {entry["identifier"]: entry["status"] for entry in _row_records(log_file)}
+    assert statuses == {
+        "lcps-astoriaphotos-00001": "unchanged",
+        "lcps-astoriaphotos-00002": "success",
+    }
 
 
 def test_sync_from_sheet_dry_run_shows_what_would_change_not_just_field_names(
@@ -10574,23 +8742,6 @@ def test_metadata_changes_elides_a_very_long_value():
     assert new.isascii()
 
 
-def test_sync_from_sheet_rejects_csv_only_log_flags(tmp_path, monkeypatch, capsys):
-    """--resume-from and --from-log both name a prior run's log, which the
-    Sheet path does not need: ia_uploaded and ia_url are the record."""
-    from ia_bulk import cmd_sync_metadata
-
-    sent = []
-    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
-
-    for flag in ("resume_from", "from_log"):
-        exit_code = cmd_sync_metadata(
-            _sync_sheet_args(tmp_path, registry_path, **{flag: "logs/upload.jsonl"})
-        )
-        assert exit_code == 1
-        assert "is a --csv-path flag" in capsys.readouterr().err
-    assert sent == []
-
-
 # --- issue #4: a failing row's error reaches the console, not only the log ---
 
 
@@ -10655,41 +8806,6 @@ def test_cmd_upload_prints_why_a_row_failed_not_only_the_count(
     # under the failing row, in validate's per-row error style
     assert "    - Error retrieving metadata" in out
     assert "0 file(s) uploaded successfully, 1 error(s)" in out
-    assert exit_code == 1
-
-
-def test_cmd_upload_csv_path_prints_why_a_row_failed(tmp_path, monkeypatch, capsys):
-    """run_rows is shared by the --csv upload and sync-metadata paths."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"data")
-    csv_path = tmp_path / "items.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title"],
-        [{
-            "identifier": "lcps-astoriaphotos-00001",
-            "file": "photo1.jpg",
-            "mediatype": "image",
-            "title": "First photo",
-        }],
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    def refused(*args, **kwargs):
-        raise RuntimeError("Access Denied - This item has been taken offline")
-
-    monkeypatch.setattr("ia_bulk.upload_row", refused)
-
-    exit_code = cmd_upload(
-        make_upload_args(
-            tmp_path, registry_path, csv=str(csv_path), files_dir=str(tmp_path)
-        )
-    )
-    out = capsys.readouterr().out
-
-    assert "    - Access Denied - This item has been taken offline" in out
     assert exit_code == 1
 
 
@@ -10911,9 +9027,8 @@ def test_sync_from_sheet_live_reads_the_real_spreadsheet_not_the_test_one(
 
 
 def test_sync_from_sheet_live_records_the_mode_in_its_log(tmp_path, monkeypatch):
-    """The log's `live` field is load-bearing, not decoration:
-    _read_log_results filters on it, so a live run recorded as a test run
-    would let a test-mode log answer for real items later."""
+    """The log's `live` field is the audit record of which mode a run used;
+    a live run recorded as a test run would misstate what touched real items."""
     from ia_bulk import cmd_sync_metadata
 
     sent = []
@@ -11008,30 +9123,6 @@ def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypa
     assert summary["skipped"] == []
 
 
-def test_a_run_summary_is_not_mistaken_for_a_damaged_log_line(tmp_path, capsys):
-    """The summary carries no `identifier`, and a record naming no identifier
-    is exactly what _read_log_results() counts as damage. Left unhandled, the
-    line this feature adds to every log would make --resume-from announce the
-    log as truncated and mistrust its own recovery data."""
-    from ia_bulk import load_prior_successes
-
-    log_path = tmp_path / "sync-metadata-20260906T000000Z.jsonl"
-    log_path.write_text(
-        json.dumps({"identifier": "lcps-astoriaphotos-00001", "status": "success",
-                    "live": False, "file": "", "error": None}) + chr(10)
-        + json.dumps({"record": "run_summary", "live": False, "checked": 1,
-                      "pushed": 1, "changed": 1, "unchanged": 0,
-                      "failures": [], "skipped": []}) + chr(10),
-        encoding="utf-8",
-    )
-
-    successes = load_prior_successes(log_path, live=False)
-    err = capsys.readouterr().err
-
-    assert successes == {"lcps-astoriaphotos-00001"}
-    assert "damaged" not in err
-
-
 def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypatch):
     """The failure list is what makes the summary actionable rather than
     merely countable - a run reporting "1 error(s)" and nothing else sends
@@ -11087,67 +9178,6 @@ def test_a_row_that_was_never_sent_is_skipped_not_failed(tmp_path, monkeypatch):
     assert summary["pushed"] == 1
     assert summary["checked"] == 2
     assert exit_code == 1
-
-
-def _csv_sync_args(tmp_path, csv_path, registry_path, upload_log):
-    return Namespace(
-        project="astoriaphotos",
-        csv=str(csv_path),
-        registry=str(registry_path),
-        live=False,
-        log_dir=str(tmp_path / "logs"),
-        resume_from=None,
-        from_log=str(upload_log),
-    )
-
-
-def test_the_csv_path_ends_with_the_same_summary_record(tmp_path, monkeypatch, capsys):
-    """The offline fallback is the path most likely to be run unattended, and
-    a summary only the Sheet path writes would make "read the summary" advice
-    that silently does not apply half the time."""
-    from ia_bulk import cmd_sync_metadata, MetadataUnchanged
-
-    csv_path = tmp_path / "updates.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "title"],
-        [
-            {"identifier": "lcps-astoriaphotos-00001", "title": "Already correct"},
-            {"identifier": "lcps-astoriaphotos-00002", "title": "New title"},
-        ],
-    )
-    registry_path = tmp_path / "projects_registry.json"
-    registry_path.write_text(
-        json.dumps({"collection_key": "lcps", "projects": {"astoriaphotos": {}}}),
-        encoding="utf-8",
-    )
-
-    def unchanged_for_the_first(row, target_identifier):
-        if row["identifier"].strip() == "lcps-astoriaphotos-00001":
-            raise MetadataUnchanged(target_identifier)
-
-    monkeypatch.setattr("ia_bulk.update_metadata_row", unchanged_for_the_first)
-    upload_log = write_upload_log(
-        tmp_path / "upload.jsonl",
-        ["lcps-astoriaphotos-00001", "lcps-astoriaphotos-00002"],
-    )
-
-    cmd_sync_metadata(_csv_sync_args(tmp_path, csv_path, registry_path, upload_log))
-    out = capsys.readouterr().out
-
-    summary = _sync_log_entries(tmp_path)[-1]
-
-    assert summary["record"] == "run_summary"
-    assert summary["checked"] == 2
-    assert summary["pushed"] == 2
-    assert summary["changed"] == 1
-    assert summary["unchanged"] == 1
-    assert summary["failures"] == []
-    assert summary["skipped"] == []
-    assert (
-        f"{summary['changed']} item(s) updated successfully, "
-        f"{summary['unchanged']} unchanged, {len(summary['failures'])} error(s)"
-    ) in out
 
 
 def test_the_summary_and_the_console_cannot_disagree_about_a_mixed_run(
@@ -12628,25 +10658,6 @@ def test_cmd_upload_counts_only_the_batch_as_not_yet_catalogued(
     assert "1 row not yet catalogued" in out
 
 
-def test_cmd_upload_rejects_batch_on_the_csv_path(tmp_path, capsys):
-    """--batch is a Sheet-and-registry concept. Silently ignoring an explicit
-    flag on the wrong path is the trap --limit's own refusal exists to stop."""
-    from ia_bulk import cmd_upload
-
-    csv_path = tmp_path / "items.csv"
-    write_csv(csv_path, ["identifier", "file", "mediatype"], [])
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
-
-    exit_code = cmd_upload(
-        make_upload_args(tmp_path, registry_path, csv=str(csv_path), batch="Logging")
-    )
-    err = capsys.readouterr().err
-
-    assert exit_code == 1
-    assert "--batch" in err
-
-
 def test_cmd_validate_batch_reports_only_the_rows_in_that_batch(
     tmp_path, monkeypatch, capsys
 ):
@@ -12664,7 +10675,7 @@ def test_cmd_validate_batch_reports_only_the_rows_in_that_batch(
 
     exit_code = cmd_validate(
         Namespace(
-            csv=None, project="astoriaphotos", registry=str(registry_path),
+            project="astoriaphotos", registry=str(registry_path),
             live=False, batch="Logging",
         )
     )
@@ -12688,7 +10699,7 @@ def test_cmd_validate_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch
 
     exit_code = cmd_validate(
         Namespace(
-            csv=None, project="astoriaphotos", registry=str(registry_path),
+            project="astoriaphotos", registry=str(registry_path),
             live=False, batch="Loging",
         )
     )
@@ -12696,26 +10707,6 @@ def test_cmd_validate_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch
 
     assert exit_code == 1
     assert "matches no row" in err
-
-
-def test_cmd_validate_rejects_batch_on_the_csv_path(tmp_path, capsys):
-    from ia_bulk import cmd_validate
-
-    csv_path = tmp_path / "items.csv"
-    write_csv(csv_path, ["identifier", "file", "mediatype"], [])
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_sheet_registry()), encoding="utf-8")
-
-    exit_code = cmd_validate(
-        Namespace(
-            csv=str(csv_path), project="astoriaphotos", registry=str(registry_path),
-            files_dir=".", live=False, batch="Logging",
-        )
-    )
-    err = capsys.readouterr().err
-
-    assert exit_code == 1
-    assert "--batch" in err
 
 
 def test_build_parser_accepts_batch_on_both_upload_and_validate():
@@ -12962,7 +10953,7 @@ def test_cmd_validate_prints_the_missing_field_detail_once_not_as_a_second_block
     )
 
     cmd_validate(
-        Namespace(csv=None, project="astoriaphotos", registry=str(registry_path), live=False)
+        Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
     )
     out = capsys.readouterr().out
     lines = out.splitlines()
@@ -13455,64 +11446,6 @@ def test_a_sync_run_that_only_failed_still_reaches_the_log_tab(tmp_path, monkeyp
     rows = client.log_tabs["Sync Log"].appended
     assert [row[2] for row in rows] == ["summary", "failure", "failure"]
     assert "Access Denied" in rows[1][4]
-
-
-def test_the_csv_upload_path_ends_with_the_same_summary_record(tmp_path, monkeypatch, capsys):
-    """The offline fallback is the path most likely to be run unattended, and
-    a summary only the Sheet path writes makes "read the run summary" advice
-    that silently does not apply half the time - the same reasoning that gave
-    sync-metadata's --csv path one in #25. It writes no log tab: there is no
-    Sheet on this path to write one into."""
-    from ia_bulk import cmd_upload
-
-    (tmp_path / "photo1.jpg").write_bytes(b"x")
-    (tmp_path / "photo2.jpg").write_bytes(b"x")
-    csv_path = tmp_path / "rows.csv"
-    write_csv(
-        csv_path,
-        ["identifier", "file", "mediatype", "title"],
-        [
-            {
-                "identifier": "lcps-astoriaphotos-00001",
-                "file": "photo1.jpg",
-                "mediatype": "image",
-                "title": "One",
-            },
-            {
-                "identifier": "lcps-astoriaphotos-00002",
-                "file": "photo2.jpg",
-                "mediatype": "image",
-                "title": "Two",
-            },
-        ],
-    )
-    registry_path = tmp_path / "registry.json"
-    registry_path.write_text(json.dumps(make_registry()), encoding="utf-8")
-
-    def fail_the_second(row, target_identifier, collection, files_dir):
-        if target_identifier.endswith("00002"):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr("ia_bulk.upload_row", fail_the_second)
-
-    cmd_upload(
-        make_upload_args(
-            tmp_path,
-            registry_path,
-            csv=str(csv_path),
-            files_dir=str(tmp_path),
-            collection="lcps",
-        )
-    )
-    capsys.readouterr()
-
-    summary = _upload_log_entries(tmp_path)[-1]
-
-    assert summary["record"] == "run_summary"
-    assert summary["succeeded"] == 1
-    assert [entry["identifier"] for entry in summary["failures"]] == [
-        "lcps-astoriaphotos-00002"
-    ]
 
 
 def test_a_row_moved_mid_run_reaches_the_summary_and_the_log_tab(
