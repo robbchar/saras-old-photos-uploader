@@ -69,6 +69,7 @@ def test_every_way_of_reaching_the_network_is_refused_and_reported(suite_under_r
     """Lookups must refuse with gaierror/herror, as a real failure would, or the body fails instead of passing."""
     suite_under_real_conftest.makepyfile(
         """
+        import errno
         import socket
 
         import pytest
@@ -81,7 +82,11 @@ def test_every_way_of_reaching_the_network_is_refused_and_reported(suite_under_r
         def connect_ex():
             with socket.socket() as sock:
                 sock.settimeout(1)
-                sock.connect_ex(("192.0.2.2", 80))
+                try:
+                    result = sock.connect_ex(("192.0.2.2", 80))
+                except OSError:
+                    pytest.fail("connect_ex raised; a real failure returns an errno")
+                assert result == errno.ECONNREFUSED
 
         def sendto():
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -135,9 +140,30 @@ def test_a_refusal_the_test_does_not_swallow_is_reported_once(suite_under_real_c
     result.assert_outcomes(failed=1, errors=0)
 
 
+def test_a_swallowed_refusal_is_reported_when_the_test_fails_for_another_reason(suite_under_real_conftest):
+    suite_under_real_conftest.makepyfile(
+        """
+        import socket
+
+        def test_swallows_then_fails_an_assertion():
+            try:
+                socket.getaddrinfo("unrelated-failure.invalid", 443)
+            except OSError:
+                pass
+            assert False
+        """
+    )
+    result = suite_under_real_conftest.runpytest_subprocess()
+    result.assert_outcomes(failed=1, errors=1)
+    result.stdout.fnmatch_lines(["*unrelated-failure.invalid*"])
+
+
 def test_a_proxy_does_not_hide_a_request_from_the_guard(suite_under_real_conftest, monkeypatch):
     """Through a loopback proxy the only connection is local; the guard must see the real host instead."""
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    # This run's own guard set these; the inner run must set them itself.
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
     suite_under_real_conftest.makepyfile(
         """
         import requests
@@ -203,11 +229,51 @@ def test_reaching_the_network_while_importing_a_test_module_fails_collection(
     result.stdout.fnmatch_lines(["*import-time.invalid*"])
 
 
+def test_a_module_that_skips_after_a_refused_probe_still_fails_collection(suite_under_real_conftest):
+    suite_under_real_conftest.makepyfile(
+        """
+        import socket
+
+        import pytest
+
+        try:
+            socket.getaddrinfo("offline-probe.invalid", 443)
+        except OSError:
+            pytest.skip("offline", allow_module_level=True)
+
+        def test_never_runs():
+            pass
+        """
+    )
+    result = suite_under_real_conftest.runpytest_subprocess()
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*offline-probe.invalid*"])
+
+
+def test_an_attempt_outside_every_test_fails_the_run(suite_under_real_conftest):
+    """A hook in a directory conftest runs after collection and before any test; no test window claims it."""
+    hooks_dir = suite_under_real_conftest.mkpydir("hooks")
+    (hooks_dir / "conftest.py").write_text(
+        "import socket\n"
+        "\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    try:\n"
+        '        socket.getaddrinfo("modify-items.invalid", 443)\n'
+        "    except OSError:\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    (hooks_dir / "test_passes.py").write_text("def test_passes():\n    pass\n", encoding="utf-8")
+    result = suite_under_real_conftest.runpytest_subprocess()
+    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(["*modify-items.invalid*"])
+
+
 LOCAL_HOSTS = [
     "localhost",
     "LOCALHOST",
     "localhost.",
-    "api.localhost",
     b"localhost",
     "127.0.0.1",
     "::1",

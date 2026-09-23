@@ -1,9 +1,8 @@
+import errno
 import ipaddress
 import socket
 
 import pytest
-
-import google_auth
 
 pytest_plugins = ["pytester"]
 
@@ -16,9 +15,8 @@ def _missing_service_account_key_path(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _no_test_reads_the_real_service_account_key(monkeypatch, _missing_service_account_key_path):
     """No test should ever reach the real key; point the default at a path that does not exist."""
-    monkeypatch.setattr(
-        google_auth, "DEFAULT_SERVICE_ACCOUNT_KEY_PATH", _missing_service_account_key_path
-    )
+    # By dotted name, so google_auth is first imported after pytest_configure installs the network guard.
+    monkeypatch.setattr("google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH", _missing_service_account_key_path)
 
 
 @pytest.fixture(scope="session")
@@ -37,12 +35,13 @@ def _no_test_reads_the_real_ia_config(monkeypatch, _empty_ia_config_path):
 
 
 def _is_local(host: object) -> bool:
-    """None or "" means this machine, as do localhost names (RFC 6761), loopback and unspecified addresses."""
+    """None or "" means this machine, as do "localhost", loopback and unspecified addresses."""
     if host in (None, "", b""):
         return True
     host_text = host.decode() if isinstance(host, bytes) else str(host)
     name = host_text.lower().rstrip(".")
-    if name == "localhost" or name.endswith(".localhost"):
+    # Not *.localhost: many resolvers ignore RFC 6761 and send those names to DNS.
+    if name == "localhost":
         return True
     try:
         address = ipaddress.ip_address(name.split("%")[0])
@@ -64,11 +63,13 @@ _GUARDED_LOOKUPS = {
     "gethostbyaddr": (lambda address: address, socket.herror),
     "getnameinfo": (lambda sockaddr, _flags: _host_of(sockaddr), socket.gaierror),
 }
+# Each guarded method, how to find the host, and whether a real failure returns an errno instead of raising.
 _GUARDED_SOCKET_METHODS = {
-    "connect": lambda address: _host_of(address),
-    "connect_ex": lambda address: _host_of(address),
-    "sendto": lambda _data, *flags_and_address: _host_of(flags_and_address[-1]),
+    "connect": (_host_of, False),
+    "connect_ex": (_host_of, True),
+    "sendto": (lambda _data, *flags_and_address: _host_of(flags_and_address[-1]), False),
 }
+_REFUSAL_TEXT = "the suite must not reach the network"
 _PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 
 
@@ -82,9 +83,10 @@ class _NetworkGuard:
     def install(self) -> None:
         for name, (host_of, error) in _GUARDED_LOOKUPS.items():
             self._patches.setattr(socket, name, self._guarded_lookup(getattr(socket, name), host_of, error))
-        for name, host_of in _GUARDED_SOCKET_METHODS.items():
+        for name, (host_of, returns_errno) in _GUARDED_SOCKET_METHODS.items():
             real_method = getattr(socket.socket, name)
-            self._patches.setattr(socket.socket, name, self._guarded_socket_method(real_method, host_of))
+            guarded = self._guarded_socket_method(real_method, host_of, returns_errno)
+            self._patches.setattr(socket.socket, name, guarded)
         # A loopback proxy would be the only connection the guard sees; "*" also overrides a Windows registry proxy.
         for variable in _PROXY_VARIABLES:
             self._patches.delenv(variable, raising=False)
@@ -103,24 +105,43 @@ class _NetworkGuard:
         del self._attempts[mark:]
         return claimed
 
-    def _refuse_unless_local(self, action: str, host: object, error: type[OSError]) -> None:
-        if not _is_local(host):
-            self._attempts.append(f"{action} {host!r}")
-            raise error(f"test tried to {action} {host!r}; the suite must not reach the network")
+    def _refusal_unless_local(self, action: str, host: object) -> str | None:
+        """The refusal message for a non-local host, after recording the attempt; None for a local one."""
+        if _is_local(host):
+            return None
+        self._attempts.append(f"{action} {host!r}")
+        return f"test tried to {action} {host!r}; {_REFUSAL_TEXT}"
 
     def _guarded_lookup(self, real_lookup, host_of, error):
         def guarded(*args, **kwargs):
-            self._refuse_unless_local("look up", host_of(*args, **kwargs), error)
+            refusal = self._refusal_unless_local("look up", host_of(*args, **kwargs))
+            if refusal is not None:
+                raise error(refusal)
             return real_lookup(*args, **kwargs)
 
         return guarded
 
-    def _guarded_socket_method(self, real_method, host_of):
+    def _guarded_socket_method(self, real_method, host_of, returns_errno: bool):
         def guarded(sock, *args, **kwargs):
-            self._refuse_unless_local("reach", host_of(*args, **kwargs), OSError)
+            refusal = self._refusal_unless_local("reach", host_of(*args, **kwargs))
+            if refusal is not None:
+                if returns_errno:
+                    return errno.ECONNREFUSED
+                raise OSError(refusal)
             return real_method(sock, *args, **kwargs)
 
         return guarded
+
+
+def _caused_by_a_refusal(error: BaseException | None) -> bool:
+    """Whether the guard's refusal is `error` or anywhere in its cause/context chain."""
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        if _REFUSAL_TEXT in str(error):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def _describe(attempts: list[str]) -> str:
@@ -129,7 +150,7 @@ def _describe(attempts: list[str]) -> str:
 
 _GUARD = pytest.StashKey[_NetworkGuard]()
 _ITEM_MARK = pytest.StashKey[int]()
-_ITEM_ALREADY_FAILED = pytest.StashKey[bool]()
+_ITEM_FAILED_ON_A_REFUSAL = pytest.StashKey[bool]()
 
 
 def pytest_configure(config):
@@ -151,7 +172,8 @@ def pytest_make_collect_report(collector):
     mark = guard.mark()
     report = yield
     attempts = guard.claim_since(mark)
-    if attempts and report.passed:
+    # A skip counts too: "probe the network, skip the module if offline" would otherwise hide the attempt.
+    if attempts and not report.failed:
         report.outcome = "failed"
         report.longrepr = f"collecting {collector.nodeid or 'the session'} {_describe(attempts)}"
     return report
@@ -165,13 +187,23 @@ def pytest_runtest_setup(item):
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Fail at teardown, since code under test may swallow the refusal; unless an earlier phase already failed."""
+    """Fail at teardown, since code under test may swallow the refusal; unless an earlier phase failed on it."""
     report = yield
-    if report.failed:
-        item.stash[_ITEM_ALREADY_FAILED] = True
+    if report.failed and call.excinfo is not None and _caused_by_a_refusal(call.excinfo.value):
+        item.stash[_ITEM_FAILED_ON_A_REFUSAL] = True
     if call.when == "teardown":
-        attempts = item.config.stash[_GUARD].claim_since(item.stash[_ITEM_MARK])
-        if attempts and not item.stash.get(_ITEM_ALREADY_FAILED, False):
+        guard = item.config.stash[_GUARD]
+        # No mark means setup never reached ours; leave the attempts for pytest_sessionfinish.
+        attempts = guard.claim_since(item.stash.get(_ITEM_MARK, guard.mark()))
+        if attempts and not item.stash.get(_ITEM_FAILED_ON_A_REFUSAL, False):
             report.outcome = "failed"
             report.longrepr = f"test {_describe(attempts)}"
     return report
+
+
+def pytest_sessionfinish(session):
+    """Attempts outside every collection and test, e.g. in pytest_collection_modifyitems, fail the run."""
+    attempts = session.config.stash[_GUARD].claim_since(0)
+    if attempts:
+        session.config.get_terminal_writer().line(f"\nthe run {_describe(attempts)}", red=True)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
