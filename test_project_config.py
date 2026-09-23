@@ -60,6 +60,50 @@ def test_unknown_project_is_rejected_by_name():
         load_project_config(REGISTRY, "nosuchproject")
 
 
+@pytest.mark.parametrize("project_id", ["astoria-maps", "astoria_maps", "AstoriaMaps"])
+def test_project_id_off_the_identifier_scheme_is_rejected(project_id):
+    """Minted identifiers must parse back; a hyphen here mints ones that don't."""
+    registry = {"collection_key": "lcps", "projects": {project_id: REGISTRY["projects"]["sarasoldphotos"]}}
+
+    with pytest.raises(ConfigError, match=rf"'{project_id}'.*lowercase letters and digits only"):
+        load_project_config(registry, project_id)
+
+
+@pytest.mark.parametrize("collection_key", ["lcps-org", "lcps_org", "LCPS", "lcps ", " lcps"])
+def test_collection_key_off_the_identifier_scheme_is_rejected(collection_key):
+    """Checked raw, so a stray space fails here rather than splitting minting from validation."""
+    registry = {"collection_key": collection_key, "projects": REGISTRY["projects"]}
+
+    with pytest.raises(ConfigError, match=r"collection_key.*lowercase letters and digits only"):
+        load_project_config(registry, "sarasoldphotos")
+
+
+def test_sibling_project_id_off_the_identifier_scheme_is_rejected():
+    """Every registered project id is checked, not just the one being run."""
+    block = REGISTRY["projects"]["sarasoldphotos"]
+    registry = {"collection_key": "lcps", "projects": {"sarasoldphotos": block, "astoria-maps": block}}
+
+    with pytest.raises(ConfigError, match=r"'astoria-maps'.*lowercase letters and digits only"):
+        load_project_config(registry, "sarasoldphotos")
+
+
+def test_off_scheme_error_names_the_offending_characters():
+    registry = {"collection_key": "Lcps ", "projects": REGISTRY["projects"]}
+
+    with pytest.raises(ConfigError) as raised:
+        load_project_config(registry, "sarasoldphotos")
+
+    assert "found ' ', 'L'" in str(raised.value)
+    assert "hyphens" not in str(raised.value)
+
+
+def test_off_scheme_error_explains_hyphens_when_there_is_one():
+    registry = {"collection_key": "lcps-org", "projects": REGISTRY["projects"]}
+
+    with pytest.raises(ConfigError, match=r"found '-' \(hyphens separate an identifier's parts\)"):
+        load_project_config(registry, "sarasoldphotos")
+
+
 def test_missing_required_key_names_the_key_and_the_project():
     registry = {"collection_key": "lcps", "projects": {"p": {"mediatype": "image"}}}
 

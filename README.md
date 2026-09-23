@@ -20,7 +20,9 @@ project" so a second LCPS project can reuse the same pipeline.
   designs that were tried and reversed.
 
 ## Identifier scheme
-`COLLECTIONKEY-PROJECTID-NUMBER` — all lowercase, hyphen-separated.
+`COLLECTIONKEY-PROJECTID-NUMBER` — all lowercase, hyphen-separated. The
+registry refuses a collection key or project id that isn't lowercase letters
+and digits only (see [`docs/decisions/IDENTIFIERS.md`](docs/decisions/IDENTIFIERS.md#registry-ids-must-be-lowercase-letters-and-digits)).
 - COLLECTIONKEY: LCPS's IA collection identifier (confirm before real runs)
 - PROJECTID: short project code, e.g. `photosexample` (illustrative only —
   see `projects_registry.json` for the actual registered codes; tracked in

@@ -40,6 +40,7 @@ about not getting a number wrong once.
 - [The four `ia_` columns are required in every mode, including the safe one](decisions/IDENTIFIERS.md#the-four-ia_-columns-are-required-in-every-mode-including-the-safe-one)
 - [`identifier-bib` is written back to the Sheet, not just generated](decisions/IDENTIFIERS.md#identifier-bib-is-written-back-to-the-sheet-not-just-generated)
 - [An identifier is checked against the run's project, not the whole registry](decisions/IDENTIFIERS.md#an-identifier-is-checked-against-the-runs-project-not-the-whole-registry)
+- [Registry ids must be lowercase letters and digits](decisions/IDENTIFIERS.md#registry-ids-must-be-lowercase-letters-and-digits)
 
 ## [The Sheet protocol](decisions/SHEET-PROTOCOL.md)
 
