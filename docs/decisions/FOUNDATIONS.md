@@ -34,7 +34,7 @@ docs say "items" more than "photos".
 
 ## Technical configuration lives in the registry, not the command line
 
-*Decided 2026-08-08, reversing the "accepted, not overlooked" item above.*
+*Decided 2026-08-08, reversing the "accepted, not overlooked" item below.*
 
 The target IA collection, the files directory, and the template that builds a
 row's file path all move into the per-project block in
@@ -106,7 +106,6 @@ in [`KNOWN-ISSUES.md`](../KNOWN-ISSUES.md) with reproduction details:
   — the flag went with the CSV paths (#44)
 - ~~`--collection` keeps its `"lcps"` default and stays unvalidated~~
   **Reversed 2026-08-08** — see "Technical configuration lives in the
-registry"
-  below
+  registry" above
 - ~~Ragged-CSV handling relies on a broad `except` in `run_rows`~~ **Closed
   2026-09-23** — `run_rows` went with the CSV paths (#44)

@@ -305,3 +305,29 @@ output doesn't parse back to its own parts.
 
 NUMBER is matched as `[0-9]`, not `\d`. In Python `\d` also matches non-ASCII
 digits, which `format_identifier` never produces.
+
+## The collection key is `lcps`
+
+*Settled 2026-08-23.*
+
+`collection_key` in `projects_registry.json` is `"lcps"`. It is the first
+segment of every minted identifier and of every item's permanent public URL
+(`archive.org/details/lcps-sarasoldphotos-00001`). It was chosen as the most
+specific pointer to the organization. `lcpsociety` (the IA account's domain)
+and `lcpsdigitalcollection` (the parent collection) were both considered and
+rejected as slightly off.
+
+The value never reaches Internet Archive. It is only the identifier
+namespace, used by `format_identifier()`, `next_identifiers()` and
+`check_identifier()`. It is unrelated to `ia_collection`, the IA collection
+items are uploaded into (see [`../DECISIONS.md`](../DECISIONS.md), "Still
+open").
+
+Do not change it. Nothing in the tool pins the value, and nothing can tell a
+deliberate change from a typo. After a change:
+
+- New identifiers are minted under the new first segment.
+- `check_identifier` refuses every identifier already in the Sheet. `validate`
+  reports each one, and `upload` skips each reserved-but-unconfirmed row
+  instead of retrying it. (`sync-metadata` checks only the PROJECTID, so it
+  is unaffected.)

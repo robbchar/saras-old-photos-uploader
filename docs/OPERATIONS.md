@@ -28,9 +28,10 @@ Google Sheet (read live)  →  validate  →  upload  →  sync-metadata
 ```
 
 The Sheet is the source of truth, and every command reads it directly over
-the Google Sheets API — see [`docs/DECISIONS.md`](DECISIONS.md), "The Sheet
-is read live; the CSV becomes the offline path". There is no CSV export
-step; the offline CSV paths were removed on 2026-09-23.
+the Google Sheets API — see
+[The Sheet is read live](decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).
+That decision's offline CSV path was reversed on 2026-09-23: there is no CSV
+export step and no CSV input.
 
 Bringing a batch up from nothing to permanent Internet Archive items is the
 four numbered phases below — validate, rehearse, go live, correct — matching
@@ -345,17 +346,15 @@ python ia_bulk.py upload --project sarasoldphotos --live
 
 ### Pre-live checklist
 
-Nothing on this list is validated automatically. A wrong value here puts real
-files in the wrong place under a permanent identifier.
+Nothing checks that these values are the right ones. A wrong value here puts
+real files in the wrong place under a permanent identifier.
 
-- [ ] `projects_registry.json` → `collection_key` (currently `"lcps"`) is the
-      first segment of every identifier this tool mints
-      (`lcps-sarasoldphotos-00001`). `check_identifier` already refuses any
-      row whose identifier prefix doesn't match this value, and any whose
-      `PROJECTID` belongs to a different registered project — but the value
-      itself has **never been confirmed** against how LCPS actually names its
-      collection. This is a different thing from the IA collection uploads
-      land in; see the next item.
+- [ ] `projects_registry.json` → `collection_key` still reads `"lcps"`, the
+      first segment of every identifier this tool mints — see
+      [The collection key is `lcps`](decisions/IDENTIFIERS.md#the-collection-key-is-lcps).
+      Existing identifiers are checked against it, but new ones are simply
+      minted under whatever it says. This is a different thing from the IA
+      collection uploads land in; see the next item.
 - [ ] `projects_registry.json` → `ia_collection` (currently
       `"sarasoldphotos"`) is the actual Internet Archive collection
       `upload --live` uploads into — taken from the registry automatically;
