@@ -331,8 +331,12 @@ push. `plan_sync_targets()` hashes each row's `metadata_to_send()` output
 sorts the result into `to_push`/`already_synced`. Only `to_push` is sent —
 this reverses the original "every DONE row is sent every run", which was
 correct for a hand-run command over a few hundred rows and stopped holding at
-~4,000 rows on the hourly schedule planned for issue #27 (the hash gate
-itself is issue #24). See
+~4,000 rows on an hourly schedule (issue #27; the hash gate itself is issue
+#24). That schedule is now a LaunchAgent that
+`./install.sh --project <project> --live --enable-agent` installs — see
+[`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync); its output goes
+to `logs/launchagent-<project>.out` and `.err`, and `doctor`'s
+`launch agent loaded` check reports its last exit. See
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 IA's *no changes to `_meta.xml`* response still becomes `MetadataUnchanged`
 and is counted as `unchanged` rather than a failure, and — unlike a genuine

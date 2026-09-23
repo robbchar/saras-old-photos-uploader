@@ -415,7 +415,11 @@ files in the wrong place under a permanent identifier.
       That count, not the exit code, is what tells you this run has the scope
       you think it has. It is the same set `upload` will plan, so an N that
       surprises you is worth resolving *before* anything permanent happens.
-- [ ] The `ia` CLI is authenticated as `admin@lcpsociety.org` (`ia whoami`).
+- [ ] The `ia` credentials belong to `admin@lcpsociety.org`:
+      `ia configure --check` (on the Mac, `./.venv/bin/ia configure --check`)
+      asks archive.org and prints
+      `The credentials for "admin@lcpsociety.org" are valid`. Any other
+      address, or `Your credentials are invalid`, is a stop.
 - [ ] The Sheet is current and saved — the rows you intend to upload were
       filled in, and no edit is still sitting unsaved or as a pending
       suggestion. A `--live` run reads the Sheet directly; there is no CSV
@@ -454,10 +458,15 @@ correction".
 
 ### Only a changed row is actually sent — and what to do if yours isn't
 
-Right now `sync-metadata` is run by hand, the same way as the other commands
-above (an hourly LaunchAgent is planned — issue #27 — but nothing in this
-repo installs one yet). Whichever way it gets run, most runs have nothing to
-do, and it says so:
+`sync-metadata` can be run by hand, the same way as the other commands above,
+or hourly by a LaunchAgent on the Mac, which
+`./install.sh --project sarasoldphotos --live --enable-agent` installs once
+the first live runs are verified — see
+[`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync). The agent's
+runs print to `logs/launchagent-sarasoldphotos.out` and `.err` instead of a
+screen, and `doctor --live`'s `launch agent loaded` line says whether its last
+run exited 0. Whichever way it gets run, most runs have nothing to do, and it
+says so:
 
 ```
 nothing to sync - all 3,842 uploaded rows already match their last push
@@ -551,6 +560,9 @@ To read the newest one without looking up its timestamp:
 ```bash
 tail -n 1 "$(printf '%s\n' logs/sync-metadata-*.jsonl | sort | tail -n 1)" | python -m json.tool
 ```
+
+On the Mac, `python` at the end of that pipe is `.venv/bin/python` — macOS
+has no `python` command (see [`DEPLOYMENT.md`](DEPLOYMENT.md)).
 
 Sorting the names *is* sorting by time — log filenames are UTC timestamps
 precisely so a listing comes out in the order the runs happened (see
