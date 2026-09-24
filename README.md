@@ -119,11 +119,11 @@ commands also need the Google service account key saved at
 Google Sheets API (its test Sheet, unless `--live` is passed).
 
 ```bash
-# read the project's Sheet
-python ia_bulk.py validate --project sarasoldphotos
+# read the project's Sheet (the Test Sheet holds the e2e project's grid)
+python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e
 
 # report on one batch only, the same scope `upload --batch` would run
-python ia_bulk.py validate --project sarasoldphotos --batch "Logging"
+python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e --batch "E2E"
 ```
 
 `--batch` narrows the report to the rows whose registry-configured
@@ -169,16 +169,16 @@ Reads the project's Sheet live.
 
 ```bash
 # rehearse against the test Sheet: uploads as zztest-…, writes nothing back
-python ia_bulk.py upload --project sarasoldphotos
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e
 
 # same, but record the minted identifiers in the TEST Sheet
-python ia_bulk.py upload --project sarasoldphotos --write-identifier
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier
 
 # see what it would do without doing any of it
-python ia_bulk.py upload --project sarasoldphotos --dry-run
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --dry-run
 
 # upload one theme only, 100 of them
-python ia_bulk.py upload --project sarasoldphotos --batch "Logging" --limit 100
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --batch "E2E" --limit 100
 ```
 
 `--batch` scopes the run to the rows whose `batch_column` (from the registry)
@@ -276,10 +276,10 @@ captured, and it may not fire on one — see `docs/DECISIONS.md`, "Still open".
 
 ```bash
 # upload at most 100 items this run, in the default batches of 500
-python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 100
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 100
 
 # 10 items total, in batches of 3 - not 10 batches of 3
-python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 10 --chunk-size 3
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 10 --chunk-size 3
 ```
 
 `--limit` counts *planned* upload targets — rows that are valid, ready
@@ -326,8 +326,8 @@ The Sheet is the correction. Fix a description in the Sheet, run this, and it
 is on the site:
 
 ```bash
-python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run
-python ia_bulk.py sync-metadata --project sarasoldphotos
+python ia_bulk.py sync-metadata --project sarasoldphotos --live --dry-run
+python ia_bulk.py sync-metadata --project sarasoldphotos --live
 ```
 
 It reads the Sheet live, takes every row marked uploaded (`ia_uploaded` set),
@@ -385,8 +385,8 @@ edit page on archive.org.
 ### `reconcile-files` — correct a filename cell that doesn't match the drive
 
 ```bash
-python ia_bulk.py reconcile-files --project sarasoldphotos --dry-run
-python ia_bulk.py reconcile-files --project sarasoldphotos
+python ia_bulk.py reconcile-files --project sarasoldphotos --live --dry-run
+python ia_bulk.py reconcile-files --project sarasoldphotos --live
 ```
 
 It reads the Sheet live and resolves every row's file the same way
@@ -465,8 +465,8 @@ every other command.
 ### `append-rows` — add skeleton rows for files that have no row
 
 ```bash
-python ia_bulk.py append-rows --project sarasoldphotos --dry-run
-python ia_bulk.py append-rows --project sarasoldphotos
+python ia_bulk.py append-rows --project sarasoldphotos --live --dry-run
+python ia_bulk.py append-rows --project sarasoldphotos --live
 ```
 
 Walks every folder under `files_dir` — including folders no row names,
@@ -502,9 +502,9 @@ passed, each run writes a timestamped log to `--log-dir` (default
 ### `doctor` and `setup` — check the machine, and fix what can be fixed
 
 ```bash
-python ia_bulk.py doctor --project sarasoldphotos
+python ia_bulk.py doctor --registry e2e_fixtures/registry.json --project e2e
 python ia_bulk.py doctor --project sarasoldphotos --live
-python ia_bulk.py setup --project sarasoldphotos
+python ia_bulk.py setup --registry e2e_fixtures/registry.json --project e2e
 ```
 
 `doctor` reports whether this machine can run the pipeline — Python and the

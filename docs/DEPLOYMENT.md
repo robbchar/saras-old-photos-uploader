@@ -638,10 +638,10 @@ The Test Sheet holds the `e2e` project's grid — steps 1 and 2 below target it
 with `--registry e2e_fixtures/registry.json --project e2e`, not
 `<project>`/`sarasoldphotos`.
 
-1. **Read the test Sheet.** Expect a readiness report ending `5/5 rows
-   passed` (after a rehearsal, `3 already uploaded`, `1 row ready to
-   upload`, `1` not yet catalogued for the no-theme row) and no sign-in
-   prompt:
+1. **Read the test Sheet.** Expect a readiness report that includes `5/5
+   rows passed`, followed by more summary lines (after a rehearsal, `3
+   already uploaded`, `1 row ready to upload`, `1` not yet catalogued for
+   the no-theme row) and no sign-in prompt:
 
    ```bash
    .venv/bin/python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e < /dev/null
