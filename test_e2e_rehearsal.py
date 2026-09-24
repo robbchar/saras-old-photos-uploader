@@ -49,7 +49,7 @@ UPLOAD_COLUMNS = ("ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib")
 SYNC_COLUMNS = ("ia_sync_hash", "ia_last_synced.")
 BROKEN_FILENAME = "does-not-exist.jpg"
 # ia_bulk.py prints this on stderr when IA refuses a request as rate limited and the run stops.
-IA_RATE_LIMIT_NOTICE = "Internet Archive reported a rate limit"
+IA_RATE_LIMIT_NOTICE = "Internet Archive asked us to slow down"
 
 # Grid indexes; header is 0, so Sheet row = index + 1.
 FIRST_UPLOADED, SECOND_UPLOADED, BROKEN_ROW, THIRD_UPLOADED, NOT_READY_ROW = 1, 2, 3, 4, 5
@@ -309,7 +309,7 @@ def test_a_throttled_run_fails_as_ia_throttling_not_a_defect():
         args=["ia_bulk.py", "upload"],
         returncode=1,
         stdout="0 file(s) uploaded successfully, 1 error(s)\n",
-        stderr="stopped: Internet Archive reported a rate limit after 1 item\n",
+        stderr="stopped: Internet Archive asked us to slow down (HTTP 503) after 1 item\n",
     )
 
     with pytest.raises(pytest.fail.Exception, match="step 2: Internet Archive is throttling uploads"):
