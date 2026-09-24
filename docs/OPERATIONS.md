@@ -782,6 +782,13 @@ belongs to the `e2e` project; a hand rehearsal after it uses
 real Sheet only. Test data is ephemeral — see
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
 
+Only one rehearsal runs at a time. Step 0 takes the Test Sheet's `E2E Lock`
+tab, and a second run fails at step 0 naming the first; wait for it, then
+re-run. How a stale lock clears is in README's
+["E2E rehearsal (opt-in)"](../README.md#e2e-rehearsal-opt-in). A hand
+rehearsal (the steps below) takes no lock, so check that the Test Sheet has
+no `E2E Lock` tab before starting one.
+
 After a passing run, rows 2, 3 and 5 are uploaded and synced, row 2's
 `Title` is edited, and row 6 is still not ready (no theme); reset rows per
 ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done)

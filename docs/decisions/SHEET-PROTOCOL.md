@@ -491,3 +491,41 @@ reset deletes the log tabs.
 The live-ID check is empty until a real `sheet_id` is registered, so the reset
 also looks at the Sheet itself: it refuses to clear a data tab with more rows
 than the fixture. A real Sheet has thousands of rows.
+
+## One rehearsal at a time
+
+*Decided 2026-09-24.*
+
+Every e2e rehearsal rewrites the one Test Sheet at step 0, so two at once
+break each other. On 2026-09-24 two ran together: one run's reset landed
+during the other's step 4 upload, and the CLI's write-back guard refused a row
+that had changed under it. The refusal was correct, but the failure read as a
+defect in the tool.
+
+The rehearsal now takes a lock before the reset: a tab named `E2E Lock` on the
+Test Sheet, holding the run's host, pid, checkout, log directory, start time,
+last check-in and expiry. It lives on the Sheet because the Sheet is the one
+thing every checkout and machine shares; a lock file would reach neither
+another worktree's path nor the Mac. The code is `e2e_lock.py`, test code
+only.
+
+- **Taking it is atomic.** One `batchUpdate` adds the tab under a sheetId the
+  run picks and writes the holder into it. The API applies a batch whole or
+  not at all, and refuses a second tab with the same name, so two runs racing
+  for a free lock cannot both win.
+- **The sheetId is the ownership.** Check-ins and the delete at teardown
+  target that id. A run whose lock was taken over gets "No grid with id"
+  instead of writing into the new holder's tab, and it fails naming the new
+  holder. Its step-12 restore is skipped, since the row is no longer its to
+  restore.
+- **A stale lock expires.** A run checks in at every step, extending its lease
+  to 30 minutes from then: twice the longest gap between check-ins, which is
+  one CLI call's timeout. The next run takes over an expired lock in one batch
+  that deletes by the old sheetId, so only one of two racing runs succeeds.
+  Deleting the tab by hand clears it at once. Ctrl-C still runs teardown; only
+  a killed process leaves a lock behind.
+- **A held lock fails the run; it does not wait.** Waiting would make one
+  run's length depend on another's.
+
+It does not cover hand test-mode commands against the Test Sheet, which take
+no lock, or a rehearsal from a branch that predates the lock.
