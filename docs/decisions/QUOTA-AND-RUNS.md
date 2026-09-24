@@ -437,6 +437,55 @@ already installed as `requests`' own dependency; `Retry` is imported from
 than through `requests.adapters`, which re-exports it without declaring it
 public.
 
+## `internetarchive` is pinned exactly
+
+*Decided 2026-09-23, closing issue #51.*
+
+`requirements.txt` pins `internetarchive==5.11.1` and bounds `urllib3<3`.
+This departs from "use the latest" on purpose. The two decisions above depend
+on the library's internals, not its public API: the re-raise inside
+`Item.upload_file()` that keeps `response=`, the metadata re-raise that keeps
+the original in `__context__`, and the retry defaults in
+`mount_http_adapter()` that `IA_RETRY` copies. A floor (`>=5.0`) meant
+whatever release was current on the day a venv was built. Nothing re-checks
+that on the Mac, because `install.sh` installs but does not test. The failure
+would be safe (rows fail one at a time), but it would come from an upgrade
+that nobody chose.
+
+`urllib3` gets a ceiling rather than a pin. It arrives through `requests`
+anyway, and `BoundedRetryAfter` relies only on `Retry`'s long-standing
+`get_retry_after()` / `new()` shape. A major version could change that shape.
+There is no lock file. The other dependencies are not in the retry path, so
+they keep their floors.
+
+`test_installed_internetarchive_is_the_pinned_version` fails whenever the
+installed library is not the pinned one. The contract tests in step 3 only vouch
+for the version they actually ran against, so this test keeps them honest.
+
+**Bumping the pin:**
+
+1. Install the candidate into a separate venv. Diff its `internetarchive/`
+   package against the pinned one's, ignoring line endings.
+2. Re-read the pieces named above: `Item.upload_file()`'s `HTTPError`
+   re-raise and its 503-only `retries` loop, `ArchiveSession.get_metadata()`'s
+   re-raise, `mount_http_adapter()`'s `Retry` fields and the hosts it mounts
+   on, the path `http_adapter_kwargs` takes from `upload()` /
+   `modify_metadata()` / `get_item()` to `get_session()`, and
+   `config.py`'s `parse_config_file()` order (DEPLOYMENT.md §6).
+3. Run the contract tests against the candidate:
+   `test_ia_retry_matches_the_librarys_own_policy_except_for_raise_on_status`,
+   `test_is_rate_limit_error_reads_the_structured_status_from_requests_httperror`,
+   `test_upload_row_retries_a_transient_failure_from_the_library`. Then run
+   the whole suite.
+4. Change the pin, and record the re-check here.
+
+**Re-checks:** the retry and status work was traced on 5.10.1 (the version
+named in the passages above). 5.11.1 was re-traced on 2026-09-23. Almost all
+of its diff is reformatting and type hints. The only behavioral changes were
+the task-log host in `catalog.py`, which this tool never calls, and
+`Requires-Python >=3.10`, which already matched. Every item in step 2 was
+unchanged.
+
 ## Every recorded timestamp is UTC
 
 *Decided 2026-08-23.*

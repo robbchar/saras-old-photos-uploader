@@ -104,6 +104,7 @@ run writes down about itself.
 - [Rate-limit detection uses a parsed status code, never message text](decisions/QUOTA-AND-RUNS.md#rate-limit-detection-uses-a-parsed-status-code-never-message-text)
 - [Retry covers transport failures, never refusals](decisions/QUOTA-AND-RUNS.md#retry-covers-transport-failures-never-refusals)
 - [A status the metadata call strips is recovered, still without reading text](decisions/QUOTA-AND-RUNS.md#a-status-the-metadata-call-strips-is-recovered-still-without-reading-text)
+- [`internetarchive` is pinned exactly](decisions/QUOTA-AND-RUNS.md#internetarchive-is-pinned-exactly)
 - [Every recorded timestamp is UTC](decisions/QUOTA-AND-RUNS.md#every-recorded-timestamp-is-utc)
 - ["Unchanged" is a third outcome, not a failure](decisions/QUOTA-AND-RUNS.md#unchanged-is-a-third-outcome-not-a-failure)
 

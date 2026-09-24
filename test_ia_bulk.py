@@ -5402,7 +5402,7 @@ def test_is_rate_limit_error_does_not_match_status_codes_that_merely_contain_429
 
 
 def test_is_rate_limit_error_reads_the_structured_status_from_requests_httperror():
-    """Verified path from tracing the installed internetarchive 5.10.1's
+    """Verified path from tracing the pinned internetarchive's
     Item.upload_file(): a real S3 failure surfaces as
     `requests.exceptions.HTTPError` re-raised with `response=exc.response`
     passed through unchanged, even though the message text has been rebuilt
@@ -5592,7 +5592,7 @@ def test_retry_delay_grows_and_never_returns_zero():
 
 def test_upload_row_retries_a_transient_failure_from_the_library(tmp_path, monkeypatch):
     """The S3 transfer is the one IA call with no retry of any kind
-    underneath it: internetarchive 5.10.1 deliberately does NOT mount its
+    underneath it: the pinned internetarchive deliberately does NOT mount its
     retrying HTTP adapter on s3.us.archive.org (session.py: "IA-S3 requires a
     more complicated retry workflow"), and upload_file()'s own `retries`
     argument defaults to 0 and only ever fires on a 503. This is the case the
@@ -5873,6 +5873,17 @@ def test_ia_retry_matches_the_librarys_own_policy_except_for_raise_on_status():
     assert library_default.allowed_methods is not None
     assert set(IA_RETRY.allowed_methods) == set(library_default.allowed_methods)
     assert IA_RETRY.respect_retry_after_header == library_default.respect_retry_after_header
+
+
+def test_installed_internetarchive_is_the_pinned_version():
+    """The library-contract tests above only vouch for the version they ran
+    against, so that must be the exact version requirements.txt ships."""
+    requirements = (Path(ia_bulk.__file__).parent / "requirements.txt").read_text()
+
+    pin = re.search(r"^internetarchive==(\S+)$", requirements, re.MULTILINE)
+
+    assert pin is not None, "requirements.txt must pin internetarchive with =="
+    assert internetarchive.__version__ == pin.group(1)
 
 
 def test_upload_row_asks_for_the_status_preserving_adapter(tmp_path, monkeypatch):

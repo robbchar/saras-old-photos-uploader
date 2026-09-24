@@ -248,7 +248,7 @@ credentials file that the library then reads.
 
 **Where it writes.** Reading `internetarchive`'s own source
 (`internetarchive/config.py`, `parse_config_file()` — this repo pins
-`internetarchive>=5.0`), the config file is chosen in this order, and the
+`internetarchive==5.11.1`), the config file is chosen in this order, and the
 first one that already exists wins:
 
 1. the `IA_CONFIG_FILE` environment variable, if set
@@ -549,6 +549,10 @@ The same command as install day — there is no separate upgrade path. It
 converges whatever the new checkout needs (new dependencies, key permissions)
 and leaves the agent alone: an enabled agent stays loaded, and one never
 enabled stays that way.
+
+`internetarchive` is pinned to an exact version, so the library changes only
+when a `git pull` moves that pin, never just because a newer release is out.
+Why, and how the pin is bumped: [QUOTA-AND-RUNS.md](decisions/QUOTA-AND-RUNS.md#internetarchive-is-pinned-exactly).
 
 **If the plist changed, the running agent is still the old one.** When a
 `git pull` changes what the agent should run, `doctor` and `setup` report
