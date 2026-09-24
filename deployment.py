@@ -476,9 +476,8 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path, install: Install
 
 
 def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) -> Check:
-    # Relative, as the operator reads them from the checkout they run install.sh in.
-    stdout_log = spec.stdout_path.relative_to(spec.working_directory).as_posix()
-    stderr_log = spec.stderr_path.relative_to(spec.working_directory).as_posix()
+    # Relative, as the operator reads it from the checkout they run install.sh in.
+    agent_log = spec.log_path.relative_to(spec.working_directory).as_posix()
 
     def probe() -> CheckOutcome:
         output = platform_probe.launchctl_print(spec.label)
@@ -499,7 +498,7 @@ def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) ->
         name="launch agent loaded",
         probe=probe,
         remedy=(
-            f"read {stdout_log} and {stderr_log} for why the last run failed; to "
+            f"read {agent_log} for why the last run failed; to "
             "reload the agent, "
             "log in as the operating account and run "
             f"{install.render(enable_agent=True)}"

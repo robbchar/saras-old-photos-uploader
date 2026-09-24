@@ -2057,6 +2057,18 @@ def test_cmd_validate_prints_live_mode_and_the_real_sheet_id_when_live(tmp_path,
     assert "TEST_SHEET_ID" not in out
 
 
+def test_sheet_banner_leads_with_the_utc_timestamp(monkeypatch):
+    """The agent's log file has no other clock: the banner dates each run."""
+    from ia_bulk import sheet_banner
+
+    monkeypatch.setattr("ia_bulk.utc_timestamp", lambda: "2026-09-24T17:00:00Z")
+
+    assert sheet_banner(_sheet_config(), live=True) == (
+        "2026-09-24T17:00:00Z project 'astoriaphotos': live mode, "
+        "spreadsheet 'REAL_SHEET_ID', tab 'Sheet1'"
+    )
+
+
 def test_cmd_validate_injects_mediatype_from_the_registry_not_a_hardcoded_value(tmp_path, monkeypatch):
     """Every existing fixture happens to use mediatype="image", so a
     hardcoded row["mediatype"] = "image" would pass all of them - proving
@@ -8269,6 +8281,25 @@ def test_sync_from_sheet_refuses_missing_sync_columns_in_live_mode_too(
     assert exit_code == 1
     assert sent == []
     assert "ia_sync_hash" in capsys.readouterr().err
+
+
+def test_sync_from_sheet_dates_its_first_line_even_when_it_refuses(tmp_path, monkeypatch, capsys):
+    """A setup refusal writes no JSONL, so the agent's log line is its only dated record."""
+    from ia_bulk import cmd_sync_metadata
+
+    monkeypatch.setattr("ia_bulk.utc_timestamp", lambda: "2026-09-24T17:00:00Z")
+    live_url = "https://archive.org/details/lcps-astoriaphotos-00001"
+    grid = [SHEET_HEADER] + [[
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", live_url, "photo1.jpg",
+    ]]
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, [])
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 1
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line.startswith("2026-09-24T17:00:00Z project 'astoriaphotos': live mode")
 
 
 def test_sync_from_sheet_refuses_a_sheet_without_ia_identifier_bib(

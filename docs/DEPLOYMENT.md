@@ -517,8 +517,11 @@ you just started is syncing:
 
 ```bash
 .venv/bin/python ia_bulk.py doctor --project <project> --live
-tail -20 logs/launchagent-<project>.err
+tail -20 logs/launchagent-<project>.log
 ```
+
+The agent writes both its output and its errors to that one file. Each run
+starts with a line giving the UTC time, the project, the mode and the Sheet.
 
 ## 13. Uninstalling the agent
 

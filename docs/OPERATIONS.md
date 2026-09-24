@@ -442,10 +442,10 @@ or hourly by a LaunchAgent on the Mac, which
 `./install.sh --project sarasoldphotos --live --enable-agent` installs once
 the first live runs are verified — see
 [`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync). The agent's
-runs print to `logs/launchagent-sarasoldphotos.out` and `.err` instead of a
-screen, and `doctor --live`'s `launch agent loaded` line says whether its last
-run exited 0. Whichever way it gets run, most runs have nothing to do, and it
-says so:
+runs print to `logs/launchagent-sarasoldphotos.log` instead of a screen, each
+one starting with a UTC-dated line, and `doctor --live`'s `launch agent loaded`
+line says whether its last run exited 0. Whichever way it gets run, most runs
+have nothing to do, and it says so:
 
 ```
 nothing to sync - all 3,842 uploaded rows already match their last push

@@ -292,8 +292,9 @@ correct for a hand-run command over a few hundred rows and stopped holding at
 ~4,000 rows on an hourly schedule (issue #27; the hash gate itself is issue
 #24). That schedule is now a LaunchAgent that
 `./install.sh --project <project> --live --enable-agent` installs — see
-[`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync); its output goes
-to `logs/launchagent-<project>.out` and `.err`, and `doctor`'s
+[`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync); its stdout and
+stderr both go to `logs/launchagent-<project>.log`, each run starting with a
+UTC-dated banner, and `doctor`'s
 `launch agent loaded` check reports its last exit. See
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 IA's *no changes to `_meta.xml`* response still becomes `MetadataUnchanged`

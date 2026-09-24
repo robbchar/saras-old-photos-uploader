@@ -17,8 +17,8 @@ class AgentSpec:
     label: str
     program_arguments: list[str]
     interval: int
-    stdout_path: Path
-    stderr_path: Path
+    # launchd writes both stdout and stderr here, in the order they happened.
+    log_path: Path
     working_directory: Path
 
 
@@ -30,6 +30,8 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
         label=f"{LABEL_PREFIX}.{project_id}",
         program_arguments=[
             str(repo_root / ".venv" / "bin" / "python"),
+            # Unbuffered, so stdout and stderr lines reach the shared log in order.
+            "-u",
             str(repo_root / "ia_bulk.py"),
             "sync-metadata",
             "--project",
@@ -39,8 +41,7 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
             str(registry_path),
         ],
         interval=HOURLY,
-        stdout_path=repo_root / "logs" / f"launchagent-{project_id}.out",
-        stderr_path=repo_root / "logs" / f"launchagent-{project_id}.err",
+        log_path=repo_root / "logs" / f"launchagent-{project_id}.log",
         working_directory=repo_root,
     )
 
@@ -55,8 +56,8 @@ def render_plist(spec: AgentSpec) -> str:
         "StartInterval": spec.interval,
         "RunAtLoad": True,
         "WorkingDirectory": str(spec.working_directory),
-        "StandardOutPath": str(spec.stdout_path),
-        "StandardErrorPath": str(spec.stderr_path),
+        "StandardOutPath": str(spec.log_path),
+        "StandardErrorPath": str(spec.log_path),
     }
     return plistlib.dumps(body).decode("utf-8")
 
@@ -70,8 +71,7 @@ def write_plist(spec: AgentSpec, home: Path) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     # launchd does not create intermediate directories for stdio redirection, and
     # logs/ is gitignored - absent on a fresh clone, so the job would not spawn.
-    for stdio_path in (spec.stdout_path, spec.stderr_path):
-        stdio_path.parent.mkdir(parents=True, exist_ok=True)
+    spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     # newline="\n": text mode would emit CRLF on Windows, so plist_is_current
     # would never match what render_plist produces.
     target.write_text(render_plist(spec), encoding="utf-8", newline="\n")

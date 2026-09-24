@@ -59,9 +59,21 @@ def test_render_plist_is_parseable_and_carries_the_interval(tmp_path):
 
 
 def test_render_plist_uses_absolute_program_paths(tmp_path):
-    parsed = plistlib.loads(launch_agent.render_plist(a_spec(tmp_path)).encode("utf-8"))
-    assert Path(parsed["ProgramArguments"][0]).is_absolute()
-    assert Path(parsed["ProgramArguments"][1]).is_absolute()
+    arguments = plistlib.loads(launch_agent.render_plist(a_spec(tmp_path)).encode("utf-8"))["ProgramArguments"]
+    script = next(argument for argument in arguments if argument.endswith("ia_bulk.py"))
+    assert Path(arguments[0]).is_absolute()
+    assert Path(script).is_absolute()
+
+
+def test_sync_agent_spec_runs_python_unbuffered(tmp_path):
+    # Both streams share one file; buffered stdout would land after stderr written later.
+    assert a_spec(tmp_path).program_arguments[1] == "-u"
+
+
+def test_render_plist_sends_stdout_and_stderr_to_one_log_file(tmp_path):
+    parsed = plistlib.loads(launch_agent.render_plist(a_spec(tmp_path, "demo")).encode("utf-8"))
+    assert parsed["StandardOutPath"] == parsed["StandardErrorPath"]
+    assert Path(parsed["StandardOutPath"]).name == "launchagent-demo.log"
 
 
 def test_render_plist_runs_at_load(tmp_path):
@@ -117,7 +129,6 @@ def test_write_plist_creates_the_stdio_directory_launchd_will_not(tmp_path):
     intermediate directories for StandardOutPath/StandardErrorPath, so the job
     either fails to spawn or its output vanishes."""
     spec = a_spec(tmp_path)
-    assert not spec.stderr_path.parent.exists()
+    assert not spec.log_path.parent.exists()
     launch_agent.write_plist(spec, tmp_path / "home")
-    assert spec.stdout_path.parent.is_dir()
-    assert spec.stderr_path.parent.is_dir()
+    assert spec.log_path.parent.is_dir()

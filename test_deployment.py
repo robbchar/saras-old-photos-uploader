@@ -553,13 +553,12 @@ def test_agent_loaded_check_remedy_is_a_command_setup_accepts(tmp_path):
     assert "--live --enable-agent" in remedy
 
 
-def test_agent_loaded_check_remedy_names_the_real_project_and_its_logs(tmp_path):
+def test_agent_loaded_check_remedy_names_the_real_project_and_its_log(tmp_path):
     remedy = deployment.agent_loaded_check(
         launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"), DEMO_INSTALL
     ).remedy
     assert "./install.sh --project demo --live --enable-agent" in remedy
-    assert "logs/launchagent-demo.out" in remedy
-    assert "logs/launchagent-demo.err" in remedy
+    assert "read logs/launchagent-demo.log for why" in remedy
 
 
 def test_agent_plist_check_has_no_fix_so_only_enable_agent_writes_it(tmp_path):

@@ -492,6 +492,42 @@ reason, so a directory listing sorts in the order the runs actually happened.
 **2026-09-23:** `--resume-from` was removed with the CSV paths (#44). The
 tool no longer reads its logs back; only audits do.
 
+## The agent's output is one dated file, never rotated
+
+*Decided 2026-09-24 (#52).*
+
+The LaunchAgent used to send stdout and stderr to two files,
+`logs/launchagent-<project>.out` and `.err`, and no line in either said when
+it was written. For some failures those files are the only record. A refusal
+before the run log opens writes no JSONL and no log-tab row: a placeholder
+`sheet_id`, a rejected key, a Sheet that could not be read, the sync header
+refusal, no data rows, no row marked uploaded yet. Sync also split its
+reasons across the pair, with setup refusals on stderr and run-time exit-1
+reasons on stdout, so reading one file could miss why a run failed.
+
+Both streams now go to one `logs/launchagent-<project>.log`. The agent runs
+Python with `-u`, so lines from the two streams land in the order they were
+written. `sheet_banner()`, the first line every Sheet-path command prints,
+leads with `utc_timestamp()`, so every run that reaches it starts with a dated
+line. A failure before the banner stays undated: a registry that will not
+load, an argument the parser rejects, an interpreter that will not start. Most
+follow a `git pull` or an install, when someone is at the machine running
+`doctor`. The exception is a hand edit that breaks `projects_registry.json`
+on the Mac. From then on, every hourly run appends an undated traceback until
+someone fixes the file, and `doctor`'s `launch agent loaded` line is what
+shows the failing exit.
+
+The file is not rotated. On a one-field test Sheet, a quiet hourly run adds 7
+lines and 354 bytes. The real Sheet's field receipt is longer, but a year
+still comes to a few MB.
+
+Once any row is marked uploaded, hourly sync also writes one JSONL run log
+per run, the quiet ones included, because "ran and found nothing to do" has to
+stay distinguishable from "did not run". That is about 8,760 files a year in
+`logs/`, each a few KB (2.9 KB on the same test Sheet). Accepted: they are
+what an audit reads, and their count costs a directory listing, not
+correctness. Pruning old quiet-run logs would be its own change.
+
 ## "Unchanged" is a third outcome, not a failure
 
 IA returns HTTP 400 with `{"error": "no changes to _meta.xml"}` when a

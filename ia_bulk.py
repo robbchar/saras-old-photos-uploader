@@ -2060,10 +2060,13 @@ def sheet_banner(config: ProjectConfig, live: bool) -> str:
     never touch the real Sheet - so which spreadsheet and tab back it is
     printed unconditionally, not just on success. A human staring at a report
     has to be able to confirm at a glance that they are pointed where they
-    think they are."""
+    think they are.
+
+    It leads with the time because the LaunchAgent's log file has no other
+    clock, and a run refused before its JSONL opens leaves no other record."""
     mode = "live" if live else "test"
     return (
-        f"project '{config.project_id}': {mode} mode, "
+        f"{utc_timestamp()} project '{config.project_id}': {mode} mode, "
         f"spreadsheet '{config.sheet_id_for(live)}', tab '{config.sheet_tab}'"
     )
 
