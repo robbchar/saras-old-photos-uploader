@@ -103,6 +103,7 @@ run writes down about itself.
 - [A run is scoped to a batch by value; the column is registry configuration](decisions/QUOTA-AND-RUNS.md#a-run-is-scoped-to-a-batch-by-value-the-column-is-registry-configuration)
 - [A run may not exceed Internet Archive's daily item cap](decisions/QUOTA-AND-RUNS.md#a-run-may-not-exceed-internet-archives-daily-item-cap)
 - [Rate-limit detection uses a parsed status code, never message text](decisions/QUOTA-AND-RUNS.md#rate-limit-detection-uses-a-parsed-status-code-never-message-text)
+- [The rate-limit stop names no cause it cannot see](decisions/QUOTA-AND-RUNS.md#the-rate-limit-stop-names-no-cause-it-cannot-see)
 - [Retry covers transport failures, never refusals](decisions/QUOTA-AND-RUNS.md#retry-covers-transport-failures-never-refusals)
 - [A status the metadata call strips is recovered, still without reading text](decisions/QUOTA-AND-RUNS.md#a-status-the-metadata-call-strips-is-recovered-still-without-reading-text)
 - [Every recorded timestamp is UTC](decisions/QUOTA-AND-RUNS.md#every-recorded-timestamp-is-utc)
@@ -164,7 +165,14 @@ run writes down about itself.
   stays open is only whether IA's response is distinguishable when the cap is
   hit anyway, e.g. across two runs in one day, which the tool does not track.
   `--limit` (see "`--limit` counts planned targets..." above) remains the
-  operator-controlled fallback either way.
+  operator-controlled fallback either way. **2026-09-24:** the first real
+  rate-limit response arrived, in a test-mode rehearsal against archive.org —
+  a queue throttle ("total_tasks_queued exceeds global_limit"), not the daily
+  cap — and the detector stopped the run on it. Its status code was not logged
+  then; every failure now records `http_status`, so the next one will show
+  whether IA's two limits differ by status. The stop message no longer claims
+  the daily cap (see "The rate-limit stop names no cause it cannot see" in
+  `decisions/QUOTA-AND-RUNS.md`).
 - ~~How a run establishes the next free `NUMBER`~~ **Settled 2026-08-08**:
   reserve in the Sheet before uploading, and track completion in an
   `ia_uploaded` column so an interrupted run is recoverable.

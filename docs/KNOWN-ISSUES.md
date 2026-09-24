@@ -162,7 +162,7 @@ the row was never marked done, so the operator re-ran to chase a flake.
 `update_metadata_row()`: three attempts, backing off ~2s then ~4s with jitter.
 It retries connection errors, timeouts and 500/502/504, and does **not** retry
 refusals (403, 400, any 4xx) or 429/503 — those still stop the run so the
-operator resumes tomorrow. Reading `internetarchive` 5.10.1's source showed
+operator resumes later. Reading `internetarchive` 5.10.1's source showed
 the real gap was the S3 file transfer, which had no retry of any kind, rather
 than the metadata read, which already had three. See
 [`DECISIONS.md`](decisions/QUOTA-AND-RUNS.md#retry-covers-transport-failures-never-refusals).

@@ -612,9 +612,11 @@ cap. Both values are recorded in the run's
 `run_header` log line (`ARCHITECTURE.md`, "Logging and resume") so a later
 read of the log shows exactly what each run was capped at. If Internet
 Archive's own rate limit shows up mid-run, the run now stops cleanly instead
-of continuing to grind through failures — but that detection is best-effort
-and unverified against a real response (`DECISIONS.md`, "Rate-limit
-detection matches a status code..."), so treat `--limit` as the dependable
+of continuing to grind through failures and names the HTTP status IA sent —
+see "Resuming after a rate-limit stop" below for which limit that may be. The
+detection is best-effort and has fired on one real response so far
+(`DECISIONS.md`, "Rate-limit detection uses a parsed status code, never
+message text"), so treat `--limit` as the dependable
 control and the detector as a bonus, not the other way around.
 
 `upload --batch "<value>"` scopes a run to one batch — the rows whose
@@ -648,11 +650,13 @@ Every run also writes `logs/<command>-<timestamp>.jsonl`, one line per row:
 
 ```json
 {"identifier": "...", "file": "...", "status": "success|unchanged|failure|unconfirmed",
- "error": null, "uploaded_as": "...", "live": false, "timestamp": "..."}
+ "error": null, "http_status": null, "uploaded_as": "...", "live": false, "timestamp": "..."}
 ```
 
 `identifier` is the real, permanent identifier; `uploaded_as` is what was
-actually sent to IA. `unconfirmed` means the item
+actually sent to IA. `http_status` is the HTTP status IA answered a `failure`
+with (`403`, `503`, ...), or `null` when there was none — a timeout or a
+dropped connection. `unconfirmed` means the item
 reached Internet Archive but the Sheet could not be updated, because the row
 no longer held the identifier the run reserved — someone edited the Sheet
 mid-run. Rerun once it has settled; the row is picked up as reserved-but-
@@ -691,7 +695,7 @@ above) rather than being waited out row by row.
 
 If Internet Archive sends a `Retry-After` header, it is honoured — but never
 for longer than 30 seconds. A longer one is treated as "stop the run and come
-back tomorrow" rather than sleeping through it, so a run cannot silently
+back later" rather than sleeping through it, so a run cannot silently
 stall for an hour inside a single row.
 
 **What this has and has not been tested against.** The retry and rate-limit
@@ -699,9 +703,28 @@ handling is exercised against a fault-injecting stand-in for
 `s3.us.archive.org` and a local server answering real status codes, so how
 the `internetarchive` library behaves for a given response is settled. What is
 *not* settled is what Internet Archive actually sends — whether the daily cap
-arrives as a 429/503 at all, and how a genuinely slow multi-megabyte upload
-behaves. No `--live` run has ever happened. Treat `--limit` as the dependable
+arrives as a 429/503 at all (the one real rate limit seen so far was the queue
+throttle below), and how a genuinely slow multi-megabyte upload behaves. No
+`--live` run has ever happened. Treat `--limit` as the dependable
 control and watch the first real run.
+
+### Resuming after a rate-limit stop
+
+A rate-limited run ends like this:
+
+```
+stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+```
+
+The tool cannot tell which of IA's limits it hit, so read the `failure` line
+just above the stop, or the last `failure` record in the log. On 2026-09-24 a
+rehearsal was stopped by *"Please reduce your request rate. -
+total_tasks_queued exceeds global_limit"*: IA's task queue was busy, not this
+account's daily cap, so a rerun later the same day is worth trying. If today's
+runs together have already sent close to 5,000 items, wait until tomorrow.
+Either way the rerun resumes by itself. The status is also in the log, as the
+failure record's `http_status` and the `run_summary`'s `rate_limit_status`.
 
 ## Reading a run
 
@@ -716,7 +739,8 @@ grep '"status": "failure"' logs/upload-20260712T125326.jsonl
 Every real run also ends with a `run_summary` line — `tail -1` of its log
 gives the whole run in one record, without the row lines above it. For
 `upload` that is `attempted` / `succeeded`, a `failures` list, an
-`unconfirmed` list, `not_attempted` and `rate_limited`. Read `unconfirmed`
+`unconfirmed` list, `not_attempted`, `rate_limited` and `rate_limit_status`.
+Read `unconfirmed`
 first: those files **are** on Internet Archive but were never marked in the
 Sheet, so the next run would upload them again under a second identifier.
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).

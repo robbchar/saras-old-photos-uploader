@@ -252,8 +252,10 @@ If an upload fails with what `is_rate_limit_error()` recognizes as
 Internet Archive's rate limit, `SheetUploadRun.execute()` stops the whole
 run after confirming whatever it already uploaded in the current chunk (and
 any earlier chunk), rather than treating it as one more per-row failure and
-continuing. This detector is best-effort, not confirmed against a real
-rate-limit response — see `DECISIONS.md`, "Still open".
+continuing. The stop names the parsed status but not a cause, because a 503
+does not say which of IA's limits fired. The detector has fired on one real
+response so far (a queue throttle, 2026-09-24) — see `DECISIONS.md`, "Still
+open".
 
 ## Progress output
 `upload`/`sync-metadata` print a `[position/total] ...` line to stdout
@@ -479,7 +481,7 @@ skipped}`. The counts mean:
 #### `upload`
 
 `{… attempted, succeeded, failures, unconfirmed, not_attempted,
-rate_limited, skipped}`. The counts mean:
+rate_limited, rate_limit_status, skipped}`. The counts mean:
 
 | field | meaning |
 | --- | --- |
@@ -488,7 +490,8 @@ rate_limited, skipped}`. The counts mean:
 | `failures` | `{identifier, error}` per row IA refused. Nothing was created and the identifier is still free. |
 | `unconfirmed` | `{identifier, error}` per row that IS on Internet Archive but was never marked in the Sheet. |
 | `not_attempted` | rows the run stopped short of. See the overlap note below. |
-| `rate_limited` | `true` when IA said *slow down* and the run stopped early rather than finishing. |
+| `rate_limited` | `true` when IA said *slow down* and the run stopped early rather than finishing. Derived: `rate_limit_status` is not `null`. |
+| `rate_limit_status` | the parsed status (`429` or `503`) the run stopped on, else `null`. It does not say which of IA's limits fired. |
 | `skipped` | `{identifier, error}` per row nothing was sent for — held back by validation, or moved in the Sheet mid-run. |
 
 `unconfirmed` is the one to read first. A refused send is recoverable by
@@ -547,7 +550,9 @@ but it is not something to expect varying in `logs/*.jsonl`.
 `identifier` is always the real, permanent identifier. `uploaded_as` is the
 identifier actually sent to IA for that row (see "Safety rail" below), so
 you can see exactly what landed on the site. `live` records which mode
-(test vs. `--live`) produced that row's result.
+(test vs. `--live`) produced that row's result. `http_status` is the status
+`parsed_status_code()` found on a `failure` (never read from the message), and
+`null` on every other record or when the failure carried none.
 
 A rerun resumes by itself: `ia_uploaded` is the record of what is done, so
 done rows are skipped and a reserved row is retried under its existing
