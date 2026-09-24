@@ -985,8 +985,8 @@ def effective_identifier(identifier: str, live: bool, stamp: str) -> str:
 #    base of HTTPError) stores whatever Response object it is given as
 #    `.response` in its own __init__ (`self.response = kwargs.pop
 #    ("response", None)` - verified by reading requests' source directly,
-#    not assumed). Tracing the installed internetarchive 5.10.1's
-#    Item.upload_file() - the method upload_row() actually reaches via
+#    not assumed). Tracing the pinned internetarchive's (traced on 5.10.1,
+#    re-checked on 5.11.1) Item.upload_file() - the method upload_row() actually reaches via
 #    internetarchive.upload() -> Item.upload() - shows that on a real S3
 #    failure it catches the resulting HTTPError and re-raises via
 #    `raise type(exc)(error_msg, response=exc.response, request=exc.request)`.
@@ -999,8 +999,8 @@ def effective_identifier(identifier: str, live: bool, stamp: str) -> str:
 #    live rate limit surfacing through the real library's own exception,
 #    not only upload_row()'s own not-ok-Response branch.
 #
-# 503 is Internet Archive's documented S3 overload signal (the installed
-# internetarchive 5.10.1's own `ia upload --retries` help text: "Number of
+# 503 is Internet Archive's documented S3 overload signal (the pinned
+# internetarchive's, traced on 5.10.1 and re-checked on 5.11.1, own `ia upload --retries` help text: "Number of
 # times to retry request if S3 returns a 503 SlowDown error"). 429 is not
 # IA-upload-specific documentation, but session.py's default urllib3 Retry
 # status_forcelist ([429, 500, 501, 502, 503, 504]) shows the library's own
@@ -1041,7 +1041,8 @@ RATE_LIMIT_STATUS_CODES = (429, 503)
 #
 # The retrying itself is unchanged: same total, same forcelist, same backoff.
 # Only how the give-up is reported changes. Everything else is copied from
-# internetarchive 5.10.1's session.mount_http_adapter() so that replacing the
+# the pinned internetarchive's session.mount_http_adapter() (traced on 5.10.1,
+# re-checked on 5.11.1) so that replacing the
 # library's policy does not silently alter what it retries or how often - and
 # a test pins that equality against a session the library builds itself, so
 # a future version changing its defaults fails loudly rather than quietly.
@@ -1170,8 +1171,8 @@ class UploadFailed(RuntimeError):
         self.status_code = status_code
 
 
-# Retry exists for one specific gap. The installed internetarchive 5.10.1
-# mounts a retrying HTTP adapter - urllib3 Retry(total=3, connect=3, read=3,
+# Retry exists for one specific gap. The pinned internetarchive (traced on
+# 5.10.1, re-checked on 5.11.1) mounts a retrying HTTP adapter - urllib3 Retry(total=3, connect=3, read=3,
 # backoff_factor=1) - in ArchiveSession.__init__, but ONLY on archive.org,
 # and deliberately not on s3.us.archive.org (session.py: "Don't mount on
 # s3.us.archive.org, only archive.org! IA-S3 requires a more complicated
