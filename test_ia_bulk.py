@@ -7553,12 +7553,9 @@ def test_read_sheet_snapshot_exposes_the_column_map():
     to detect that they moved, the same way upload compares SheetColumns.
     The snapshot already builds a ColumnMap; keeping it costs nothing and
     saves a second parse of the same grid."""
-    from typing import cast
-
     from ia_bulk import read_sheet_snapshot
-    from sheet_client import SheetClient
 
-    client = cast(SheetClient, FakeSheetClient(_synced_grid()))
+    client = FakeSheetClient(_synced_grid())
     snapshot = read_sheet_snapshot(client, "{file}")
 
     assert snapshot.column_map.field_names["ia_sync_hash"] == "ia_sync_hash"
