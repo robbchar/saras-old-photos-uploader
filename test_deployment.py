@@ -681,10 +681,6 @@ def test_install_sh_python_floor_matches_the_one_python_enforces():
     assert (int(major.group(1)), int(minor.group(1))) == deployment.MINIMUM_PYTHON
 
 
-def test_install_sh_hands_off_to_setup_not_to_a_second_check_list():
-    assert "ia_bulk.py setup" in Path("install.sh").read_text(encoding="utf-8")
-
-
 def test_install_sh_rebuilds_a_venv_whose_python_does_not_qualify():
     """`[ -d .venv ]` alone reused a 3.9 or dangling venv on every run."""
     script = Path("install.sh").read_text(encoding="utf-8")

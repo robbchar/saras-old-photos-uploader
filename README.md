@@ -112,6 +112,10 @@ commands also need the Google service account key saved at
 
 ## Commands
 
+Spell options out in full. `--dry` is refused rather than read as
+`--dry-run`, so an old flag name that is a prefix of its renamed flag fails
+instead of silently matching it.
+
 ### `validate` — check a project's Sheet, no writes
 
 `--project` is required (it looks up the project's block in
