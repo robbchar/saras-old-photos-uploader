@@ -65,6 +65,7 @@ STEP_8 = "step 8 - edit reached IA (OPERATIONS pre-live checklist: zztest item e
 STEP_9 = "step 9 - quiet sync (OPERATIONS 'Rehearsing the log tabs' step 3, second run)"
 STEP_10 = "step 10 - tabs match log files (OPERATIONS 'Rehearsing the log tabs' step 4)"
 STEP_11 = "step 11 - only expected cells changed (OPERATIONS 'Rehearsing the log tabs' step 5)"
+STEP_12 = "step 12 - restore the broken filename (OPERATIONS 'Rehearsing the log tabs' step 2: put the cell back)"
 
 Found = TypeVar("Found")
 
@@ -271,14 +272,23 @@ def test_rehearsal(tmp_path):
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
     final = sheet.grid()
+    expect(STEP_11, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
     unexpected = [
         f"row {row_index + 1} {column!r}: {fixture[row_index][column_index]!r} -> {final[row_index][column_index]!r}"
         for row_index in range(len(fixture))
         for column_index, column in enumerate(header)
         if final[row_index][column_index] != fixture[row_index][column_index] and (row_index, column) not in allowed
     ]
-    expect(STEP_11, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
     expect(STEP_11, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
+
+    restored_filename = fixture[BROKEN_ROW][header.index("File Name")]
+    sheet.edit(BROKEN_ROW, "File Name", restored_filename)
+    grid_after_restore = sheet.grid()
+    expect(
+        STEP_12,
+        sheet.cell(grid_after_restore, BROKEN_ROW, "File Name") == restored_filename,
+        "the broken filename was not restored",
+    )
 
 
 def test_print_for_console_survives_a_non_utf8_console(monkeypatch):

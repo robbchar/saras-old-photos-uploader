@@ -99,7 +99,7 @@ def tab_ids(service: Any, sheet_id: str) -> dict[str, int]:
 
 
 def reset_test_sheet(service: Any, target: E2ESheet, grid: list[list[str]]) -> None:
-    """Replace the data tab with `grid` and delete both log tabs, so the next run recreates them."""
+    """Replace the data tab with `grid` and delete each log tab that exists, so the next run recreates them."""
     values = service.spreadsheets().values()
     values.clear(spreadsheetId=target.sheet_id, range=quote_tab(target.data_tab), body={}).execute()
     values.update(
