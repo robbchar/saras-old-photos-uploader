@@ -109,11 +109,6 @@ DAILY_ITEM_CAP = 5000
 TEST_COLLECTION = "test_collection"
 TEST_IDENTIFIER_PREFIX = "zztest-"
 UNDATED_PLACEHOLDER = "[n.d.]"
-# projects_registry.json ships sheet_id/test_sheet_id as REPLACE_WITH_* until
-# someone edits in the real Google Sheet ID. Checked before ever asking
-# Google about it, so an unreplaced placeholder fails with a message naming
-# the fix (edit the registry) instead of an opaque 404/permission error.
-PLACEHOLDER_SHEET_ID_PREFIX = "REPLACE_WITH"
 
 # The four columns this tool writes. All `ia_`-prefixed so they cannot collide
 # with a header a Sheet author already uses - the real LCPS Sheet's own
@@ -2099,7 +2094,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
     sheet_id = config.sheet_id_for(live)
     mode = "live" if live else "test"
 
-    if sheet_id.startswith(PLACEHOLDER_SHEET_ID_PREFIX):
+    if config.sheet_id_is_placeholder(live):
         print(
             f"the {mode}-mode spreadsheet ID for project '{config.project_id}' is still the "
             f"placeholder '{sheet_id}' - edit it in {args.registry} to the real Google Sheet ID "
@@ -2246,7 +2241,7 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
 
         def read_grid() -> list[list[str]]:
             # Reading a placeholder ID only earns a 404 and a misleading "share it" remedy.
-            if config.sheet_id_for(live).startswith(PLACEHOLDER_SHEET_ID_PREFIX):
+            if config.sheet_id_is_placeholder(live):
                 mode = "live" if live else "test"
                 raise deployment.SheetNotChecked(f"the {mode}-mode sheet_id is still a placeholder")
             if "grid" not in cached_grid:

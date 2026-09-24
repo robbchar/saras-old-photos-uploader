@@ -76,7 +76,7 @@ def test_guard_refuses_a_live_sheet_id_in_any_project(tmp_path):
 def test_guard_refuses_an_e2e_registry_with_a_real_sheet_id(tmp_path):
     e2e_path, live_path = write_registries(tmp_path, e2e_block(sheet_id="some-real-id"), {})
 
-    with pytest.raises(ResetRefused, match="placeholder"):
+    with pytest.raises(ResetRefused, match="placeholder.*'some-real-id'"):
         check_reset_allowed(e2e_path, live_path)
 
 

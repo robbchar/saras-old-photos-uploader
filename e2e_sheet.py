@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ia_bulk import PLACEHOLDER_SHEET_ID_PREFIX
+from project_config import is_placeholder_sheet_id
 from sheet_client import SheetClient, column_letter, quote_tab
 
 E2E_PROJECT = "e2e"
@@ -63,9 +63,9 @@ def check_reset_allowed(
         raise ResetRefused(f"{e2e_registry_path} has no project '{project}'")
 
     own_live_id = str(block.get("sheet_id") or "")
-    if not own_live_id.startswith(PLACEHOLDER_SHEET_ID_PREFIX):
+    if not is_placeholder_sheet_id(own_live_id):
         raise ResetRefused(
-            f"'{project}' sheet_id must stay a {PLACEHOLDER_SHEET_ID_PREFIX}... placeholder so it can never run --live"
+            f"'{project}' sheet_id must stay a placeholder so it can never run --live, but it is '{own_live_id}'"
         )
 
     target = E2ESheet(

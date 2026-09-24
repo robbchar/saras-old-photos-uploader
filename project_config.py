@@ -29,6 +29,16 @@ REQUIRED_KEYS = (
 # the photos under data/.
 DEFAULT_PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".tif", ".tiff", ".png")
 
+# projects_registry.json ships sheet_id/test_sheet_id as REPLACE_WITH_* until
+# someone edits in the real Google Sheet ID. Checked before ever asking
+# Google about it, so an unreplaced placeholder fails with a message naming
+# the fix (edit the registry) instead of an opaque 404/permission error.
+_PLACEHOLDER_SHEET_ID_PREFIX = "REPLACE_WITH"
+
+
+def is_placeholder_sheet_id(sheet_id: str) -> bool:
+    return sheet_id.startswith(_PLACEHOLDER_SHEET_ID_PREFIX)
+
 
 class ConfigError(Exception):
     pass
@@ -88,6 +98,9 @@ class ProjectConfig:
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
+
+    def sheet_id_is_placeholder(self, live: bool) -> bool:
+        return is_placeholder_sheet_id(self.sheet_id_for(live))
 
 
 def unregistered_project_error(registry: dict, project_id: str) -> str | None:

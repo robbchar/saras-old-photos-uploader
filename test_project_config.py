@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from project_config import REQUIRED_KEYS, ConfigError, load_project_config
+from project_config import REQUIRED_KEYS, ConfigError, is_placeholder_sheet_id, load_project_config
 
 REGISTRY = {
     "collection_key": "lcps",
@@ -53,6 +53,34 @@ def test_live_and_test_runs_select_different_sheets():
 
     assert config.sheet_id_for(live=True) == "REAL_SHEET"
     assert config.sheet_id_for(live=False) == "TEST_SHEET"
+
+
+@pytest.mark.parametrize(
+    ("sheet_id", "expected"),
+    [
+        ("REPLACE_WITH_REAL_SHEET_ID", True),
+        ("REPLACE_WITH_NEVER_LIVE", True),
+        ("1fHBL6realSheetId", False),
+        ("", False),
+    ],
+)
+def test_is_placeholder_sheet_id(sheet_id, expected):
+    assert is_placeholder_sheet_id(sheet_id) is expected
+
+
+@pytest.mark.parametrize(
+    ("sheet_id", "test_sheet_id", "live", "expected"),
+    [
+        ("REPLACE_WITH_REAL_SHEET_ID", "1test", True, True),
+        ("REPLACE_WITH_REAL_SHEET_ID", "1test", False, False),
+        ("1real", "REPLACE_WITH_TEST_SHEET_ID", False, True),
+        ("1real", "REPLACE_WITH_TEST_SHEET_ID", True, False),
+    ],
+)
+def test_sheet_id_is_placeholder_judges_only_the_sheet_for_the_mode(sheet_id, test_sheet_id, live, expected):
+    config = load_project_config(_registry(sheet_id=sheet_id, test_sheet_id=test_sheet_id), "p")
+
+    assert config.sheet_id_is_placeholder(live) is expected
 
 
 def test_unknown_project_is_rejected_by_name():

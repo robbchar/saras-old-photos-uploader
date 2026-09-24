@@ -110,7 +110,6 @@ def agent_blocking_failures(results: list[tuple[Check, CheckOutcome]]) -> list[s
 
 
 KEY_MODE = 0o600
-PLACEHOLDER_PREFIX = "REPLACE_WITH"
 
 
 def _is_private(mode: int) -> bool:
@@ -324,9 +323,8 @@ def sheet_id_check(config: ProjectConfig, live: bool, registry_path: str) -> Che
     mode = "live" if live else "test"
 
     def probe() -> CheckOutcome:
-        sheet_id = config.sheet_id_for(live)
-        if sheet_id.startswith(PLACEHOLDER_PREFIX):
-            return CheckOutcome(Status.FAIL, f"{mode}-mode sheet_id is still '{sheet_id}'")
+        if config.sheet_id_is_placeholder(live):
+            return CheckOutcome(Status.FAIL, f"{mode}-mode sheet_id is still '{config.sheet_id_for(live)}'")
         return CheckOutcome(Status.PASS, f"{mode}-mode sheet_id set")
 
     return Check(
