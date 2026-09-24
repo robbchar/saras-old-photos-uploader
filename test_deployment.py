@@ -225,7 +225,9 @@ def test_key_mode_check_fix_chmods_to_600(tmp_path, monkeypatch):
     key.write_text("{}", encoding="utf-8")
     chmodded = []
     monkeypatch.setattr(deployment.platform_probe, "set_file_mode", lambda p, m: chmodded.append((p, m)))
-    deployment.key_mode_check(key).fix()
+    fix = deployment.key_mode_check(key).fix
+    assert fix is not None
+    fix()
     assert chmodded == [(key, 0o600)]
 
 
