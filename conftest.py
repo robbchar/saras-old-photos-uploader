@@ -79,6 +79,7 @@ class _NetworkGuard:
     def __init__(self) -> None:
         self._attempts: list[str] = []
         self._patches = pytest.MonkeyPatch()
+        self.allow_network = False
 
     def install(self) -> None:
         for name, (host_of, error) in _GUARDED_LOOKUPS.items():
@@ -107,7 +108,7 @@ class _NetworkGuard:
 
     def _refusal_unless_local(self, action: str, host: object) -> str | None:
         """The refusal message for a non-local host, after recording the attempt; None for a local one."""
-        if _is_local(host):
+        if self.allow_network or _is_local(host):
             return None
         self._attempts.append(f"{action} {host!r}")
         return f"test tried to {action} {host!r}; {_REFUSAL_TEXT}"
@@ -153,8 +154,18 @@ _ITEM_MARK = pytest.StashKey[int]()
 _ITEM_FAILED_ON_A_REFUSAL = pytest.StashKey[bool]()
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-e2e",
+        action="store_true",
+        default=False,
+        help="run the e2e rehearsal against the real Test Sheet and IA test_collection",
+    )
+
+
 def pytest_configure(config):
     """Installed for the whole run, so collection and session/module fixtures are guarded too."""
+    config.addinivalue_line("markers", "e2e: real Test Sheet and IA test_collection; needs --run-e2e")
     guard = _NetworkGuard()
     guard.install()
     config.stash[_GUARD] = guard
@@ -164,6 +175,15 @@ def pytest_unconfigure(config):
     guard = config.stash.get(_GUARD, None)
     if guard is not None:
         guard.uninstall()
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-e2e"):
+        return
+    skip_e2e = pytest.mark.skip(reason="e2e rehearsal: pass --run-e2e to run it")
+    for item in items:
+        if item.get_closest_marker("e2e") is not None:
+            item.add_marker(skip_e2e)
 
 
 @pytest.hookimpl(wrapper=True)
@@ -183,6 +203,10 @@ def pytest_make_collect_report(collector):
 def pytest_runtest_setup(item):
     """Before any fixture, so a shared fixture's attempt is charged to the test that first sets it up."""
     item.stash[_ITEM_MARK] = item.config.stash[_GUARD].mark()
+    # Only an opted-in e2e test may reach the network; cleared at its teardown.
+    item.config.stash[_GUARD].allow_network = (
+        item.config.getoption("--run-e2e") and item.get_closest_marker("e2e") is not None
+    )
 
 
 @pytest.hookimpl(wrapper=True)
@@ -192,6 +216,7 @@ def pytest_runtest_makereport(item, call):
     if report.failed and call.excinfo is not None and _caused_by_a_refusal(call.excinfo.value):
         item.stash[_ITEM_FAILED_ON_A_REFUSAL] = True
     if call.when == "teardown":
+        item.config.stash[_GUARD].allow_network = False
         guard = item.config.stash[_GUARD]
         # No mark means setup never reached ours; leave the attempts for pytest_sessionfinish.
         attempts = guard.claim_since(item.stash.get(_ITEM_MARK, guard.mark()))

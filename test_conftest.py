@@ -360,3 +360,44 @@ def test_no_test_reads_ia_credentials_from_the_environment(suite_under_real_conf
     suite_under_real_conftest.makepyfile(IA_CREDENTIALS_ARE_ABSENT)
     result = suite_under_real_conftest.runpytest_subprocess()
     result.assert_outcomes(passed=1)
+
+
+NUMERIC_REVERSE_LOOKUP = "socket.getnameinfo(('192.0.2.4', 80), socket.NI_NUMERICHOST | socket.NI_NUMERICSERV)"
+
+
+def test_an_e2e_test_is_skipped_without_run_e2e(suite_under_real_conftest):
+    suite_under_real_conftest.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.e2e
+        def test_rehearsal():
+            raise AssertionError("must not run without --run-e2e")
+        """
+    )
+    result = suite_under_real_conftest.runpytest_subprocess("--strict-markers")
+    result.assert_outcomes(skipped=1)
+
+
+def test_run_e2e_lifts_the_guard_for_e2e_tests_only_and_rearms_it(suite_under_real_conftest):
+    suite_under_real_conftest.makepyfile(
+        f"""
+        import socket
+        import pytest
+
+        @pytest.mark.e2e
+        def test_e2e_may_look_up_a_remote_address():
+            assert {NUMERIC_REVERSE_LOOKUP} == ("192.0.2.4", "80")
+
+        def test_a_later_ordinary_test_is_guarded_again():
+            try:
+                {NUMERIC_REVERSE_LOOKUP}
+            except socket.gaierror:
+                pass
+        """
+    )
+    result = suite_under_real_conftest.runpytest_subprocess("--run-e2e", "--strict-markers")
+    result.assert_outcomes(passed=2, errors=1)
+    result.stdout.fnmatch_lines(
+        ["*ERROR at teardown of test_a_later_ordinary_test_is_guarded_again*", "*192.0.2.4*"]
+    )
