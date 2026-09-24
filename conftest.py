@@ -79,7 +79,8 @@ class _NetworkGuard:
     def __init__(self) -> None:
         self._attempts: list[str] = []
         self._patches = pytest.MonkeyPatch()
-        self.allow_network = False
+        self._proxy_patches = pytest.MonkeyPatch()
+        self._network_allowed = False
 
     def install(self) -> None:
         for name, (host_of, error) in _GUARDED_LOOKUPS.items():
@@ -88,14 +89,28 @@ class _NetworkGuard:
             real_method = getattr(socket.socket, name)
             guarded = self._guarded_socket_method(real_method, host_of, returns_errno)
             self._patches.setattr(socket.socket, name, guarded)
-        # A loopback proxy would be the only connection the guard sees; "*" also overrides a Windows registry proxy.
-        for variable in _PROXY_VARIABLES:
-            self._patches.delenv(variable, raising=False)
-        self._patches.setenv("NO_PROXY", "*")
-        self._patches.setenv("no_proxy", "*")
+        self._strip_proxies()
 
     def uninstall(self) -> None:
+        self._proxy_patches.undo()
         self._patches.undo()
+
+    def allow_network(self) -> None:
+        """For one opted-in e2e test: sockets pass and the stripped proxy settings are back."""
+        self._network_allowed = True
+        self._proxy_patches.undo()
+
+    def refuse_network(self) -> None:
+        if self._network_allowed:
+            self._network_allowed = False
+            self._strip_proxies()
+
+    def _strip_proxies(self) -> None:
+        # A loopback proxy would be the only connection the guard sees; "*" also overrides a Windows registry proxy.
+        for variable in _PROXY_VARIABLES:
+            self._proxy_patches.delenv(variable, raising=False)
+        self._proxy_patches.setenv("NO_PROXY", "*")
+        self._proxy_patches.setenv("no_proxy", "*")
 
     def mark(self) -> int:
         return len(self._attempts)
@@ -108,7 +123,7 @@ class _NetworkGuard:
 
     def _refusal_unless_local(self, action: str, host: object) -> str | None:
         """The refusal message for a non-local host, after recording the attempt; None for a local one."""
-        if self.allow_network or _is_local(host):
+        if self._network_allowed or _is_local(host):
             return None
         self._attempts.append(f"{action} {host!r}")
         return f"test tried to {action} {host!r}; {_REFUSAL_TEXT}"
@@ -202,11 +217,13 @@ def pytest_make_collect_report(collector):
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
     """Before any fixture, so a shared fixture's attempt is charged to the test that first sets it up."""
-    item.stash[_ITEM_MARK] = item.config.stash[_GUARD].mark()
-    # Only an opted-in e2e test may reach the network; cleared at its teardown.
-    item.config.stash[_GUARD].allow_network = (
-        item.config.getoption("--run-e2e") and item.get_closest_marker("e2e") is not None
-    )
+    guard = item.config.stash[_GUARD]
+    item.stash[_ITEM_MARK] = guard.mark()
+    # Only an opted-in e2e test may reach the network; refused again at its teardown.
+    if item.config.getoption("--run-e2e") and item.get_closest_marker("e2e") is not None:
+        guard.allow_network()
+    else:
+        guard.refuse_network()
 
 
 @pytest.hookimpl(wrapper=True)
@@ -216,8 +233,8 @@ def pytest_runtest_makereport(item, call):
     if report.failed and call.excinfo is not None and _caused_by_a_refusal(call.excinfo.value):
         item.stash[_ITEM_FAILED_ON_A_REFUSAL] = True
     if call.when == "teardown":
-        item.config.stash[_GUARD].allow_network = False
         guard = item.config.stash[_GUARD]
+        guard.refuse_network()
         # No mark means setup never reached ours; leave the attempts for pytest_sessionfinish.
         attempts = guard.claim_since(item.stash.get(_ITEM_MARK, guard.mark()))
         if attempts and not item.stash.get(_ITEM_FAILED_ON_A_REFUSAL, False):

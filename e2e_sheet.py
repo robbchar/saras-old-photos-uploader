@@ -10,11 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import googleapiclient.discovery
-
-import google_auth
 from ia_bulk import PLACEHOLDER_SHEET_ID_PREFIX
-from sheet_client import quote_tab
+from sheet_client import SheetClient, column_letter, quote_tab
 
 E2E_PROJECT = "e2e"
 
@@ -77,6 +74,9 @@ def check_reset_allowed(
         upload_log_tab=_required(block, "upload_log_tab", project),
         sync_log_tab=_required(block, "sync_log_tab", project),
     )
+    # The reset deletes the log tabs; one named like the data tab would take the data tab with it.
+    if target.data_tab in target.log_tabs:
+        raise ResetRefused(f"'{project}' names the data tab '{target.data_tab}' as a log tab")
 
     live_ids = {
         str(live_block.get("sheet_id") or "").strip()
@@ -88,11 +88,6 @@ def check_reset_allowed(
     return target
 
 
-def build_sheets_service(key_path: Path) -> Any:
-    credentials = google_auth.load_service_account_credentials(key_path)
-    return googleapiclient.discovery.build("sheets", "v4", credentials=credentials)
-
-
 def tab_ids(service: Any, sheet_id: str) -> dict[str, int]:
     response = service.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties(sheetId,title)").execute()
     return {sheet["properties"]["title"]: sheet["properties"]["sheetId"] for sheet in response.get("sheets", [])}
@@ -100,6 +95,13 @@ def tab_ids(service: Any, sheet_id: str) -> dict[str, int]:
 
 def reset_test_sheet(service: Any, target: E2ESheet, grid: list[list[str]]) -> None:
     """Replace the data tab with `grid` and delete each log tab that exists, so the next run recreates them."""
+    # A real Sheet has thousands of rows; the Test Sheet never holds more than the fixture.
+    existing_rows = len(SheetClient(service, target.sheet_id, target.data_tab).read_grid())
+    if existing_rows > len(grid):
+        raise ResetRefused(
+            f"{quote_tab(target.data_tab)} has {existing_rows} rows, more than the {len(grid)}-row fixture; refusing to clear it"
+        )
+
     values = service.spreadsheets().values()
     values.clear(spreadsheetId=target.sheet_id, range=quote_tab(target.data_tab), body={}).execute()
     values.update(
@@ -115,16 +117,9 @@ def reset_test_sheet(service: Any, target: E2ESheet, grid: list[list[str]]) -> N
         service.spreadsheets().batchUpdate(spreadsheetId=target.sheet_id, body={"requests": deletions}).execute()
 
 
-def column_letter(column_number: int) -> str:
-    letters = ""
-    while column_number > 0:
-        column_number, remainder = divmod(column_number - 1, 26)
-        letters = chr(ord("A") + remainder) + letters
-    return letters
-
-
-def set_cell(service: Any, target: E2ESheet, row_number: int, column_number: int, value: str) -> None:
-    cell = f"{quote_tab(target.data_tab)}!{column_letter(column_number)}{row_number}"
+def set_cell(service: Any, target: E2ESheet, row_number: int, column_index: int, value: str) -> None:
+    """`row_number` is the Sheet's 1-based row; `column_index` is 0-based, as in the header list."""
+    cell = f"{quote_tab(target.data_tab)}!{column_letter(column_index)}{row_number}"
     service.spreadsheets().values().update(
         spreadsheetId=target.sheet_id, range=cell, valueInputOption="RAW", body={"values": [[value]]}
     ).execute()

@@ -673,4 +673,9 @@ For a full round trip — a real edit reaching Internet Archive, and the Sheet's
 version history showing the service account as its editor — follow
 [4. Corrections](OPERATIONS.md#4-corrections) against the test Sheet: change
 one uploaded row's title, sync, check the item, then change it back and sync
-again.
+again. §4's commands carry `--live`; for the test Sheet, sync with this
+instead:
+
+```bash
+.venv/bin/python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e < /dev/null
+```

@@ -902,8 +902,9 @@ Tests are pure-offline, and `conftest.py` enforces it. The one exception is
 the opt-in e2e rehearsal: tests marked `e2e` and run with `--run-e2e` may
 reach the network, since that is how it drives the real Test Sheet and IA's
 `test_collection` — see README's
-["E2E rehearsal (opt-in)"](../README.md#e2e-rehearsal-opt-in). The guard
-re-arms after each such test, so a plain run (no `--run-e2e`) skips them and
+["E2E rehearsal (opt-in)"](../README.md#e2e-rehearsal-opt-in). For such a
+test the guard also puts back the proxy settings it strips, and it re-arms
+both after the test, so a plain run (no `--run-e2e`) skips them and
 stays offline like every other test. From the start of the
 run, any lookup of, connection to, or UDP send to a host that is not this
 machine is refused the way a real failure would be (`connect_ex` returns

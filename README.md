@@ -504,10 +504,14 @@ passed, each run writes a timestamped log to `--log-dir` (default
 ### `doctor` and `setup` — check the machine, and fix what can be fixed
 
 ```bash
-python ia_bulk.py doctor --registry e2e_fixtures/registry.json --project e2e
+python ia_bulk.py doctor --project sarasoldphotos
 python ia_bulk.py doctor --project sarasoldphotos --live
-python ia_bulk.py setup --registry e2e_fixtures/registry.json --project e2e
+python ia_bulk.py setup --project sarasoldphotos
 ```
+
+These keep `--project sarasoldphotos` without `--live`: the files-drive check
+reads the project's own `files_dir`, and the e2e registry's is the in-repo
+`e2e_fixtures/files`, which is always there.
 
 `doctor` reports whether this machine can run the pipeline — Python and the
 dependencies, the Google key and the `ia` credentials and their permissions,
@@ -584,7 +588,8 @@ Test Sheet every run; test data is ephemeral.
 **The Test Sheet holds the `e2e` project's grid.** Test-mode hand commands
 use `--registry e2e_fixtures/registry.json --project e2e`; `--project
 sarasoldphotos` without `--live` now reads those same rows, so save it for
-`--live` against the real Sheet. After a passing run, rows 2, 3 and 5 are
+`--live` against the real Sheet, and for `doctor`/`setup`, which check its
+files drive. After a passing run, rows 2, 3 and 5 are
 uploaded and synced, row 2's `Title` is edited, and row 6 is still not ready
 (no theme) — reset rows per
 [`docs/OPERATIONS.md`, "Re-rehearsing a row that is already done"](docs/OPERATIONS.md#re-rehearsing-a-row-that-is-already-done)

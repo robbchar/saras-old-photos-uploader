@@ -401,3 +401,27 @@ def test_run_e2e_lifts_the_guard_for_e2e_tests_only_and_rearms_it(suite_under_re
     result.stdout.fnmatch_lines(
         ["*ERROR at teardown of test_a_later_ordinary_test_is_guarded_again*", "*192.0.2.4*"]
     )
+
+
+def test_run_e2e_gives_e2e_tests_the_proxy_settings_and_strips_them_again(suite_under_real_conftest, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    # This run's own guard set these; the inner run must see the machine's own settings.
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    suite_under_real_conftest.makepyfile(
+        """
+        import os
+        import pytest
+
+        @pytest.mark.e2e
+        def test_e2e_sees_the_proxy_settings():
+            assert os.environ.get("HTTPS_PROXY") == "http://proxy.invalid:3128"
+            assert "NO_PROXY" not in os.environ
+
+        def test_a_later_ordinary_test_has_them_stripped():
+            assert "HTTPS_PROXY" not in os.environ
+            assert os.environ["NO_PROXY"] == "*"
+        """
+    )
+    result = suite_under_real_conftest.runpytest_subprocess("--run-e2e", "--strict-markers")
+    result.assert_outcomes(passed=2)

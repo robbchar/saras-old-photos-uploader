@@ -16,12 +16,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
+import internetarchive
 import pytest
 
 import google_auth
 from e2e_sheet import (
+    E2E_PROJECT,
     E2ESheet,
-    build_sheets_service,
     check_reset_allowed,
     load_fixture_grid,
     pad_grid,
@@ -29,7 +30,7 @@ from e2e_sheet import (
     set_cell,
     tab_ids,
 )
-from ia_bulk import ITEM_URL_PREFIX, fetch_current_metadata
+from ia_bulk import IA_HTTP_ADAPTER_KWARGS, ITEM_URL_PREFIX, build_sheets_service
 from log_tab import LOG_TAB_HEADER
 from sheet_client import SheetClient
 
@@ -39,7 +40,7 @@ LIVE_REGISTRY = REPO_ROOT / "projects_registry.json"
 FIXTURE_SHEET = REPO_ROOT / "e2e_fixtures" / "sheet.json"
 # Both read at import, before conftest's autouse fixtures hide the real key and IA config from each test.
 REAL_KEY_PATH = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
-CLI_ENVIRONMENT = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+REAL_IA_ENVIRONMENT = {name: os.environ.get(name) for name in ("IA_CONFIG_FILE", "IA_ACCESS_KEY_ID", "IA_SECRET_ACCESS_KEY")}
 
 IA_POLL_INTERVAL_SECONDS = 15
 IA_POLL_TIMEOUT_SECONDS = 600
@@ -52,7 +53,7 @@ BROKEN_FILENAME = "does-not-exist.jpg"
 IA_RATE_LIMIT_NOTICE = "Internet Archive asked us to slow down"
 
 # Grid indexes; header is 0, so Sheet row = index + 1.
-FIRST_UPLOADED, SECOND_UPLOADED, BROKEN_ROW, THIRD_UPLOADED, NOT_READY_ROW = 1, 2, 3, 4, 5
+FIRST_UPLOADED, SECOND_UPLOADED, BROKEN_ROW, THIRD_UPLOADED = 1, 2, 3, 4
 UPLOADED_ROWS = (FIRST_UPLOADED, SECOND_UPLOADED, THIRD_UPLOADED)
 
 STEP_0 = "step 0 - reset (OPERATIONS §2 hand reset; 'Rehearsing the log tabs' intro)"
@@ -78,20 +79,44 @@ def _print_for_console(text: str) -> None:
     print(text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
 
 
+def cli_environment() -> dict[str, str]:
+    """Read per call, so it carries the proxy settings the guard puts back for an e2e test; IA credentials are the real ones."""
+    environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    for name, value in REAL_IA_ENVIRONMENT.items():
+        if value is None:
+            environment.pop(name, None)
+        else:
+            environment[name] = value
+    return environment
+
+
+def _decoded(output: str | bytes | None) -> str:
+    """TimeoutExpired's partial output can be bytes even in text mode."""
+    if isinstance(output, bytes):
+        return output.decode("utf-8", errors="replace")
+    return output or ""
+
+
 def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -> subprocess.CompletedProcess[str]:
-    argv = [sys.executable, "ia_bulk.py", command, *flags, "--registry", str(E2E_REGISTRY), "--project", "e2e"]
+    argv = [sys.executable, "ia_bulk.py", command, *flags, "--registry", str(E2E_REGISTRY), "--project", E2E_PROJECT]
     if log_dir is not None:
         argv += ["--log-dir", str(log_dir)]
-    result = subprocess.run(
-        argv,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=CLI_ENVIRONMENT,
-        timeout=CLI_TIMEOUT_SECONDS,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=cli_environment(),
+            timeout=CLI_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(
+            f"{step}: ia_bulk.py {command} did not finish within {CLI_TIMEOUT_SECONDS // 60} min\n"
+            f"--- stdout ---\n{_decoded(exc.stdout)}\n--- stderr ---\n{_decoded(exc.stderr)}"
+        )
     _print_for_console(f"\n===== {step}\n$ ia_bulk.py {command} {' '.join(flags)}\n{result.stdout}{result.stderr}")
     return result
 
@@ -106,12 +131,13 @@ def expect(step: str, condition: bool, message: str) -> None:
 
 
 def expect_run(step: str, result: subprocess.CompletedProcess[str], exit_code: int, *texts: str) -> None:
+    # Before the exit code: a throttled upload exits 1, which a step can expect.
+    if IA_RATE_LIMIT_NOTICE in result.stderr:
+        pytest.fail(
+            f"{step}: Internet Archive is throttling uploads, not a defect in the tool; re-run later\n"
+            f"{output_of(result)}"
+        )
     if result.returncode != exit_code:
-        if IA_RATE_LIMIT_NOTICE in result.stderr:
-            pytest.fail(
-                f"{step}: Internet Archive is throttling uploads, not a defect in the tool; re-run later\n"
-                f"{output_of(result)}"
-            )
         pytest.fail(f"{step}: expected exit {exit_code}, got {result.returncode}\n{output_of(result)}")
     for text in texts:
         if text not in result.stdout:
@@ -130,7 +156,8 @@ def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None]) 
 
 
 def item_metadata(identifier: str) -> dict[str, Any] | None:
-    return fetch_current_metadata(identifier) or None
+    """Not fetch_current_metadata: it returns None on any error, which would wait out the timeout instead of failing."""
+    return dict(internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS).metadata) or None
 
 
 class RehearsalSheet:
@@ -149,7 +176,7 @@ class RehearsalSheet:
         return grid[row_index][self._header.index(column)]
 
     def edit(self, row_index: int, column: str, value: str) -> None:
-        set_cell(self._service, self._target, row_index + 1, self._header.index(column) + 1, value)
+        set_cell(self._service, self._target, row_index + 1, self._header.index(column), value)
 
     def tab_id(self, tab: str) -> int | None:
         return tab_ids(self._service, self._target.sheet_id).get(tab)
@@ -167,20 +194,25 @@ def preflight() -> None:
     has_credentials = subprocess.run(
         [sys.executable, "-c", "import internetarchive, sys; sys.exit(0 if internetarchive.get_session().access_key else 1)"],
         cwd=REPO_ROOT,
-        env=CLI_ENVIRONMENT,
+        env=cli_environment(),
         check=False,
     )
     if has_credentials.returncode != 0:
         pytest.fail("preflight: the ia library has no credentials; run `ia configure` on this machine")
 
 
-def run_summary_timestamp(log_file: Path) -> str:
+def run_summary_timestamp(log_file: Path) -> str | None:
     records = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines() if line.strip()]
-    return next(record["timestamp"] for record in records if record.get("record") == "run_summary")
+    return next((record["timestamp"] for record in records if record.get("record") == "run_summary"), None)
+
+
+def restore_broken_filename(sheet: RehearsalSheet, filename: str) -> None:
+    sheet.edit(BROKEN_ROW, "File Name", filename)
+    expect(STEP_12, sheet.cell(sheet.grid(), BROKEN_ROW, "File Name") == filename, "the broken filename was not restored")
 
 
 @pytest.mark.e2e
-def test_rehearsal(tmp_path):
+def test_rehearsal(tmp_path, request):
     log_dir = tmp_path / "logs"
     fixture = load_fixture_grid(FIXTURE_SHEET)
     header = fixture[0]
@@ -224,6 +256,9 @@ def test_rehearsal(tmp_path):
     grid = sheet.grid()
     expect(STEP_3, sheet.cell(grid, SECOND_UPLOADED, "ia_identifier") == "lcps-e2e-00002", "row 3 did not get lcps-e2e-00002")
 
+    restored_filename = fixture[BROKEN_ROW][header.index("File Name")]
+    # A finalizer, so a failing later step still leaves the Test Sheet valid.
+    request.addfinalizer(lambda: restore_broken_filename(sheet, restored_filename))
     sheet.edit(BROKEN_ROW, "File Name", BROKEN_FILENAME)
     result = run_cli(STEP_4, "upload", "--write-identifier", "--limit", "1", log_dir=log_dir)
     expect_run(STEP_4, result, 1, "1 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation)")
@@ -274,12 +309,17 @@ def test_rehearsal(tmp_path):
         for when, run, *_ in sheet.log_rows(tab)[1:]:
             log_file = log_dir / run
             expect(STEP_10, log_file.is_file(), f"{tab} names {run}, which is not in {log_dir}")
-            expect(STEP_10, run_summary_timestamp(log_file) == when, f"{tab} row for {run}: when {when!r} is not its run_summary timestamp")
+            summary_timestamp = run_summary_timestamp(log_file)
+            expect(STEP_10, summary_timestamp is not None, f"{tab} names {run}, which has no run_summary record")
+            expect(STEP_10, summary_timestamp == when, f"{tab} row for {run}: when {when!r} is not its run_summary timestamp")
 
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
     final = sheet.grid()
     expect(STEP_11, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
+    # grid() pads to the header's width, so a longer row has a cell past the header.
+    wider = [row_index + 1 for row_index, row in enumerate(final) if len(row) > len(header)]
+    expect(STEP_11, not wider, f"rows {wider} have cells past the header")
     unexpected = [
         f"row {row_index + 1} {column!r}: {fixture[row_index][column_index]!r} -> {final[row_index][column_index]!r}"
         for row_index in range(len(fixture))
@@ -287,15 +327,7 @@ def test_rehearsal(tmp_path):
         if final[row_index][column_index] != fixture[row_index][column_index] and (row_index, column) not in allowed
     ]
     expect(STEP_11, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
-
-    restored_filename = fixture[BROKEN_ROW][header.index("File Name")]
-    sheet.edit(BROKEN_ROW, "File Name", restored_filename)
-    grid_after_restore = sheet.grid()
-    expect(
-        STEP_12,
-        sheet.cell(grid_after_restore, BROKEN_ROW, "File Name") == restored_filename,
-        "the broken filename was not restored",
-    )
+    # Step 12 runs as the finalizer registered at step 4.
 
 
 def test_print_for_console_survives_a_non_utf8_console(monkeypatch):
@@ -314,6 +346,48 @@ def test_a_throttled_run_fails_as_ia_throttling_not_a_defect():
 
     with pytest.raises(pytest.fail.Exception, match="step 2: Internet Archive is throttling uploads"):
         expect_run("step 2", throttled, 0)
+
+
+def test_a_throttled_run_fails_as_ia_throttling_even_when_exit_1_was_expected():
+    throttled = subprocess.CompletedProcess(
+        args=["ia_bulk.py", "upload"],
+        returncode=1,
+        stdout="0 file(s) uploaded successfully, 1 error(s)\n",
+        stderr="stopped: Internet Archive asked us to slow down (HTTP 503) after 1 item\n",
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="step 4: Internet Archive is throttling uploads"):
+        expect_run("step 4", throttled, 1, "1 file(s) uploaded successfully, 0 error(s)")
+
+
+def test_a_cli_timeout_fails_with_the_step_and_partial_output(monkeypatch):
+    def time_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="ia_bulk.py", timeout=1, output=b"uploading e2e-01.jpg", stderr=None)
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+
+    with pytest.raises(pytest.fail.Exception, match=r"(?s)step 2: ia_bulk.py upload did not finish.*uploading e2e-01\.jpg"):
+        run_cli("step 2", "upload")
+
+
+def test_cli_environment_uses_the_real_ia_settings_and_the_current_proxy(monkeypatch):
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_CONFIG_FILE", "real.ini")
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_ACCESS_KEY_ID", None)
+    monkeypatch.setenv("IA_ACCESS_KEY_ID", "hidden")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+
+    environment = cli_environment()
+
+    assert environment["IA_CONFIG_FILE"] == "real.ini"
+    assert "IA_ACCESS_KEY_ID" not in environment
+    assert environment["HTTPS_PROXY"] == "http://proxy.invalid:3128"
+
+
+def test_run_summary_timestamp_is_none_without_a_run_summary(tmp_path):
+    log_file = tmp_path / "run.jsonl"
+    log_file.write_text('{"record": "row"}\n', encoding="utf-8")
+
+    assert run_summary_timestamp(log_file) is None
 
 
 def test_an_unthrottled_wrong_exit_still_fails_as_a_wrong_exit():

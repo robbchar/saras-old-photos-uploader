@@ -7,7 +7,6 @@ from e2e_sheet import (
     E2ESheet,
     ResetRefused,
     check_reset_allowed,
-    column_letter,
     load_fixture_grid,
     pad_grid,
     reset_test_sheet,
@@ -91,6 +90,14 @@ def test_guard_refuses_a_missing_setting(tmp_path, key):
         check_reset_allowed(e2e_path, live_path)
 
 
+@pytest.mark.parametrize("key", ["upload_log_tab", "sync_log_tab"])
+def test_guard_refuses_a_log_tab_named_like_the_data_tab(tmp_path, key):
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(**{key: "Test Sheet"}), {})
+
+    with pytest.raises(ResetRefused, match="as a log tab"):
+        check_reset_allowed(e2e_path, live_path)
+
+
 def test_guard_refuses_an_unknown_project(tmp_path):
     e2e_path, live_path = write_registries(tmp_path, e2e_block(), {})
 
@@ -125,8 +132,13 @@ class FakeRequest:
 
 
 class FakeValues:
-    def __init__(self, calls: list) -> None:
+    def __init__(self, calls: list, rows: list[list[str]]) -> None:
         self._calls = calls
+        self._rows = rows
+
+    def get(self, **kwargs) -> FakeRequest:
+        self._calls.append(("read", kwargs))
+        return FakeRequest({"values": self._rows})
 
     def clear(self, **kwargs) -> FakeRequest:
         self._calls.append(("clear", kwargs))
@@ -138,12 +150,13 @@ class FakeValues:
 
 
 class FakeSpreadsheets:
-    def __init__(self, calls: list, tabs: dict[str, int]) -> None:
+    def __init__(self, calls: list, tabs: dict[str, int], rows: list[list[str]]) -> None:
         self._calls = calls
         self._tabs = tabs
+        self._rows = rows
 
     def values(self) -> FakeValues:
-        return FakeValues(self._calls)
+        return FakeValues(self._calls, self._rows)
 
     def get(self, **kwargs) -> FakeRequest:
         self._calls.append(("get", kwargs))
@@ -156,14 +169,15 @@ class FakeSpreadsheets:
 
 
 class FakeSheetsService:
-    """Records every Sheets API call; answers spreadsheets().get from `tabs`."""
+    """Records every Sheets API call; answers spreadsheets().get from `tabs` and a values read from `rows`."""
 
-    def __init__(self, tabs: dict[str, int]) -> None:
+    def __init__(self, tabs: dict[str, int], rows: list[list[str]] | None = None) -> None:
         self.calls: list = []
         self._tabs = tabs
+        self._rows = rows or []
 
     def spreadsheets(self) -> FakeSpreadsheets:
-        return FakeSpreadsheets(self.calls, self._tabs)
+        return FakeSpreadsheets(self.calls, self._tabs, self._rows)
 
 
 def test_tab_ids_maps_titles_to_sheet_ids():
@@ -178,8 +192,9 @@ def test_reset_clears_writes_and_deletes_existing_log_tabs():
 
     reset_test_sheet(service, TARGET, grid)
 
-    clear, update, _, delete = service.calls
-    assert clear == ("clear", {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'", "body": {}})
+    read, clear, update, _, delete = service.calls
+    assert read == ("read", {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'"})
+    assert clear ==("clear", {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'", "body": {}})
     assert update == (
         "update",
         {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'!A1", "valueInputOption": "RAW", "body": {"values": grid}},
@@ -195,18 +210,30 @@ def test_reset_skips_the_delete_when_no_log_tab_exists():
 
     reset_test_sheet(service, TARGET, [["Title"]])
 
-    assert [name for name, _ in service.calls] == ["clear", "update", "get"]
+    assert [name for name, _ in service.calls] == ["read", "clear", "update", "get"]
 
 
-@pytest.mark.parametrize(("number", "letters"), [(1, "A"), (3, "C"), (26, "Z"), (27, "AA"), (28, "AB"), (52, "AZ")])
-def test_column_letter(number, letters):
-    assert column_letter(number) == letters
+def test_reset_allows_a_data_tab_no_longer_than_the_grid():
+    service = FakeSheetsService({"Test Sheet": 0}, rows=[["Title"], ["old"]])
+
+    reset_test_sheet(service, TARGET, [["Title"], ["E2E fixture 1"]])
+
+    assert [name for name, _ in service.calls] == ["read", "clear", "update", "get"]
+
+
+def test_reset_refuses_a_data_tab_longer_than_the_grid_and_writes_nothing():
+    service = FakeSheetsService({"Test Sheet": 0}, rows=[["Title"], ["a"], ["b"]])
+
+    with pytest.raises(ResetRefused, match="3 rows, more than the 2-row fixture"):
+        reset_test_sheet(service, TARGET, [["Title"], ["E2E fixture 1"]])
+
+    assert [name for name, _ in service.calls] == ["read"]
 
 
 def test_set_cell_writes_one_cell_on_the_data_tab():
     service = FakeSheetsService({})
 
-    set_cell(service, TARGET, row_number=2, column_number=3, value="edited")
+    set_cell(service, TARGET, row_number=2, column_index=2, value="edited")
 
     assert service.calls == [
         (
