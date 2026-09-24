@@ -211,12 +211,15 @@ def acquire_lock(
     ]
     try:
         _batch_update(service, target, requests)
-    except HttpError:
+    except Exception:
+        # Either the batch landed and only its response was lost, or another run won a race for the lock.
         now_on_sheet = _read_lock_tab(service, target)
-        if now_on_sheet is not None and now_on_sheet.tab_id != previous_tab_id:
+        if now_on_sheet is None or now_on_sheet.tab_id == previous_tab_id:
+            raise
+        if now_on_sheet.tab_id != tab_id:
             refusal = _refusal(now_on_sheet, clock())
-            if refusal is not None:
-                raise refusal from None
-        raise
+            if refusal is None:
+                raise
+            raise refusal from None
     took_over_from = current.holder if current is not None else None
     return RehearsalLock(service, target, tab_id, holder, lease, clock, took_over_from)

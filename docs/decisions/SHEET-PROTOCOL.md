@@ -512,18 +512,27 @@ only.
 - **Taking it is atomic.** One `batchUpdate` adds the tab under a sheetId the
   run picks and writes the holder into it. The API applies a batch whole or
   not at all, and refuses a second tab with the same name, so two runs racing
-  for a free lock cannot both win.
+  for a free lock cannot both win. If the batch lands but its response is
+  lost, the run re-reads the Sheet and keeps a lock that carries its own
+  sheetId.
 - **The sheetId is the ownership.** Check-ins and the delete at teardown
   target that id. A run whose lock was taken over gets "No grid with id"
   instead of writing into the new holder's tab, and it fails naming the new
   holder. Its step-12 restore is skipped, since the row is no longer its to
   restore.
+- **A lost lock is noticed at the next check-in, not sooner.** A run is taken
+  over only after 30 minutes without checking in; a laptop asleep mid-step is
+  the likely cause. The CLI step it was in can still finish and write into the
+  new holder's rows before the next check-in fails. A check-in keeps the tab's
+  id, so a takeover that lands just after one still succeeds. The old holder
+  finds out one step later.
 - **A stale lock expires.** A run checks in at every step, extending its lease
   to 30 minutes from then: twice the longest gap between check-ins, which is
   one CLI call's timeout. The next run takes over an expired lock in one batch
   that deletes by the old sheetId, so only one of two racing runs succeeds.
-  Deleting the tab by hand clears it at once. Ctrl-C still runs teardown; only
-  a killed process leaves a lock behind.
+  Deleting the tab by hand clears it at once. Ctrl-C still runs teardown. A
+  killed process, or an API error at teardown, leaves the lock behind to
+  expire.
 - **A held lock fails the run; it does not wait.** Waiting would make one
   run's length depend on another's.
 

@@ -594,12 +594,13 @@ the Test Sheet, naming the run's host, pid, checkout and log directory.
 Teardown deletes it. A rehearsal started while another holds it fails at
 step 0 with "another e2e rehearsal holds the Test Sheet", naming that run and
 when its lock expires. Wait for it to finish, then re-run. A running
-rehearsal checks in at every step, and a lock that stops checking in (its run
-was killed) expires 30 minutes after the last check-in, when the next run
-takes it over. To clear one sooner, delete the `E2E Lock` tab by hand, once
-you know its run is gone. A run whose lock was taken over fails with "this
-run lost the Test Sheet lock" and leaves the new holder's rows alone. Hand
-test-mode commands take no lock; see
+rehearsal checks in at every step. A lock that stops checking in expires 30
+minutes after the last check-in, when the next run takes it over. That
+happens when a run is killed or an API error hits its teardown. To clear one
+sooner, delete the `E2E Lock` tab by hand, once you know its run is gone. A
+run whose lock was taken over finds out at its next check-in and fails with
+"this run lost the Test Sheet lock", naming the new holder; from then on it
+writes nothing to the Sheet. Hand test-mode commands take no lock; see
 [`docs/decisions/SHEET-PROTOCOL.md`, "One rehearsal at a time"](docs/decisions/SHEET-PROTOCOL.md#one-rehearsal-at-a-time).
 
 **The Test Sheet holds the `e2e` project's grid.** Test-mode hand commands

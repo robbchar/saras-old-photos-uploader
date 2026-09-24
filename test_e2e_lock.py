@@ -89,7 +89,9 @@ class FakeSheets:
         self.value_updates: list[tuple[str, list[list[str]]]] = []
         # Another run's move, made just before this run's next batchUpdate reaches the API.
         self.before_next_batch: Callable[[], None] | None = None
-        self.fail_next_batch: HttpError | None = None
+        self.fail_next_batch: Exception | None = None
+        # The batch lands, but its response is lost.
+        self.fail_after_next_batch: Exception | None = None
 
     def spreadsheets(self) -> _Spreadsheets:
         return _Spreadsheets(self)
@@ -120,6 +122,9 @@ class FakeSheets:
         for request in requests:
             _apply_one(request, tabs, cells)
         self.tabs, self.cells = tabs, cells
+        lost_response, self.fail_after_next_batch = self.fail_after_next_batch, None
+        if lost_response is not None:
+            raise lost_response
         return {}
 
 
@@ -228,13 +233,24 @@ def test_acquiring_refuses_a_lock_tab_that_names_no_run(sheets, clock):
     assert sheets.tabs[LOCK_TAB] == 7
 
 
-def test_acquiring_reraises_an_api_error_that_is_not_a_race(sheets, clock):
-    sheets.fail_next_batch = http_error("Internal error encountered.", status=500)
+@pytest.mark.parametrize("error", [http_error("Internal error encountered.", status=500), TimeoutError("timed out")])
+def test_acquiring_reraises_an_error_that_is_not_a_race(sheets, clock, error):
+    sheets.fail_next_batch = error
 
-    with pytest.raises(HttpError):
+    with pytest.raises(type(error)):
         acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
 
     assert LOCK_TAB not in sheets.tabs
+
+
+@pytest.mark.parametrize("error", [http_error("Internal error encountered.", status=500), TimeoutError("timed out")])
+def test_acquiring_keeps_a_lock_whose_batch_landed_though_its_response_was_lost(sheets, clock, error):
+    sheets.fail_after_next_batch = error
+
+    lock = acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
+
+    assert sheets.tabs[LOCK_TAB] == lock.tab_id
+    assert lock_holder(sheets) == lock.holder
 
 
 def test_checking_in_extends_the_lease_from_now(sheets, clock):
