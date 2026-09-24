@@ -904,12 +904,15 @@ def log_result(
     live: bool,
     error: str | None = None,
     uploaded_as: str | None = None,
+    http_status: int | None = None,
 ) -> None:
     entry = {
         "identifier": identifier,
         "file": file_value,
         "status": status,
         "error": error,
+        # From parsed_status_code(), never the message; None when IA sent none.
+        "http_status": http_status,
         "uploaded_as": uploaded_as,
         "live": live,
         "timestamp": utc_timestamp(),
@@ -1054,7 +1057,7 @@ RATE_LIMIT_STATUS_CODES = (429, 503)
 # Ignoring the header entirely would be worse - it is the server telling us
 # precisely what it wants. But this tool already has a better answer than
 # waiting for a long one: a 429/503 stops the run so the operator resumes
-# tomorrow. So the header is honoured up to this bound, and anything longer
+# later. So the header is honoured up to this bound, and anything longer
 # becomes "stop the run" rather than "sleep through the afternoon".
 RETRY_AFTER_MAX_SECONDS = 30.0
 
@@ -1184,7 +1187,7 @@ class UploadFailed(RuntimeError):
 # are Internet Archive saying "slow down", and this tool already answers
 # that with something stronger than a retry - is_rate_limit_error() stops
 # the whole run after the current chunk's confirm write so the operator
-# resumes tomorrow. Retrying them here would delay that stop for every
+# resumes later. Retrying them here would delay that stop for every
 # rate-limited row while making the overload marginally worse.
 RETRYABLE_STATUS_CODES = (500, 502, 504)
 
@@ -3125,15 +3128,17 @@ class SheetUploadRun:
         target. Every row this run already
         uploaded successfully, in this chunk or an earlier one, is still
         confirmed before returning: a rate limit must not leave a row
-        RESERVED-but-unconfirmed, which would make tomorrow's run re-upload
+        RESERVED-but-unconfirmed, which would make the next run re-upload
         it under a second identifier."""
         # Counted and collected in the same step: every site that bumps a
         # number here already holds the target it belongs to, so the summary's
         # lists cost nothing beyond remembering what was in hand.
-        tally = {"success": 0, "not_attempted": 0, "rate_limited": False}
+        tally = {"success": 0, "not_attempted": 0}
         failures: list[RowFailure] = []
         unconfirmed: list[RowFailure] = []
         skipped: list[RowFailure] = []
+        # Set only once the run has stopped on it, not when a row first hits it.
+        run_stopped_on_status: int | None = None
 
         def summary() -> UploadSummary:
             return UploadSummary(
@@ -3141,7 +3146,7 @@ class SheetUploadRun:
                 failures=tuple(failures),
                 unconfirmed=tuple(unconfirmed),
                 not_attempted=tally["not_attempted"],
-                rate_limited=tally["rate_limited"],
+                rate_limit_status=run_stopped_on_status,
                 skipped=tuple(skipped),
             )
 
@@ -3182,7 +3187,7 @@ class SheetUploadRun:
                 working = outcome.ok
 
             succeeded: list[UploadTarget] = []
-            rate_limited = False
+            rate_limit_status: int | None = None
             for target in working:
                 position += 1
                 settled += 1
@@ -3200,9 +3205,9 @@ class SheetUploadRun:
                     # ends the run after this chunk's confirm write.
                     failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
                     print(f"    - {format_row_error(exc)}")
-                    self._log(target, "failure", error=str(exc))
+                    self._log(target, "failure", error=str(exc), http_status=parsed_status_code(exc))
                     if is_rate_limit_error(exc):
-                        rate_limited = True
+                        rate_limit_status = parsed_status_code(exc)
                         break
                     continue
                 tally["success"] += 1
@@ -3235,16 +3240,20 @@ class SheetUploadRun:
                     tally["not_attempted"] += total - settled
                     return summary()
 
-            if rate_limited:
+            if rate_limit_status is not None:
                 attempted = tally["success"] + len(failures)
                 tally["not_attempted"] += total - settled
-                tally["rate_limited"] = True
+                run_stopped_on_status = rate_limit_status
                 print(
-                    f"stopped: Internet Archive reported a rate limit after "
-                    f"{_pluralize(attempted, 'item')}",
+                    f"stopped: Internet Archive asked us to slow down (HTTP {rate_limit_status}) "
+                    f"after {_pluralize(attempted, 'item')}",
                     file=sys.stderr,
                 )
-                print(f"{tally['success']} uploaded this run - resume by re-running tomorrow")
+                # The status alone cannot say which limit fired, so name both.
+                print(
+                    f"{tally['success']} uploaded this run - re-run later to resume: minutes to "
+                    "hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached"
+                )
                 return summary()
 
         return summary()
@@ -3345,7 +3354,13 @@ class SheetUploadRun:
             return False
         return True
 
-    def _log(self, target: UploadTarget, status: str, error: str | None = None) -> None:
+    def _log(
+        self,
+        target: UploadTarget,
+        status: str,
+        error: str | None = None,
+        http_status: int | None = None,
+    ) -> None:
         log_result(
             self.log_path,
             target.identifier,
@@ -3354,6 +3369,7 @@ class SheetUploadRun:
             self.live,
             error=error,
             uploaded_as=target.uploaded_as,
+            http_status=http_status,
         )
 
 
@@ -3999,12 +4015,17 @@ class UploadSummary:
     failures: tuple[RowFailure, ...] = ()
     unconfirmed: tuple[RowFailure, ...] = ()
     not_attempted: int = 0
-    rate_limited: bool = False
+    # The parsed 429/503 the run stopped on; None when it did not stop on one.
+    rate_limit_status: int | None = None
     skipped: tuple[RowFailure, ...] = ()
 
     @property
     def failed(self) -> int:
         return len(self.failures)
+
+    @property
+    def rate_limited(self) -> bool:
+        return self.rate_limit_status is not None
 
     @property
     def attempted(self) -> int:
@@ -4040,6 +4061,7 @@ class UploadSummary:
             "unconfirmed": [entry.as_record() for entry in self.unconfirmed],
             "not_attempted": self.not_attempted,
             "rate_limited": self.rate_limited,
+            "rate_limit_status": self.rate_limit_status,
             "skipped": [entry.as_record() for entry in self.skipped],
         }
 
@@ -4348,7 +4370,7 @@ class SheetSyncRun:
                     # error.
                     failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
                     print(f"    - {format_row_error(exc)}")
-                    self._log(target, "failure", error=str(exc))
+                    self._log(target, "failure", error=str(exc), http_status=parsed_status_code(exc))
                 else:
                     succeeded += 1
                     stamped.append((target.row_number, target.content_hash))
@@ -4482,7 +4504,13 @@ class SheetSyncRun:
             )
         return still_there
 
-    def _log(self, target: SyncTarget, status: str, error: str | None = None) -> None:
+    def _log(
+        self,
+        target: SyncTarget,
+        status: str,
+        error: str | None = None,
+        http_status: int | None = None,
+    ) -> None:
         log_result(
             self.log_path,
             target.identifier,
@@ -4491,6 +4519,7 @@ class SheetSyncRun:
             self.live,
             error=error,
             uploaded_as=target.uploaded_as,
+            http_status=http_status,
         )
 
 
