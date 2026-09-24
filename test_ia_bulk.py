@@ -2068,6 +2068,31 @@ def test_cmd_validate_prints_live_mode_and_the_real_sheet_id_when_live(tmp_path,
     assert "TEST_SHEET_ID" not in out
 
 
+def test_main_dates_the_run_before_a_broken_registry_fails_it(tmp_path, monkeypatch):
+    """The agent's log merges both streams, so its traceback must follow its own run's date."""
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text("{ hand-edited, not JSON", encoding="utf-8")
+    merged = io.StringIO()
+    monkeypatch.setattr("sys.stdout", merged)
+    monkeypatch.setattr("sys.stderr", merged)
+    monkeypatch.setattr("ia_bulk.utc_timestamp", lambda: "2026-09-24T17:00:00Z")
+
+    with pytest.raises(json.JSONDecodeError):
+        main(["sync-metadata", "--project", "astoriaphotos", "--live", "--registry", str(registry_path)])
+
+    assert merged.getvalue() == "2026-09-24T17:00:00Z sync-metadata\n"
+
+
+def test_start_run_output_line_buffers_stdout(monkeypatch):
+    # Block-buffered stdout would land in the agent's one log file after stderr written later.
+    stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    monkeypatch.setattr("sys.stdout", stdout)
+
+    ia_bulk.start_run_output("sync-metadata")
+
+    assert stdout.line_buffering is True
+
+
 def test_cmd_validate_injects_mediatype_from_the_registry_not_a_hardcoded_value(tmp_path, monkeypatch):
     """Every existing fixture happens to use mediatype="image", so a
     hardcoded row["mediatype"] = "image" would pass all of them - proving

@@ -64,6 +64,12 @@ def test_render_plist_uses_absolute_program_paths(tmp_path):
     assert Path(parsed["ProgramArguments"][1]).is_absolute()
 
 
+def test_render_plist_sends_stdout_and_stderr_to_one_log_file(tmp_path):
+    parsed = plistlib.loads(launch_agent.render_plist(a_spec(tmp_path, "demo")).encode("utf-8"))
+    assert parsed["StandardOutPath"] == parsed["StandardErrorPath"]
+    assert Path(parsed["StandardOutPath"]).name == "launchagent-demo.log"
+
+
 def test_render_plist_runs_at_load(tmp_path):
     # Enabling the agent syncs straight away rather than after an idle hour, and
     # a login run with no changed rows is a no-op under the #24 hash gate.
@@ -117,7 +123,6 @@ def test_write_plist_creates_the_stdio_directory_launchd_will_not(tmp_path):
     intermediate directories for StandardOutPath/StandardErrorPath, so the job
     either fails to spawn or its output vanishes."""
     spec = a_spec(tmp_path)
-    assert not spec.stderr_path.parent.exists()
+    assert not spec.output_path.parent.exists()
     launch_agent.write_plist(spec, tmp_path / "home")
-    assert spec.stdout_path.parent.is_dir()
-    assert spec.stderr_path.parent.is_dir()
+    assert spec.output_path.parent.is_dir()

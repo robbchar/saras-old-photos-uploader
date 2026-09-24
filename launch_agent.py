@@ -17,8 +17,8 @@ class AgentSpec:
     label: str
     program_arguments: list[str]
     interval: int
-    stdout_path: Path
-    stderr_path: Path
+    # launchd sends both stdout and stderr here; the program keeps their lines in order.
+    output_path: Path
     working_directory: Path
 
 
@@ -39,8 +39,7 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
             str(registry_path),
         ],
         interval=HOURLY,
-        stdout_path=repo_root / "logs" / f"launchagent-{project_id}.out",
-        stderr_path=repo_root / "logs" / f"launchagent-{project_id}.err",
+        output_path=repo_root / "logs" / f"launchagent-{project_id}.log",
         working_directory=repo_root,
     )
 
@@ -55,8 +54,8 @@ def render_plist(spec: AgentSpec) -> str:
         "StartInterval": spec.interval,
         "RunAtLoad": True,
         "WorkingDirectory": str(spec.working_directory),
-        "StandardOutPath": str(spec.stdout_path),
-        "StandardErrorPath": str(spec.stderr_path),
+        "StandardOutPath": str(spec.output_path),
+        "StandardErrorPath": str(spec.output_path),
     }
     return plistlib.dumps(body).decode("utf-8")
 
@@ -70,8 +69,7 @@ def write_plist(spec: AgentSpec, home: Path) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
     # launchd does not create intermediate directories for stdio redirection, and
     # logs/ is gitignored - absent on a fresh clone, so the job would not spawn.
-    for stdio_path in (spec.stdout_path, spec.stderr_path):
-        stdio_path.parent.mkdir(parents=True, exist_ok=True)
+    spec.output_path.parent.mkdir(parents=True, exist_ok=True)
     # newline="\n": text mode would emit CRLF on Windows, so plist_is_current
     # would never match what render_plist produces.
     target.write_text(render_plist(spec), encoding="utf-8", newline="\n")

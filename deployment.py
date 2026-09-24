@@ -506,10 +506,34 @@ def agent_plist_check(spec: launch_agent.AgentSpec, home: Path, install: Install
     )
 
 
+def agent_log_directory_check(spec: launch_agent.AgentSpec, home: Path, install: InstallCommand) -> Check:
+    """launchd creates no directory for StandardOutPath, so an enabled agent
+    whose logs/ was deleted never starts again and writes nothing anywhere."""
+    directory = spec.output_path.parent
+
+    def probe() -> CheckOutcome:
+        if directory.is_dir():
+            return CheckOutcome(Status.PASS, str(directory))
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.PASS, f"{directory} is absent, but the agent is not enabled")
+        return CheckOutcome(Status.FAIL, f"{directory} is missing, so launchd cannot start the agent")
+
+    def fix() -> str:
+        directory.mkdir(parents=True, exist_ok=True)
+        return f"created {directory}"
+
+    return Check(
+        name="launch agent log directory",
+        probe=probe,
+        remedy=f"{install.render()} recreates it; delete the files in logs/, never the folder",
+        fix=fix,
+        needed_by_agent=False,
+    )
+
+
 def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) -> Check:
-    # Relative, as the operator reads them from the checkout they run install.sh in.
-    stdout_log = spec.stdout_path.relative_to(spec.working_directory).as_posix()
-    stderr_log = spec.stderr_path.relative_to(spec.working_directory).as_posix()
+    # Relative, as the operator reads it from the checkout they run install.sh in.
+    agent_log = spec.output_path.relative_to(spec.working_directory).as_posix()
 
     def probe() -> CheckOutcome:
         output = platform_probe.launchctl_print(spec.label)
@@ -530,7 +554,7 @@ def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) ->
         name="launch agent loaded",
         probe=probe,
         remedy=(
-            f"read {stdout_log} and {stderr_log} for why the last run failed; to "
+            f"run tail -20 {agent_log} to see why the last run failed; to "
             "reload the agent, "
             "log in as the operating account and run "
             f"{install.render(enable_agent=True)}"

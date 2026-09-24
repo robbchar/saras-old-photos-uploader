@@ -550,6 +550,53 @@ reason, so a directory listing sorts in the order the runs actually happened.
 **2026-09-23:** `--resume-from` was removed with the CSV paths (#44). The
 tool no longer reads its logs back; only audits do.
 
+## The agent's output is one dated file, never rotated
+
+*Decided 2026-09-24 (#52).*
+
+The LaunchAgent used to send stdout and stderr to two files,
+`logs/launchagent-<project>.out` and `.err`, and no line in either said when
+it was written. For some failures those files are the only record. A refusal
+before the run log opens writes no JSONL and no log-tab row: a placeholder
+`sheet_id`, a rejected key, a Sheet that could not be read, the sync header
+refusal, no data rows, no row marked uploaded yet. Sync also split its
+reasons across the pair, with setup refusals on stderr and run-time exit-1
+reasons on stdout, so reading one file could miss why a run failed.
+
+Both streams now go to one `logs/launchagent-<project>.log`. `main()`
+line-buffers stdout, so lines from the two streams land in the order they
+were written; stderr is line-buffered already. Then, before the command loads
+anything, it prints `utc_timestamp()` and the command name. A registry that
+will not load, such as one broken by a hand edit on the Mac, still fails under
+its own run's date. Both live in `ia_bulk.py`, not the plist, so they hold
+under any runner, and `ProgramArguments` stays exactly the command line
+`ia_bulk.py` parses, which #53's test of the agent's arguments against the
+real parser relies on. Setting `PYTHONUNBUFFERED=1` in the plist was the
+first version: it ordered only the agent's output, and made every write
+unbuffered.
+
+Some output still has no date of its own. An argument the parser rejects, or
+an interpreter that will not start, fails before `main()` prints anything.
+Both follow a `git pull` or an install, when someone is at the machine running
+`doctor`. A warning a library prints while being imported lands just above
+its run's dated line, where it reads as the end of the previous run.
+
+launchd creates no directory for the log file. Delete old files in `logs/`,
+never the folder: without it an enabled agent never starts again and writes
+nothing anywhere. `doctor`'s `launch agent log directory` check fails on
+that, and `./install.sh` recreates the folder.
+
+The file is not rotated. On a one-field test Sheet, a quiet hourly run adds 8
+lines and 368 bytes. The real Sheet's field receipt is longer, but a year
+still comes to a few MB.
+
+Once any row is marked uploaded, hourly sync also writes one JSONL run log
+per run, the quiet ones included, because "ran and found nothing to do" has to
+stay distinguishable from "did not run". That is about 8,760 files a year in
+`logs/`, each a few KB (2.9 KB on the same test Sheet). Accepted: they are
+what an audit reads, and their count costs a directory listing, not
+correctness. Pruning old quiet-run logs would be its own change.
+
 ## "Unchanged" is a third outcome, not a failure
 
 IA returns HTTP 400 with `{"error": "no changes to _meta.xml"}` when a
