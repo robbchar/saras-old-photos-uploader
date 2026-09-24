@@ -1,0 +1,17 @@
+{
+  "header": [
+    "Folder on LaCie Drive", "File Name", "Title", "Date", "Theme", "Place ",
+    "Subtheme (Optional)", "Subject Terms (Controlled Vocab)", "Names (Last, First M.)",
+    "Description", "Genre / Form", "Physical Format", "Photographer / Studio",
+    "Source / Collection", "Rights", "Notes (LCPS Internal)", "Architect", "Builder",
+    "Architectura Style", "Construction Date", "Addresses", "ia_identifier",
+    "ia_identifier_bib", "ia_uploaded", "ia_url", "ia_sync_hash", "ia_last_synced."
+  ],
+  "rows": [
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-01.jpg", "Title": "E2E fixture 1", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-02.jpg", "Title": "E2E fixture 2", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-03.jpg", "Title": "E2E fixture 3", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-04.jpg", "Title": "E2E fixture 4", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-05.jpg", "Title": "E2E fixture 5", "Description": "Synthetic image for the e2e rehearsal; not a photograph."}
+  ]
+}

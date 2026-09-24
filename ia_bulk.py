@@ -1385,13 +1385,15 @@ def update_metadata_row(row: dict, target_identifier: str) -> None:
     retry_ia_call(send, f"metadata update of '{target_identifier}'")
 
 
+def build_sheets_service(key_path: Path):
+    """The only place credentials are loaded and `googleapiclient.discovery.build` is called."""
+    credentials = google_auth.load_service_account_credentials(key_path)
+    return googleapiclient.discovery.build("sheets", "v4", credentials=credentials)
+
+
 def build_sheet_client(config: ProjectConfig, live: bool) -> SheetClient:
-    """The only place credentials are loaded and `googleapiclient.discovery.build` is
-    called, so tests monkeypatch this one seam."""
-    credentials = google_auth.load_service_account_credentials(
-        google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
-    )
-    service = googleapiclient.discovery.build("sheets", "v4", credentials=credentials)
+    """The seam tests monkeypatch."""
+    service = build_sheets_service(google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH)
     return SheetClient(service, config.sheet_id_for(live), config.sheet_tab)
 
 
@@ -2235,7 +2237,7 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     ]
 
     if include_network:
-        # A closure, not an import: build_sheet_client stays the only place
+        # A closure, not an import: build_sheets_service stays the only place
         # credentials are loaded, and deployment.py never imports ia_bulk.
         # Memoized because both Sheet checks share it: two clients meant two
         # token fetches and two full reads of a 10,000-row Sheet per `doctor`.

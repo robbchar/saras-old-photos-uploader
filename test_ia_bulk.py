@@ -39,6 +39,7 @@ from ia_bulk import (
     log_result,
     build_parser,
     build_sheet_client,
+    build_sheets_service,
     format_field_receipt,
     format_lifecycle_summary,
     format_missing_field_lines,
@@ -1234,6 +1235,19 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
     assert captured["api"] == "sheets"
     assert captured["version"] == "v4"
     assert captured["key_path"] == google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
+
+
+def test_build_sheets_service_loads_the_key_it_is_given(monkeypatch, tmp_path):
+    loaded = []
+    monkeypatch.setattr(
+        "ia_bulk.google_auth.load_service_account_credentials",
+        lambda key_path: loaded.append(key_path) or "FAKE_CREDS",
+    )
+    fake_service = _RecordingSheetsService({"values": []})
+    monkeypatch.setattr("ia_bulk.googleapiclient.discovery.build", lambda *a, **k: fake_service)
+
+    assert build_sheets_service(tmp_path / "key.json") is fake_service
+    assert loaded == [tmp_path / "key.json"]
 
 
 def test_cmd_validate_reads_the_sheet_and_injects_mediatype(

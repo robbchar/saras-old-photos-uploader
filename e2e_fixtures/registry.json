@@ -1,16 +1,16 @@
 {
   "collection_key": "lcps",
   "projects": {
-    "sarasoldphotos": {
-      "description": "Sara's donated collection of historical Astoria photos",
+    "e2e": {
+      "description": "Synthetic fixture project for test_e2e_rehearsal.py. Its Sheet is the Test Sheet; test data is ephemeral.",
       "mediatype": "image",
-      "ia_collection": "sarasoldphotos",
-      "sheet_id": "REPLACE_WITH_REAL_SHEET_ID",
+      "ia_collection": "test_collection",
+      "sheet_id": "REPLACE_WITH_NEVER_LIVE",
       "test_sheet_id": "1fHBL6zrJ8QiNsBX5zgiOxeG_cONBS8PC74OMO2TVIr4",
       "sheet_tab": "Test Sheet",
       "upload_log_tab": "Upload Log",
       "sync_log_tab": "Sync Log",
-      "files_dir": "./data",
+      "files_dir": "e2e_fixtures/files",
       "file_template": "{folder_on_lacie_drive}/{file_name}",
       "batch_column": "theme",
       "required_for_upload": ["title", "theme"]
