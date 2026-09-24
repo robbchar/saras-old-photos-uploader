@@ -1,0 +1,84 @@
+"""Test-only writes to the Test Sheet for the e2e rehearsal (test_e2e_rehearsal.py).
+
+Every write takes an E2ESheet, and only check_reset_allowed builds one.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ia_bulk import PLACEHOLDER_SHEET_ID_PREFIX
+
+E2E_PROJECT = "e2e"
+
+
+class ResetRefused(Exception):
+    """The guard found a reason not to write to this Sheet."""
+
+
+@dataclass(frozen=True)
+class E2ESheet:
+    """A Sheet the guard cleared for rewriting. Build it only via check_reset_allowed."""
+
+    sheet_id: str
+    data_tab: str
+    upload_log_tab: str
+    sync_log_tab: str
+
+    @property
+    def log_tabs(self) -> tuple[str, str]:
+        return (self.upload_log_tab, self.sync_log_tab)
+
+
+def _read_registry(path: Path) -> dict[str, Any]:
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ResetRefused(f"cannot read registry {path}: {exc}") from exc
+    if not isinstance(registry, dict) or not isinstance(registry.get("projects"), dict):
+        raise ResetRefused(f"registry {path} has no projects map")
+    return registry
+
+
+def _required(block: dict[str, Any], key: str, project: str) -> str:
+    value = str(block.get(key) or "").strip()
+    if not value:
+        raise ResetRefused(f"project '{project}' has no {key}")
+    return value
+
+
+def check_reset_allowed(
+    e2e_registry_path: Path, live_registry_path: Path, project: str = E2E_PROJECT
+) -> E2ESheet:
+    """Fails closed: any doubt about either registry refuses."""
+    e2e_registry = _read_registry(e2e_registry_path)
+    live_registry = _read_registry(live_registry_path)
+
+    block = e2e_registry["projects"].get(project)
+    if not isinstance(block, dict):
+        raise ResetRefused(f"{e2e_registry_path} has no project '{project}'")
+
+    own_live_id = str(block.get("sheet_id") or "")
+    if not own_live_id.startswith(PLACEHOLDER_SHEET_ID_PREFIX):
+        raise ResetRefused(
+            f"'{project}' sheet_id must stay a {PLACEHOLDER_SHEET_ID_PREFIX}... placeholder so it can never run --live"
+        )
+
+    target = E2ESheet(
+        sheet_id=_required(block, "test_sheet_id", project),
+        data_tab=_required(block, "sheet_tab", project),
+        upload_log_tab=_required(block, "upload_log_tab", project),
+        sync_log_tab=_required(block, "sync_log_tab", project),
+    )
+
+    live_ids = {
+        str(live_block.get("sheet_id") or "").strip()
+        for live_block in live_registry["projects"].values()
+        if isinstance(live_block, dict)
+    }
+    if target.sheet_id in live_ids:
+        raise ResetRefused(f"{target.sheet_id} is a live sheet_id in {live_registry_path}; refusing to write to it")
+    return target
