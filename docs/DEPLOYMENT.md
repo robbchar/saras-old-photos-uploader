@@ -658,6 +658,10 @@ sign-in even if it tried.
    mv .ignored/google-service-account.json.off .ignored/google-service-account.json
    ```
 
+Steps 1 and 2 also run inside the e2e rehearsal
+(`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`); step 3 does not,
+so run it by hand after replacing the key.
+
 For a full round trip — a real edit reaching Internet Archive, and the Sheet's
 version history showing the service account as its editor — follow
 [4. Corrections](OPERATIONS.md#4-corrections) against the test Sheet: change

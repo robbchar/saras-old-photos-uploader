@@ -567,6 +567,19 @@ offline CSV paths were removed on 2026-09-23 — see
 python -m pytest test_ia_bulk.py -v
 ```
 
+### E2E rehearsal (opt-in)
+
+```bash
+python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+```
+
+Drives the real CLI against the Test Sheet and IA's `test_collection` — the
+automated form of `docs/OPERATIONS.md`, "Rehearsing the log tabs". Takes a few
+minutes and is skipped without `--run-e2e`. Needs the service-account key at
+`.ignored/google-service-account.json` in the checkout being run (a fresh
+worktree has none) and `ia configure` done on the machine. It rewrites the
+Test Sheet every run; test data is ephemeral.
+
 ## Linting and type checking
 
 ```bash

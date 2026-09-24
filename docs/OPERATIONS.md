@@ -257,6 +257,12 @@ to recur across a 10,000-row collection.
 
 ## 2. Test run
 
+**If the e2e rehearsal has run, skip this against `sarasoldphotos`.** It
+rewrites the Test Sheet with the `e2e` project's fixture rows — see
+[`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+Rehearse there with `--registry e2e_fixtures/registry.json --project e2e` in
+place of `--project sarasoldphotos` below.
+
 ```bash
 # against the project's test Sheet (the normal path)
 python ia_bulk.py upload --project sarasoldphotos
@@ -527,6 +533,10 @@ substitution, and `tail` then reports `option used in invalid context`.
 
 ### Seeing the summary work, on purpose
 
+**This also needs a Test Sheet the e2e rehearsal has not just rewritten** —
+see [`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral);
+use `--project e2e` there instead.
+
 **Do not clear `ia_identifier` to set this up.** Clearing those four cells is
 the *upload* rehearsal reset — §2, ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done) — and it does the
 opposite of what is wanted here. `sync-metadata` corrects items that already
@@ -728,6 +738,33 @@ stderr, and the run still succeeds — the JSONL on disk remains the record of
 record.
 
 ### Rehearsing the log tabs
+
+**This whole recipe is automated.** Run
+
+```bash
+python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+```
+
+It rewrites the Test Sheet from `e2e_fixtures/` first, so the Test Sheet now
+belongs to the `e2e` project; a hand rehearsal after it uses
+`--registry e2e_fixtures/registry.json --project e2e` in place of
+`--project sarasoldphotos`. Test data is ephemeral — see
+[`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+
+| Manual step (command as given below) | Automated step |
+|---|---|
+| §2 "Re-rehearsing a row that is already done": clear the four `ia_` cells by hand | 0 — whole grid rewritten |
+| Delete `Upload Log` / `Sync Log` to re-exercise creation | 0 |
+| §1 / DEPLOYMENT §16 step 1: `python ia_bulk.py validate --project sarasoldphotos` | 1 |
+| Step 1: `python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 1`, twice | 2, 3 |
+| Step 2: break a filename, `python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 2` | 4 |
+| Pre-live checklist: open a `zztest-…` item and read it | 5, 8 |
+| DEPLOYMENT §16 step 2: `python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run` | 6 |
+| Step 3: edit a Title, `python ia_bulk.py sync-metadata --project sarasoldphotos`, twice | 7, 9 |
+| Step 4: `grep '<when value>' logs/<run value>` | 10 |
+| Step 5: File → Version history, by eye | 11 |
+
+Each step's failure message names the manual step it stands for.
 
 A repeatable pass against the test Sheet, for after any change to how runs
 are mirrored. Every command here is test mode: it reads the test Sheet and

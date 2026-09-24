@@ -460,3 +460,28 @@ that is already done".
 This does not generalize to the `sync-metadata` reset, which is one cell
 (`ia_sync_hash`), is safe by construction — a wrongly cleared row re-sends
 and IA reports it `unchanged` — and needs no command either.
+
+**Amended 2026-09-23:** the e2e rehearsal automates this reset for the Test
+Sheet, in test code behind a guard — see "Test data is ephemeral". The hand
+edit above is still the recipe for a manual rehearsal, and there is still no
+reset command.
+
+## Test data is ephemeral
+
+*Decided 2026-09-23.*
+
+The Test Sheet and every `test_collection` item may be wiped and rebuilt at
+any time. Anyone rehearsing against them should expect it. The e2e rehearsal
+(`test_e2e_rehearsal.py`) does exactly that on every run: it rewrites the
+Test Sheet's data tab from `e2e_fixtures/sheet.json` and deletes its log tabs.
+
+Ephemeral means disposable, not reusable. Internet Archive never releases an
+identifier, so a rehearsal still mints fresh `zztest-<stamp>-…` names; see
+"Test identifiers carry a per-run stamp".
+
+The rewrite lives in `e2e_sheet.py`, test code only; `ia_bulk.py` has no
+reset command. Every write goes through `check_reset_allowed`, which refuses
+unless the e2e registry's own `sheet_id` is a `REPLACE_WITH…` placeholder and
+its `test_sheet_id` is no project's live `sheet_id` in
+`projects_registry.json`. It compares against live IDs only: sharing the Test
+Sheet with `sarasoldphotos`'s `test_sheet_id` is intended.
