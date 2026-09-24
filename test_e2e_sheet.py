@@ -14,8 +14,13 @@ from e2e_sheet import (
     set_cell,
     tab_ids,
 )
+from project_config import load_project_config
 
 TEST_SHEET_ID = "test-sheet-id"
+
+REPO_ROOT = Path(__file__).resolve().parent
+FIXTURES = REPO_ROOT / "e2e_fixtures"
+REAL_HEADER_QUIRKS = ("Place ", "ia_last_synced.", "Notes (LCPS Internal)")
 
 
 def e2e_block(**overrides: str) -> dict[str, str]:
@@ -228,3 +233,39 @@ def test_load_fixture_grid_rejects_a_column_not_in_the_header(tmp_path):
 
 def test_pad_grid_restores_trailing_blanks_the_api_omits():
     assert pad_grid([["a"], ["b", "c"]], 3) == [["a", "", ""], ["b", "c", ""]]
+
+
+def test_checked_in_registry_loads_as_the_e2e_project():
+    registry = json.loads((FIXTURES / "registry.json").read_text(encoding="utf-8"))
+
+    config = load_project_config(registry, "e2e")
+
+    assert config.files_dir == "e2e_fixtures/files"
+
+
+def test_checked_in_registry_passes_the_guard_against_the_real_registry():
+    target = check_reset_allowed(FIXTURES / "registry.json", REPO_ROOT / "projects_registry.json")
+
+    assert target.data_tab == "Test Sheet"
+
+
+def test_checked_in_grid_keeps_the_real_header_quirks():
+    header = load_fixture_grid(FIXTURES / "sheet.json")[0]
+
+    assert all(quirk in header for quirk in REAL_HEADER_QUIRKS)
+
+
+def test_checked_in_grid_has_four_ready_rows_and_one_without_a_theme():
+    grid = load_fixture_grid(FIXTURES / "sheet.json")
+    theme = grid[0].index("Theme")
+
+    assert [bool(row[theme]) for row in grid[1:]] == [True, True, True, True, False]
+
+
+def test_every_checked_in_row_names_a_file_that_exists():
+    grid = load_fixture_grid(FIXTURES / "sheet.json")
+    folder, name = grid[0].index("Folder on LaCie Drive"), grid[0].index("File Name")
+
+    missing = [row[name] for row in grid[1:] if not (FIXTURES / "files" / row[folder] / row[name]).is_file()]
+
+    assert missing == []

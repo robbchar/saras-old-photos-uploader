@@ -1,0 +1,19 @@
+{
+  "collection_key": "lcps",
+  "projects": {
+    "e2e": {
+      "description": "Synthetic fixture project for test_e2e_rehearsal.py. Its Sheet is the Test Sheet; test data is ephemeral.",
+      "mediatype": "image",
+      "ia_collection": "test_collection",
+      "sheet_id": "REPLACE_WITH_NEVER_LIVE",
+      "test_sheet_id": "1Kgm7pRJSN7WIYt5pMpI0krw4V6Bs9UrAfeeO7jFcXPI",
+      "sheet_tab": "Test Sheet",
+      "upload_log_tab": "Upload Log",
+      "sync_log_tab": "Sync Log",
+      "files_dir": "e2e_fixtures/files",
+      "file_template": "{folder_on_lacie_drive}/{file_name}",
+      "batch_column": "theme",
+      "required_for_upload": ["title", "theme"]
+    }
+  }
+}
