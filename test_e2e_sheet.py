@@ -3,7 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from e2e_sheet import E2ESheet, ResetRefused, check_reset_allowed
+from e2e_sheet import (
+    E2ESheet,
+    ResetRefused,
+    check_reset_allowed,
+    column_letter,
+    load_fixture_grid,
+    pad_grid,
+    reset_test_sheet,
+    set_cell,
+    tab_ids,
+)
 
 TEST_SHEET_ID = "test-sheet-id"
 
@@ -96,3 +106,125 @@ def test_guard_refuses_a_live_registry_without_projects(tmp_path):
 
     with pytest.raises(ResetRefused, match="no projects"):
         check_reset_allowed(e2e_path, live_path)
+
+
+TARGET = E2ESheet(sheet_id=TEST_SHEET_ID, data_tab="Test Sheet", upload_log_tab="Upload Log", sync_log_tab="Sync Log")
+
+
+class FakeRequest:
+    def __init__(self, response: dict | None = None) -> None:
+        self._response = response or {}
+
+    def execute(self) -> dict:
+        return self._response
+
+
+class FakeValues:
+    def __init__(self, calls: list) -> None:
+        self._calls = calls
+
+    def clear(self, **kwargs) -> FakeRequest:
+        self._calls.append(("clear", kwargs))
+        return FakeRequest()
+
+    def update(self, **kwargs) -> FakeRequest:
+        self._calls.append(("update", kwargs))
+        return FakeRequest()
+
+
+class FakeSpreadsheets:
+    def __init__(self, calls: list, tabs: dict[str, int]) -> None:
+        self._calls = calls
+        self._tabs = tabs
+
+    def values(self) -> FakeValues:
+        return FakeValues(self._calls)
+
+    def get(self, **kwargs) -> FakeRequest:
+        self._calls.append(("get", kwargs))
+        sheets = [{"properties": {"title": title, "sheetId": sheet_id}} for title, sheet_id in self._tabs.items()]
+        return FakeRequest({"sheets": sheets})
+
+    def batchUpdate(self, **kwargs) -> FakeRequest:
+        self._calls.append(("batchUpdate", kwargs))
+        return FakeRequest()
+
+
+class FakeSheetsService:
+    """Records every Sheets API call; answers spreadsheets().get from `tabs`."""
+
+    def __init__(self, tabs: dict[str, int]) -> None:
+        self.calls: list = []
+        self._tabs = tabs
+
+    def spreadsheets(self) -> FakeSpreadsheets:
+        return FakeSpreadsheets(self.calls, self._tabs)
+
+
+def test_tab_ids_maps_titles_to_sheet_ids():
+    service = FakeSheetsService({"Test Sheet": 0, "Upload Log": 7})
+
+    assert tab_ids(service, TEST_SHEET_ID) == {"Test Sheet": 0, "Upload Log": 7}
+
+
+def test_reset_clears_writes_and_deletes_existing_log_tabs():
+    service = FakeSheetsService({"Test Sheet": 0, "Upload Log": 7, "Sync Log": 9, "Other": 3})
+    grid = [["Title"], ["E2E fixture 1"]]
+
+    reset_test_sheet(service, TARGET, grid)
+
+    clear, update, _, delete = service.calls
+    assert clear == ("clear", {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'", "body": {}})
+    assert update == (
+        "update",
+        {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'!A1", "valueInputOption": "RAW", "body": {"values": grid}},
+    )
+    assert delete == (
+        "batchUpdate",
+        {"spreadsheetId": TEST_SHEET_ID, "body": {"requests": [{"deleteSheet": {"sheetId": 7}}, {"deleteSheet": {"sheetId": 9}}]}},
+    )
+
+
+def test_reset_skips_the_delete_when_no_log_tab_exists():
+    service = FakeSheetsService({"Test Sheet": 0})
+
+    reset_test_sheet(service, TARGET, [["Title"]])
+
+    assert [name for name, _ in service.calls] == ["clear", "update", "get"]
+
+
+@pytest.mark.parametrize(("number", "letters"), [(1, "A"), (3, "C"), (26, "Z"), (27, "AA"), (28, "AB"), (52, "AZ")])
+def test_column_letter(number, letters):
+    assert column_letter(number) == letters
+
+
+def test_set_cell_writes_one_cell_on_the_data_tab():
+    service = FakeSheetsService({})
+
+    set_cell(service, TARGET, row_number=2, column_number=3, value="edited")
+
+    assert service.calls == [
+        (
+            "update",
+            {"spreadsheetId": TEST_SHEET_ID, "range": "'Test Sheet'!C2", "valueInputOption": "RAW", "body": {"values": [["edited"]]}},
+        )
+    ]
+
+
+def test_load_fixture_grid_lays_rows_out_by_header(tmp_path):
+    path = tmp_path / "sheet.json"
+    path.write_text(json.dumps({"header": ["A", "B", "C"], "rows": [{"C": "3", "A": "1"}]}), encoding="utf-8")
+
+    assert load_fixture_grid(path) == [["A", "B", "C"], ["1", "", "3"]]
+
+
+def test_load_fixture_grid_rejects_a_column_not_in_the_header(tmp_path):
+    path = tmp_path / "sheet.json"
+    path.write_text(json.dumps({"header": ["A"], "rows": [{"Titel": "x"}]}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Titel"):
+        load_fixture_grid(path)
+
+
+def test_pad_grid_restores_trailing_blanks_the_api_omits():
+    assert pad_grid([["a"], ["b", "c"]], 3) == [["a", "", ""], ["b", "c", ""]]

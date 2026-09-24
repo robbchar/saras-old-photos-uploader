@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import googleapiclient.discovery
+
+import google_auth
 from ia_bulk import PLACEHOLDER_SHEET_ID_PREFIX
+from sheet_client import quote_tab
 
 E2E_PROJECT = "e2e"
 
@@ -82,3 +86,62 @@ def check_reset_allowed(
     if target.sheet_id in live_ids:
         raise ResetRefused(f"{target.sheet_id} is a live sheet_id in {live_registry_path}; refusing to write to it")
     return target
+
+
+def build_sheets_service(key_path: Path) -> Any:
+    credentials = google_auth.load_service_account_credentials(key_path)
+    return googleapiclient.discovery.build("sheets", "v4", credentials=credentials)
+
+
+def tab_ids(service: Any, sheet_id: str) -> dict[str, int]:
+    response = service.spreadsheets().get(spreadsheetId=sheet_id, fields="sheets.properties(sheetId,title)").execute()
+    return {sheet["properties"]["title"]: sheet["properties"]["sheetId"] for sheet in response.get("sheets", [])}
+
+
+def reset_test_sheet(service: Any, target: E2ESheet, grid: list[list[str]]) -> None:
+    """Replace the data tab with `grid` and delete both log tabs, so the next run recreates them."""
+    values = service.spreadsheets().values()
+    values.clear(spreadsheetId=target.sheet_id, range=quote_tab(target.data_tab), body={}).execute()
+    values.update(
+        spreadsheetId=target.sheet_id,
+        range=f"{quote_tab(target.data_tab)}!A1",
+        valueInputOption="RAW",
+        body={"values": grid},
+    ).execute()
+
+    existing = tab_ids(service, target.sheet_id)
+    deletions = [{"deleteSheet": {"sheetId": existing[tab]}} for tab in target.log_tabs if tab in existing]
+    if deletions:
+        service.spreadsheets().batchUpdate(spreadsheetId=target.sheet_id, body={"requests": deletions}).execute()
+
+
+def column_letter(column_number: int) -> str:
+    letters = ""
+    while column_number > 0:
+        column_number, remainder = divmod(column_number - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def set_cell(service: Any, target: E2ESheet, row_number: int, column_number: int, value: str) -> None:
+    cell = f"{quote_tab(target.data_tab)}!{column_letter(column_number)}{row_number}"
+    service.spreadsheets().values().update(
+        spreadsheetId=target.sheet_id, range=cell, valueInputOption="RAW", body={"values": [[value]]}
+    ).execute()
+
+
+def load_fixture_grid(path: Path) -> list[list[str]]:
+    """`{"header": [...], "rows": [{column: value}]}` to a grid; unnamed columns are blank."""
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+    header: list[str] = fixture["header"]
+    grid = [list(header)]
+    for row in fixture["rows"]:
+        unknown = sorted(set(row) - set(header))
+        if unknown:
+            raise ValueError(f"fixture row names columns not in the header: {unknown}")
+        grid.append([row.get(column, "") for column in header])
+    return grid
+
+
+def pad_grid(grid: list[list[str]], width: int) -> list[list[str]]:
+    return [row + [""] * (width - len(row)) for row in grid]
