@@ -3383,6 +3383,19 @@ REMOVE_TAG_SENTINEL = "REMOVE_TAG"
 # typo to be visible in place, short enough that one changed field stays one
 # readable pair of lines.
 DRY_RUN_VALUE_WIDTH = 96
+# Shared text kept before the first difference when a pair is shown from partway in.
+DRY_RUN_DIFFERENCE_CONTEXT = 20
+
+
+@dataclass(frozen=True)
+class FieldChange:
+    """One field a sync would alter, as the dry run prints it."""
+
+    field_name: str
+    now: str
+    new: str
+    # Why it is still a change when `now` and `new` read alike; None otherwise.
+    note: str | None = None
 
 
 def fetch_current_metadata(identifier: str) -> dict | None:
@@ -3403,24 +3416,67 @@ def fetch_current_metadata(identifier: str) -> dict | None:
         return None
 
 
-def _render(value: object) -> str:
+def _display_text(value: object) -> str:
     """IA returns a list for a field that occurs more than once."""
     if isinstance(value, list):
-        value = "; ".join(str(part) for part in value)
-    text = str(value)
+        return "; ".join(str(part) for part in value)
+    return str(value)
+
+
+def _elide(text: str) -> str:
     if len(text) > DRY_RUN_VALUE_WIDTH:
         # ASCII, deliberately: this report is read on a Windows console whose
         # codepage cannot encode U+2026, where one non-ASCII character raises
         # UnicodeEncodeError and truncates the whole report mid-run.
-        text = text[:DRY_RUN_VALUE_WIDTH - 3] + "..."
+        return text[:DRY_RUN_VALUE_WIDTH - 3] + "..."
     return text
 
 
-def metadata_changes(
-    sheet_metadata: dict[str, str], remote: dict
-) -> list[tuple[str, str, str]]:
-    """(field, what IA holds now, what the Sheet would make it), for the
-    fields a sync would actually alter.
+def _render(value: object) -> str:
+    return _elide(_display_text(value))
+
+
+def _first_difference(current_text: str, new_text: str) -> int:
+    """Index of the first differing character; the shorter length if one text starts the other."""
+    for index, (current_char, new_char) in enumerate(zip(current_text, new_text)):
+        if current_char != new_char:
+            return index
+    return min(len(current_text), len(new_text))
+
+
+def _collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _why_it_reads_unchanged(current: object, current_text: str, new_text: str) -> str | None:
+    """None when the two texts visibly differ. ASCII, for the same reason as _elide."""
+    if _collapse_whitespace(current_text) != _collapse_whitespace(new_text):
+        return None
+    if isinstance(current, list):
+        return (
+            f"(Internet Archive holds {_pluralize(len(current), 'separate value')}; "
+            "the sync replaces them with one)"
+        )
+    return "(the two differ only in spaces or line breaks)"
+
+
+def _render_change(field_name: str, current: object, new: str) -> FieldChange:
+    """When the cutoff would hide the difference, both values are shown from
+    just before it instead of from their start."""
+    current_text = _display_text(current)
+    current_shown, new_shown = _elide(current_text), _elide(new)
+    if current_shown == new_shown and current_text != new:
+        start = max(0, _first_difference(current_text, new) - DRY_RUN_DIFFERENCE_CONTEXT)
+        current_shown = _elide("..." + current_text[start:])
+        new_shown = _elide("..." + new[start:])
+    return FieldChange(
+        field_name, current_shown, new_shown, _why_it_reads_unchanged(current, current_text, new)
+    )
+
+
+def metadata_changes(sheet_metadata: dict[str, str], remote: dict) -> list[FieldChange]:
+    """What IA holds now and what the Sheet would make it, for the fields a
+    sync would actually alter.
 
     Mirrors update_metadata_row's rules exactly, because a dry run that
     predicts something other than what the real run does is worse than no dry
@@ -3432,17 +3488,17 @@ def metadata_changes(
     Raw values are compared, never their rendered text: two long values that
     differ only past the display cutoff are still a change, and a string
     against IA's list is one too, since the real run replaces the list."""
-    changes: list[tuple[str, str, str]] = []
+    changes: list[FieldChange] = []
     for field_name, value in sorted(metadata_to_send(sheet_metadata).items()):
         current = remote.get(field_name)
         if value == REMOVE_TAG_SENTINEL:
             if current is not None:
-                changes.append((field_name, _render(current), "(deleted)"))
+                changes.append(FieldChange(field_name, _render(current), "(deleted)"))
             continue
         if current is None:
-            changes.append((field_name, "(not set)", _render(value)))
+            changes.append(FieldChange(field_name, "(not set)", _render(value)))
         elif current != value:
-            changes.append((field_name, _render(current), _render(value)))
+            changes.append(_render_change(field_name, current, value))
     return changes
 
 
@@ -3498,10 +3554,12 @@ def print_sync_dry_run(
 
         changed += 1
         print(f"  row {target.row_number}: {target.uploaded_as}")
-        for field_name, current, new in changes:
-            print(f"      {field_name}")
-            print(f"          now: {current}")
-            print(f"          new: {new}")
+        for change in changes:
+            print(f"      {change.field_name}")
+            print(f"          now: {change.now}")
+            print(f"          new: {change.new}")
+            if change.note:
+                print(f"          {change.note}")
 
     if changed or unreadable:
         print()
