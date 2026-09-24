@@ -580,11 +580,20 @@ minutes and is skipped without `--run-e2e`. Needs the service-account key at
 worktree has none) and `ia configure` done on the machine. It rewrites the
 Test Sheet every run; test data is ephemeral.
 
+**The Test Sheet holds the `e2e` project's grid.** Test-mode hand commands
+use `--registry e2e_fixtures/registry.json --project e2e`; `--project
+sarasoldphotos` without `--live` now reads those same rows, so save it for
+`--live` against the real Sheet. After a passing run, rows 2, 3 and 5 are
+uploaded and synced, row 2's `Title` is edited, and row 6 is still not ready
+(no theme) — reset rows per
+[`docs/OPERATIONS.md`, "Re-rehearsing a row that is already done"](docs/OPERATIONS.md#re-rehearsing-a-row-that-is-already-done)
+before a hand upload.
+
 ## Linting and type checking
 
 ```bash
 python -m ruff check .        # style/lint (unused imports, bug-prone patterns, ...)
-python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py   # static type checking (same engine as VS Code's Pylance)
+python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py e2e_sheet.py test_e2e_sheet.py test_e2e_rehearsal.py   # static type checking (same engine as VS Code's Pylance)
 ```
 
 `pyright` is the command-line engine behind the Pylance VS Code extension —

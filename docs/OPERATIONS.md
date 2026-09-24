@@ -118,8 +118,9 @@ for exactly what it writes and refuses.
 > "Why this is a hard rule" below.
 
 ```bash
-# against the project's test Sheet
-python ia_bulk.py validate --project sarasoldphotos
+# against the e2e registry's Test Sheet (the Test Sheet holds the e2e grid; see
+# docs/decisions/SHEET-PROTOCOL.md, "Test data is ephemeral")
+python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e
 
 # against the real Sheet (still uploads nothing and writes nothing)
 python ia_bulk.py validate --project sarasoldphotos --live
@@ -257,18 +258,19 @@ to recur across a 10,000-row collection.
 
 ## 2. Test run
 
-**If the e2e rehearsal has run, skip this against `sarasoldphotos`.** It
-rewrites the Test Sheet with the `e2e` project's fixture rows — see
+**The Test Sheet holds the `e2e` project's fixture rows**, not
+`sarasoldphotos`'s — see
 [`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
-Rehearse there with `--registry e2e_fixtures/registry.json --project e2e` in
-place of `--project sarasoldphotos` below.
+Test-mode hand commands use `--registry e2e_fixtures/registry.json --project
+e2e` in place of `--project sarasoldphotos` below; `--project sarasoldphotos`
+is for `--live` against the real Sheet.
 
 ```bash
-# against the project's test Sheet (the normal path)
-python ia_bulk.py upload --project sarasoldphotos
+# against the e2e registry's Test Sheet (the normal path)
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e
 
 # ...and again, recording the minted identifiers in the test Sheet
-python ia_bulk.py upload --project sarasoldphotos --write-identifier
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier
 ```
 
 Run it once without `--write-identifier` first: that mode
@@ -402,8 +404,10 @@ real files in the wrong place under a permanent identifier.
       filled in, and no edit is still sitting unsaved or as a pending
       suggestion. A `--live` run reads the Sheet directly; there is no CSV
       export step to redo, and nothing local to go stale.
-- [ ] A test run (**no** `--live`) over these same rows succeeded, and at
-      least one resulting `zztest-…` item was eyeballed in a browser.
+- [ ] The e2e rehearsal passes on this checkout
+      (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
+      `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
+      over the real Sheet printed the identifiers and cells you expected.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.
@@ -533,9 +537,9 @@ substitution, and `tail` then reports `option used in invalid context`.
 
 ### Seeing the summary work, on purpose
 
-**This also needs a Test Sheet the e2e rehearsal has not just rewritten** —
-see [`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral);
-use `--project e2e` there instead.
+**The Test Sheet holds the `e2e` grid; use `--registry
+e2e_fixtures/registry.json --project e2e`** — see
+[`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
 
 **Do not clear `ia_identifier` to set this up.** Clearing those four cells is
 the *upload* rehearsal reset — §2, ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done) — and it does the
@@ -748,8 +752,15 @@ python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
 It rewrites the Test Sheet from `e2e_fixtures/` first, so the Test Sheet now
 belongs to the `e2e` project; a hand rehearsal after it uses
 `--registry e2e_fixtures/registry.json --project e2e` in place of
-`--project sarasoldphotos`. Test data is ephemeral — see
+`--project sarasoldphotos` below — `--project sarasoldphotos` without
+`--live` now reads those same `e2e` rows, so it is for `--live` against the
+real Sheet only. Test data is ephemeral — see
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+
+After a passing run, rows 2, 3 and 5 are uploaded and synced, row 2's
+`Title` is edited, and row 6 is still not ready (no theme); reset rows per
+["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done)
+(§2) before a hand upload.
 
 | Manual step (command as given below) | Automated step |
 |---|---|
@@ -757,12 +768,13 @@ belongs to the `e2e` project; a hand rehearsal after it uses
 | Delete `Upload Log` / `Sync Log` to re-exercise creation | 0 |
 | §1 / DEPLOYMENT §16 step 1: `python ia_bulk.py validate --project sarasoldphotos` | 1 |
 | Step 1: `python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 1`, twice | 2, 3 |
-| Step 2: break a filename, `python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 2` | 4 |
+| Step 2: break a filename, `python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 2` (automated step uses `--limit 1`) | 4 |
 | Pre-live checklist: open a `zztest-…` item and read it | 5, 8 |
 | DEPLOYMENT §16 step 2: `python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run` | 6 |
 | Step 3: edit a Title, `python ia_bulk.py sync-metadata --project sarasoldphotos`, twice | 7, 9 |
 | Step 4: `grep '<when value>' logs/<run value>` | 10 |
 | Step 5: File → Version history, by eye | 11 |
+| Step 2: put the cell back | 12 |
 
 Each step's failure message names the manual step it stands for.
 
