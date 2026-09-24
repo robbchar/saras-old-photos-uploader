@@ -48,6 +48,8 @@ CLI_TIMEOUT_SECONDS = 900
 UPLOAD_COLUMNS = ("ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib")
 SYNC_COLUMNS = ("ia_sync_hash", "ia_last_synced.")
 BROKEN_FILENAME = "does-not-exist.jpg"
+# ia_bulk.py prints this on stderr when IA refuses a request as rate limited and the run stops.
+IA_RATE_LIMIT_NOTICE = "Internet Archive reported a rate limit"
 
 # Grid indexes; header is 0, so Sheet row = index + 1.
 FIRST_UPLOADED, SECOND_UPLOADED, BROKEN_ROW, THIRD_UPLOADED, NOT_READY_ROW = 1, 2, 3, 4, 5
@@ -105,6 +107,11 @@ def expect(step: str, condition: bool, message: str) -> None:
 
 def expect_run(step: str, result: subprocess.CompletedProcess[str], exit_code: int, *texts: str) -> None:
     if result.returncode != exit_code:
+        if IA_RATE_LIMIT_NOTICE in result.stderr:
+            pytest.fail(
+                f"{step}: Internet Archive is throttling uploads, not a defect in the tool; re-run later\n"
+                f"{output_of(result)}"
+            )
         pytest.fail(f"{step}: expected exit {exit_code}, got {result.returncode}\n{output_of(result)}")
     for text in texts:
         if text not in result.stdout:
@@ -295,3 +302,22 @@ def test_print_for_console_survives_a_non_utf8_console(monkeypatch):
     """A cp1252 console can't encode ia's progress-bar block char; this must not raise."""
     monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
     _print_for_console("uploading e2e-01.jpg: 100%|██████████| 1/1")
+
+
+def test_a_throttled_run_fails_as_ia_throttling_not_a_defect():
+    throttled = subprocess.CompletedProcess(
+        args=["ia_bulk.py", "upload"],
+        returncode=1,
+        stdout="0 file(s) uploaded successfully, 1 error(s)\n",
+        stderr="stopped: Internet Archive reported a rate limit after 1 item\n",
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="step 2: Internet Archive is throttling uploads"):
+        expect_run("step 2", throttled, 0)
+
+
+def test_an_unthrottled_wrong_exit_still_fails_as_a_wrong_exit():
+    failed = subprocess.CompletedProcess(args=["ia_bulk.py", "upload"], returncode=1, stdout="", stderr="")
+
+    with pytest.raises(pytest.fail.Exception, match="step 2: expected exit 0, got 1"):
+        expect_run("step 2", failed, 0)
