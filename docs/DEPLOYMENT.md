@@ -247,8 +247,8 @@ here only because `ia configure` is the supported way to create the
 credentials file that the library then reads.
 
 **Where it writes.** Reading `internetarchive`'s own source
-(`internetarchive/config.py`, `parse_config_file()` — this repo pins
-`internetarchive==5.11.1`), the config file is chosen in this order, and the
+(`internetarchive/config.py`, `parse_config_file()`, at the exact version
+`requirements.txt` pins), the config file is chosen in this order, and the
 first one that already exists wins:
 
 1. the `IA_CONFIG_FILE` environment variable, if set

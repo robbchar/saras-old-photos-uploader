@@ -2,6 +2,7 @@
 # Exact pin: retry handling relies on library internals. See docs/decisions/QUOTA-AND-RUNS.md.
 internetarchive==5.11.1
 urllib3>=2.0,<3
+requests>=2.32,<3
 pytest>=8.0
 ruff>=0.15
 pyright>=1.1

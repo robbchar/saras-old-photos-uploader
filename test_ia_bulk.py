@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import dataclasses
+import importlib.metadata
 import io
 import json
 import re
@@ -5878,12 +5879,10 @@ def test_ia_retry_matches_the_librarys_own_policy_except_for_raise_on_status():
 def test_installed_internetarchive_is_the_pinned_version():
     """The library-contract tests above only vouch for the version they ran
     against, so that must be the exact version requirements.txt ships."""
-    requirements = (Path(ia_bulk.__file__).parent / "requirements.txt").read_text()
-
-    pin = re.search(r"^internetarchive==(\S+)$", requirements, re.MULTILINE)
+    pin = deployment.pinned_version(deployment.REQUIREMENTS_PATH.read_text(), "internetarchive")
 
     assert pin is not None, "requirements.txt must pin internetarchive with =="
-    assert internetarchive.__version__ == pin.group(1)
+    assert importlib.metadata.version("internetarchive") == pin
 
 
 def test_upload_row_asks_for_the_status_preserving_adapter(tmp_path, monkeypatch):
