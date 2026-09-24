@@ -485,7 +485,8 @@ unless the e2e registry's own `sheet_id` is a `REPLACE_WITH…` placeholder and
 its `test_sheet_id` is no project's live `sheet_id` in
 `projects_registry.json`. It compares against live IDs only: sharing the Test
 Sheet with `sarasoldphotos`'s `test_sheet_id` is intended. It also refuses a
-log tab named like the data tab, since the reset deletes the log tabs.
+placeholder `test_sheet_id`, and a log tab named like the data tab, since the
+reset deletes the log tabs.
 
 The live-ID check is empty until a real `sheet_id` is registered, so the reset
 also looks at the Sheet itself: it refuses to clear a data tab with more rows

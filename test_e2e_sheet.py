@@ -76,7 +76,20 @@ def test_guard_refuses_a_live_sheet_id_in_any_project(tmp_path):
 def test_guard_refuses_an_e2e_registry_with_a_real_sheet_id(tmp_path):
     e2e_path, live_path = write_registries(tmp_path, e2e_block(sheet_id="some-real-id"), {})
 
-    with pytest.raises(ResetRefused, match="placeholder"):
+    with pytest.raises(ResetRefused, match=r"REPLACE_WITH\.\.\. placeholder.*'some-real-id'"):
+        check_reset_allowed(e2e_path, live_path)
+
+
+def test_guard_accepts_a_padded_placeholder_sheet_id(tmp_path):
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(sheet_id=" REPLACE_WITH_NEVER_LIVE "), {})
+
+    assert check_reset_allowed(e2e_path, live_path).sheet_id == TEST_SHEET_ID
+
+
+def test_guard_refuses_a_placeholder_test_sheet_id(tmp_path):
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(test_sheet_id="REPLACE_WITH_TEST_SHEET_ID"), {})
+
+    with pytest.raises(ResetRefused, match="test_sheet_id is still the placeholder"):
         check_reset_allowed(e2e_path, live_path)
 
 
@@ -268,6 +281,12 @@ def test_checked_in_registry_loads_as_the_e2e_project():
     config = load_project_config(registry, "e2e")
 
     assert config.files_dir == "e2e_fixtures/files"
+
+
+def test_checked_in_registry_can_never_run_live():
+    registry = json.loads((FIXTURES / "registry.json").read_text(encoding="utf-8"))
+
+    assert load_project_config(registry, "e2e").sheet_id_is_placeholder(live=True)
 
 
 def test_checked_in_registry_passes_the_guard_against_the_real_registry():

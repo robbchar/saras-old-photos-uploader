@@ -234,7 +234,9 @@ def test_key_mode_check_fix_chmods_to_600(tmp_path, monkeypatch):
 def test_sheet_id_check_fails_on_the_placeholder():
     config = a_config(sheet_id="REPLACE_WITH_REAL_SHEET_ID")
     check = deployment.sheet_id_check(config, live=True, registry_path="projects_registry.json")
-    assert check.probe().status is Status.FAIL
+    outcome = check.probe()
+    assert outcome.status is Status.FAIL
+    assert "REPLACE_WITH_REAL_SHEET_ID" in outcome.detail
     assert "projects_registry.json" in check.remedy
 
 

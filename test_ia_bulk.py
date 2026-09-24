@@ -54,7 +54,7 @@ from ia_bulk import (
     batch_row_numbers,
     BatchScopeError,
 )
-from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS
+from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
 
 
 class FakeResponse:
@@ -1195,6 +1195,16 @@ def test_build_sheet_client_reads_the_test_sheet_id_when_not_live(monkeypatch):
     client.read_grid()
 
     assert fake_service.values_api.get_calls == [("TEST_SHEET_ID", "'Donor Photos'")]
+
+
+def test_build_sheet_client_refuses_a_placeholder_before_loading_credentials(monkeypatch):
+    monkeypatch.setattr(
+        "ia_bulk.build_sheets_service", lambda key_path: pytest.fail("loaded credentials for a placeholder ID")
+    )
+    config = _sheet_config(sheet_id="REPLACE_WITH_REAL_SHEET_ID")
+
+    with pytest.raises(PlaceholderSheetId, match="REPLACE_WITH_REAL_SHEET_ID"):
+        build_sheet_client(config, live=True)
 
 
 def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkeypatch):
