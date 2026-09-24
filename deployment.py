@@ -14,6 +14,8 @@ from __future__ import annotations
 import configparser
 import enum
 import importlib
+import importlib.metadata
+import re
 import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -138,12 +140,28 @@ _REQUIRED_MODULES = (
     "google.oauth2.service_account",
 )
 
+REQUIREMENTS_PATH = Path(__file__).parent / "requirements.txt"
 
-def dependencies_check(install: InstallCommand) -> Check:
-    """A statement of what this pipeline needs importable, not a live gate on the
-    CLI: ia_bulk.py imports all three at module scope, so a CLI run that reaches
-    this probe has already proved them present. It is meaningful to a caller that
-    imports deployment on its own, and it keeps the requirement in the report."""
+# Retry and status handling rely on this package's internals; see QUOTA-AND-RUNS.md.
+EXACTLY_PINNED_PACKAGE = "internetarchive"
+
+
+def pinned_version(requirements: str, package: str) -> str | None:
+    """The version `package` is pinned to with `==`, or None if it has no exact pin."""
+    pin = re.search(
+        rf"^{re.escape(package)}(?:\[[^\]]*\])?\s*==\s*([^\s#;,]+)",
+        requirements,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    return pin.group(1) if pin else None
+
+
+def dependencies_check(
+    install: InstallCommand, requirements_path: Path = REQUIREMENTS_PATH
+) -> Check:
+    """Importability is not a live gate on the CLI: ia_bulk.py imports all three at
+    module scope, so a CLI run that reaches this probe has already proved them present.
+    The version comparison is live: it is the only place the Mac checks the pin."""
 
     def probe() -> CheckOutcome:
         missing = []
@@ -154,7 +172,21 @@ def dependencies_check(install: InstallCommand) -> Check:
                 missing.append(name)
         if missing:
             return CheckOutcome(Status.FAIL, f"not importable: {', '.join(missing)}")
-        return CheckOutcome(Status.PASS, f"{len(_REQUIRED_MODULES)} packages importable")
+        pinned = pinned_version(requirements_path.read_text(), EXACTLY_PINNED_PACKAGE)
+        installed = importlib.metadata.version(EXACTLY_PINNED_PACKAGE)
+        if pinned is None:
+            return CheckOutcome(
+                Status.FAIL, f"{requirements_path.name} does not pin {EXACTLY_PINNED_PACKAGE} with =="
+            )
+        if installed != pinned:
+            return CheckOutcome(
+                Status.FAIL,
+                f"{EXACTLY_PINNED_PACKAGE} {installed} installed, {requirements_path.name} pins {pinned}",
+            )
+        return CheckOutcome(
+            Status.PASS,
+            f"{len(_REQUIRED_MODULES)} packages importable, {EXACTLY_PINNED_PACKAGE} {installed} as pinned",
+        )
 
     return Check(
         name="dependencies",

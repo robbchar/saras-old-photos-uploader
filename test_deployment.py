@@ -303,10 +303,52 @@ def test_python_version_check_remedy_names_the_real_project():
     assert "./install.sh --project demo " in deployment.python_version_check((3, 9), DEMO_INSTALL).remedy
 
 
-def test_dependencies_check_passes_because_the_test_run_already_imported_them():
-    """Not a live gate: importing deployment imports all three, so this probe
-    can only ever see them present. It documents the requirement."""
+def test_dependencies_check_passes_when_imported_and_installed_as_pinned():
+    """Importing deployment imports all three, so only the pin comparison can fail here."""
     assert deployment.dependencies_check(DEMO_INSTALL).probe().status is Status.PASS
+
+
+def test_dependencies_check_fails_when_the_installed_version_is_not_the_pin(tmp_path):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("internetarchive==0.0.1\n")
+
+    outcome = deployment.dependencies_check(DEMO_INSTALL, requirements).probe()
+
+    assert outcome.status is Status.FAIL
+    assert "requirements.txt pins 0.0.1" in outcome.detail
+
+
+def test_dependencies_check_fails_when_the_pin_is_only_a_floor(tmp_path):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("internetarchive>=5.0\n")
+
+    outcome = deployment.dependencies_check(DEMO_INSTALL, requirements).probe()
+
+    assert outcome.status is Status.FAIL
+    assert "does not pin internetarchive" in outcome.detail
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "internetarchive==5.11.1",
+        "internetarchive==5.11.1  # note",
+        "internetarchive==5.11.1   ",
+        "internetarchive[all]==5.11.1",
+        "internetarchive == 5.11.1",
+        "internetarchive==5.11.1; python_version >= '3.10'",
+    ],
+)
+def test_pinned_version_reads_valid_pip_pin_syntax(line):
+    assert deployment.pinned_version(f"urllib3>=2.0\n{line}\npytest>=8.0\n", "internetarchive") == "5.11.1"
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    ["internetarchive>=5.0\n", "internetarchive-extras==1.0\n", "# internetarchive==5.11.1\n", ""],
+)
+def test_pinned_version_is_none_without_an_exact_pin_of_that_package(requirements):
+    assert deployment.pinned_version(requirements, "internetarchive") is None
 
 
 def test_dependencies_check_remedy_names_the_real_project():
