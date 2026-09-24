@@ -45,6 +45,7 @@ from identifiers import RowState, classify_row, next_identifiers, parse_identifi
 from project_config import (
     ConfigError,
     ProjectConfig,
+    is_placeholder_sheet_id,
     load_project_config,
 )
 from reconcile import AmbiguousMatch, Proposal, propose_match
@@ -1388,9 +1389,10 @@ def build_sheets_service(key_path: Path):
 
 
 def build_sheet_client(config: ProjectConfig, live: bool) -> SheetClient:
-    """The seam tests monkeypatch."""
+    """The seam tests monkeypatch. Raises PlaceholderSheetId before loading credentials."""
+    sheet_id = config.require_real_sheet_id(live)
     service = build_sheets_service(google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH)
-    return SheetClient(service, config.sheet_id_for(live), config.sheet_tab)
+    return SheetClient(service, sheet_id, config.sheet_tab)
 
 
 @dataclass(frozen=True)
@@ -2080,8 +2082,9 @@ NO_DATA_ROWS = (
 
 
 def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command: str) -> SheetRead:
-    """Everything all three Sheet-path commands do between printing their
-    banner and starting their own work.
+    """Everything every Sheet-path command (validate, upload, sync-metadata,
+    reconcile-files, append-rows) does between printing its banner and
+    starting its own work.
 
     Deliberately does NOT print the banner or run the per-command flag
     checks. Those happen first and differ per command - `upload` validates
@@ -2089,12 +2092,12 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
     change which complaint an operator sees when both are wrong.
 
     `command` appears in the placeholder message only ("before running
-    upload"), which is the sole text that differed between the three copies
-    this replaces."""
+    upload"), which is the sole text that differed between the per-command
+    copies this replaced."""
     sheet_id = config.sheet_id_for(live)
     mode = "live" if live else "test"
 
-    if config.sheet_id_is_placeholder(live):
+    if is_placeholder_sheet_id(sheet_id):
         print(
             f"the {mode}-mode spreadsheet ID for project '{config.project_id}' is still the "
             f"placeholder '{sheet_id}' - edit it in {args.registry} to the real Google Sheet ID "

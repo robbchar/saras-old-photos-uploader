@@ -26,7 +26,7 @@ import launch_agent
 import platform_probe
 import sync_state
 from googleapiclient.errors import HttpError
-from project_config import ProjectConfig
+from project_config import ProjectConfig, is_placeholder_sheet_id
 
 # Set by google-auth/google-api-core, not by language syntax. macOS ships 3.9.6.
 MINIMUM_PYTHON = (3, 10)
@@ -323,8 +323,9 @@ def sheet_id_check(config: ProjectConfig, live: bool, registry_path: str) -> Che
     mode = "live" if live else "test"
 
     def probe() -> CheckOutcome:
-        if config.sheet_id_is_placeholder(live):
-            return CheckOutcome(Status.FAIL, f"{mode}-mode sheet_id is still '{config.sheet_id_for(live)}'")
+        sheet_id = config.sheet_id_for(live)
+        if is_placeholder_sheet_id(sheet_id):
+            return CheckOutcome(Status.FAIL, f"{mode}-mode sheet_id is still '{sheet_id}'")
         return CheckOutcome(Status.PASS, f"{mode}-mode sheet_id set")
 
     return Check(

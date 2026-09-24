@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from project_config import REQUIRED_KEYS, ConfigError, is_placeholder_sheet_id, load_project_config
+from project_config import (
+    REQUIRED_KEYS,
+    ConfigError,
+    PlaceholderSheetId,
+    is_placeholder_sheet_id,
+    load_project_config,
+)
 
 REGISTRY = {
     "collection_key": "lcps",
@@ -62,6 +68,9 @@ def test_live_and_test_runs_select_different_sheets():
         ("REPLACE_WITH_NEVER_LIVE", True),
         ("1fHBL6realSheetId", False),
         ("", False),
+        (" REPLACE_WITH_REAL_SHEET_ID ", True),
+        ("replace_with_real_sheet_id", False),
+        ("1abcREPLACE_WITH", False),
     ],
 )
 def test_is_placeholder_sheet_id(sheet_id, expected):
@@ -81,6 +90,19 @@ def test_sheet_id_is_placeholder_judges_only_the_sheet_for_the_mode(sheet_id, te
     config = load_project_config(_registry(sheet_id=sheet_id, test_sheet_id=test_sheet_id), "p")
 
     assert config.sheet_id_is_placeholder(live) is expected
+
+
+def test_require_real_sheet_id_returns_the_id_for_the_mode():
+    config = load_project_config(_registry(sheet_id="1real", test_sheet_id="REPLACE_WITH_TEST_SHEET_ID"), "p")
+
+    assert config.require_real_sheet_id(live=True) == "1real"
+
+
+def test_require_real_sheet_id_refuses_a_placeholder_by_value():
+    config = load_project_config(_registry(sheet_id="1real", test_sheet_id="REPLACE_WITH_TEST_SHEET_ID"), "p")
+
+    with pytest.raises(PlaceholderSheetId, match="test-mode.*'REPLACE_WITH_TEST_SHEET_ID'"):
+        config.require_real_sheet_id(live=False)
 
 
 def test_unknown_project_is_rejected_by_name():

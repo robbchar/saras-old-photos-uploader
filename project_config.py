@@ -29,18 +29,21 @@ REQUIRED_KEYS = (
 # the photos under data/.
 DEFAULT_PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".tif", ".tiff", ".png")
 
-# projects_registry.json ships sheet_id/test_sheet_id as REPLACE_WITH_* until
-# someone edits in the real Google Sheet ID. Checked before ever asking
-# Google about it, so an unreplaced placeholder fails with a message naming
-# the fix (edit the registry) instead of an opaque 404/permission error.
+# Sheet ID marker: not yet set in projects_registry.json; required (never live) in e2e_fixtures/registry.json.
 _PLACEHOLDER_SHEET_ID_PREFIX = "REPLACE_WITH"
+# For messages only; matching goes through is_placeholder_sheet_id.
+PLACEHOLDER_SHEET_ID_FORM = f"{_PLACEHOLDER_SHEET_ID_PREFIX}..."
 
 
 def is_placeholder_sheet_id(sheet_id: str) -> bool:
-    return sheet_id.startswith(_PLACEHOLDER_SHEET_ID_PREFIX)
+    return sheet_id.strip().startswith(_PLACEHOLDER_SHEET_ID_PREFIX)
 
 
 class ConfigError(Exception):
+    pass
+
+
+class PlaceholderSheetId(ConfigError):
     pass
 
 
@@ -101,6 +104,15 @@ class ProjectConfig:
 
     def sheet_id_is_placeholder(self, live: bool) -> bool:
         return is_placeholder_sheet_id(self.sheet_id_for(live))
+
+    def require_real_sheet_id(self, live: bool) -> str:
+        sheet_id = self.sheet_id_for(live)
+        if is_placeholder_sheet_id(sheet_id):
+            mode = "live" if live else "test"
+            raise PlaceholderSheetId(
+                f"project '{self.project_id}': the {mode}-mode sheet_id is still the placeholder '{sheet_id}'"
+            )
+        return sheet_id
 
 
 def unregistered_project_error(registry: dict, project_id: str) -> str | None:

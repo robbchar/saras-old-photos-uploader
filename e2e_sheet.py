@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from project_config import is_placeholder_sheet_id
+from project_config import PLACEHOLDER_SHEET_ID_FORM, is_placeholder_sheet_id
 from sheet_client import SheetClient, column_letter, quote_tab
 
 E2E_PROJECT = "e2e"
@@ -62,10 +62,11 @@ def check_reset_allowed(
     if not isinstance(block, dict):
         raise ResetRefused(f"{e2e_registry_path} has no project '{project}'")
 
-    own_live_id = str(block.get("sheet_id") or "")
+    own_live_id = str(block.get("sheet_id") or "").strip()
     if not is_placeholder_sheet_id(own_live_id):
         raise ResetRefused(
-            f"'{project}' sheet_id must stay a placeholder so it can never run --live, but it is '{own_live_id}'"
+            f"'{project}' sheet_id must stay a {PLACEHOLDER_SHEET_ID_FORM} placeholder so it can never run --live, "
+            f"but it is '{own_live_id}'"
         )
 
     target = E2ESheet(
@@ -74,6 +75,8 @@ def check_reset_allowed(
         upload_log_tab=_required(block, "upload_log_tab", project),
         sync_log_tab=_required(block, "sync_log_tab", project),
     )
+    if is_placeholder_sheet_id(target.sheet_id):
+        raise ResetRefused(f"'{project}' test_sheet_id is still the placeholder '{target.sheet_id}'")
     # The reset deletes the log tabs; one named like the data tab would take the data tab with it.
     if target.data_tab in target.log_tabs:
         raise ResetRefused(f"'{project}' names the data tab '{target.data_tab}' as a log tab")
