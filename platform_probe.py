@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +25,8 @@ def file_mode(path: Path) -> int | None:
 
 
 def file_owner(path: Path) -> str | None:
+    if sys.platform == "win32":
+        return None
     try:
         import pwd  # macOS/Linux only; absent on Windows.
 
@@ -68,10 +71,8 @@ NO_LAUNCHCTL = "launchctl is not available on this platform"
 def _gui_domain() -> str | None:
     """The per-user launchd domain, or None where there is no getuid (Windows).
     One place, so all three launchctl calls behave the same off macOS."""
-    try:
-        return f"gui/{os.getuid()}"
-    except AttributeError:
-        return None
+    getuid = getattr(os, "getuid", None)  # Dynamic lookup: tests fake getuid on Windows.
+    return f"gui/{getuid()}" if getuid else None
 
 
 def launchctl_print(label: str) -> str | None:

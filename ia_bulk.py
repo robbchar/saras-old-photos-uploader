@@ -2722,7 +2722,13 @@ class SheetSnapshot:
     claimed_identifiers: frozenset[str]
 
 
-def read_sheet_snapshot(client: SheetClient, file_template: str) -> SheetSnapshot:
+class SheetReader(Protocol):
+    """The one SheetClient method read_sheet_snapshot() needs."""
+
+    def read_grid(self) -> list[list[str]]: ...
+
+
+def read_sheet_snapshot(client: SheetReader, file_template: str) -> SheetSnapshot:
     grid = client.read_grid()
     column_map, rows = grid_to_rows(grid)
     return SheetSnapshot(

@@ -561,19 +561,7 @@ Every command reads the Sheet live; there is no CSV export step. The
 offline CSV paths were removed on 2026-09-23 — see
 [`docs/DECISIONS.md`](docs/decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).
 
-## Tests
+## Tests, linting and type checking
 
-```bash
-python -m pytest test_ia_bulk.py -v
-```
-
-## Linting and type checking
-
-```bash
-python -m ruff check .        # style/lint (unused imports, bug-prone patterns, ...)
-python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py   # static type checking (same engine as VS Code's Pylance)
-```
-
-`pyright` is the command-line engine behind the Pylance VS Code extension —
-running it here gives the same diagnostics Pylance would show in the editor,
-without needing VS Code open.
+The test, lint and type-check commands are in
+[`docs/OPERATIONS.md`, "Development"](docs/OPERATIONS.md#development).

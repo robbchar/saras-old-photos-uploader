@@ -1,0 +1,4 @@
+{
+  "pythonVersion": "3.10",
+  "exclude": ["data", "logs", "**/__pycache__", "**/.*"]
+}
