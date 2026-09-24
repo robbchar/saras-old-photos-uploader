@@ -12,6 +12,7 @@ import random
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -484,6 +485,13 @@ def format_field_receipt(column_map: ColumnMap) -> str:
 CONSOLE_ERROR_WIDTH = 300
 
 
+def _elide(text: str, width: int) -> str:
+    if len(text) > width:
+        # ASCII, deliberately: a console codepage without U+2026 would print it as an escape.
+        return text[:width - 3] + "..."
+    return text
+
+
 def format_row_error(exc: Exception) -> str:
     """A failing row's error, as one line to print underneath it.
 
@@ -498,10 +506,7 @@ def format_row_error(exc: Exception) -> str:
     [N/M] rhythm the operator is reading. Truncated for the same reason. The
     log keeps the complete text, which is what the log is for.
     """
-    text = " ".join(str(exc).split())
-    if len(text) > CONSOLE_ERROR_WIDTH:
-        text = text[:CONSOLE_ERROR_WIDTH - 3] + "..."
-    return text
+    return _elide(" ".join(str(exc).split()), CONSOLE_ERROR_WIDTH)
 
 
 def _pluralize(count: int, noun: str) -> str:
@@ -3383,6 +3388,19 @@ REMOVE_TAG_SENTINEL = "REMOVE_TAG"
 # typo to be visible in place, short enough that one changed field stays one
 # readable pair of lines.
 DRY_RUN_VALUE_WIDTH = 96
+# Shared text kept before the first difference when a pair is shown from partway in.
+DRY_RUN_DIFFERENCE_CONTEXT = 20
+
+
+@dataclass(frozen=True)
+class FieldChange:
+    """One field a sync would alter, as the dry run prints it."""
+
+    field_name: str
+    now: str
+    new: str
+    # Why it is still a change when `now` and `new` read alike; None otherwise.
+    note: str | None = None
 
 
 def fetch_current_metadata(identifier: str) -> dict | None:
@@ -3403,24 +3421,77 @@ def fetch_current_metadata(identifier: str) -> dict | None:
         return None
 
 
+def _display_text(value: object) -> str:
+    """IA returns a list for a field that occurs more than once. Line breaks are
+    escaped so a value keeps to its line; accents are composed and invisible
+    characters dropped, since neither shows on screen."""
+    text = "; ".join(str(part) for part in value) if isinstance(value, list) else str(value)
+    visible = "".join(
+        char for char in unicodedata.normalize("NFC", text) if unicodedata.category(char) != "Cf"
+    )
+    return visible.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _render(value: object) -> str:
-    """IA returns a list for a field that occurs more than once."""
-    if isinstance(value, list):
-        value = "; ".join(str(part) for part in value)
-    text = str(value)
-    if len(text) > DRY_RUN_VALUE_WIDTH:
-        # ASCII, deliberately: this report is read on a Windows console whose
-        # codepage cannot encode U+2026, where one non-ASCII character raises
-        # UnicodeEncodeError and truncates the whole report mid-run.
-        text = text[:DRY_RUN_VALUE_WIDTH - 3] + "..."
-    return text
+    return _elide(_display_text(value), DRY_RUN_VALUE_WIDTH)
 
 
-def metadata_changes(
-    sheet_metadata: dict[str, str], remote: dict
-) -> list[tuple[str, str, str]]:
-    """(field, what IA holds now, what the Sheet would make it), for the
-    fields a sync would actually alter.
+def _first_visible_difference(current_text: str, new_text: str) -> tuple[int, int] | None:
+    """Where each text first reads differently, any run of whitespace reading
+    as one space; None when the two read alike."""
+    current_words = list(re.finditer(r"\S+", current_text))
+    new_words = list(re.finditer(r"\S+", new_text))
+    current_end = new_end = 0
+    for current_word, new_word in zip(current_words, new_words):
+        if current_word.group() != new_word.group():
+            shared = len(os.path.commonprefix([current_word.group(), new_word.group()]))
+            return current_word.start() + shared, new_word.start() + shared
+        current_end, new_end = current_word.end(), new_word.end()
+    if len(current_words) == len(new_words):
+        return None
+    return current_end, new_end
+
+
+def _hidden_by_cutoff(text: str, position: int) -> bool:
+    return len(text) > DRY_RUN_VALUE_WIDTH and position >= DRY_RUN_VALUE_WIDTH - 3
+
+
+def _window(text: str, position: int) -> str:
+    start = max(0, position - DRY_RUN_DIFFERENCE_CONTEXT)
+    return _elide(("..." if start else "") + text[start:], DRY_RUN_VALUE_WIDTH)
+
+
+def _why_it_reads_unchanged(current: object, new: str) -> str | None:
+    """None when the two visibly differ. ASCII, for the same reason as _elide."""
+    current_text, new_text = _display_text(current), _display_text(new)
+    if _first_visible_difference(current_text, new_text) is not None:
+        return None
+    if isinstance(current, list) and len(current) > 1:
+        return (
+            f"(Internet Archive holds {_pluralize(len(current), 'separate value')}; "
+            "the sync replaces them with one)"
+        )
+    if current_text != new_text:
+        return "(the two differ only in spaces)"
+    return "(the two differ in a way that does not show on screen)"
+
+
+def _render_change(field_name: str, current: object, new: str) -> FieldChange:
+    """When the cutoff would hide where the two first read differently, both
+    are shown from just before that point instead of from their start."""
+    current_shown, new_shown = _render(current), _render(new)
+    current_text, new_text = _display_text(current), _display_text(new)
+    difference = _first_visible_difference(current_text, new_text)
+    if difference is not None:
+        current_at, new_at = difference
+        if _hidden_by_cutoff(current_text, current_at) or _hidden_by_cutoff(new_text, new_at):
+            current_shown, new_shown = _window(current_text, current_at), _window(new_text, new_at)
+    return FieldChange(field_name, current_shown, new_shown, _why_it_reads_unchanged(current, new))
+
+
+def metadata_changes(sheet_metadata: dict[str, str], remote: dict) -> list[FieldChange]:
+    """What IA holds now and what the Sheet would make it, for the fields a
+    sync would actually alter.
 
     Mirrors update_metadata_row's rules exactly, because a dry run that
     predicts something other than what the real run does is worse than no dry
@@ -3432,17 +3503,17 @@ def metadata_changes(
     Raw values are compared, never their rendered text: two long values that
     differ only past the display cutoff are still a change, and a string
     against IA's list is one too, since the real run replaces the list."""
-    changes: list[tuple[str, str, str]] = []
+    changes: list[FieldChange] = []
     for field_name, value in sorted(metadata_to_send(sheet_metadata).items()):
         current = remote.get(field_name)
         if value == REMOVE_TAG_SENTINEL:
             if current is not None:
-                changes.append((field_name, _render(current), "(deleted)"))
+                changes.append(FieldChange(field_name, _render(current), "(deleted)"))
             continue
         if current is None:
-            changes.append((field_name, "(not set)", _render(value)))
+            changes.append(FieldChange(field_name, "(not set)", _render(value)))
         elif current != value:
-            changes.append((field_name, _render(current), _render(value)))
+            changes.append(_render_change(field_name, current, value))
     return changes
 
 
@@ -3498,10 +3569,12 @@ def print_sync_dry_run(
 
         changed += 1
         print(f"  row {target.row_number}: {target.uploaded_as}")
-        for field_name, current, new in changes:
-            print(f"      {field_name}")
-            print(f"          now: {current}")
-            print(f"          new: {new}")
+        for change in changes:
+            print(f"      {change.field_name}")
+            print(f"          now: {change.now}")
+            print(f"          new: {change.new}")
+            if change.note:
+                print(f"          {change.note}")
 
     if changed or unreadable:
         print()
@@ -5338,9 +5411,10 @@ def start_run_output(command: str) -> None:
     """Called before a command loads anything, so a registry that will not load
     still fails under its own run's date. Line-buffered because the LaunchAgent
     sends stdout and stderr to one file, and block-buffered stdout would land
-    after stderr written later."""
+    after stderr written later. A character the console codepage lacks prints as
+    an escape, as on stderr, instead of ending the run's output there."""
     if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(line_buffering=True, errors="backslashreplace")
     print(f"{utc_timestamp()} {command}")
 
 

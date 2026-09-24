@@ -2093,6 +2093,17 @@ def test_start_run_output_line_buffers_stdout(monkeypatch):
     assert stdout.line_buffering is True
 
 
+def test_start_run_output_escapes_what_stdout_cannot_encode(monkeypatch):
+    # A cp1252 console lacks U+0301; one such character must not end the run's output.
+    buffer = io.BytesIO()
+    monkeypatch.setattr("sys.stdout", io.TextIOWrapper(buffer, encoding="cp1252"))
+
+    ia_bulk.start_run_output("sync-metadata")
+    print("Café")
+
+    assert b"Cafe\\u0301" in buffer.getvalue()
+
+
 def test_cmd_validate_injects_mediatype_from_the_registry_not_a_hardcoded_value(tmp_path, monkeypatch):
     """Every existing fixture happens to use mediatype="image", so a
     hardcoded row["mediatype"] = "image" would pass all of them - proving
@@ -8824,10 +8835,10 @@ def test_metadata_changes_treats_a_blank_cell_as_leave_alone():
 
 
 def test_metadata_changes_shows_remove_tag_as_a_deletion():
-    from ia_bulk import metadata_changes
+    from ia_bulk import FieldChange, metadata_changes
 
     assert metadata_changes({"rights": "REMOVE_TAG"}, {"rights": "CC0"}) == [
-        ("rights", "CC0", "(deleted)")
+        FieldChange("rights", "CC0", "(deleted)")
     ]
 
 
@@ -8839,10 +8850,18 @@ def test_metadata_changes_ignores_remove_tag_for_a_field_that_is_not_there():
 
 
 def test_metadata_changes_reports_a_field_internet_archive_does_not_have_yet():
-    from ia_bulk import metadata_changes
+    from ia_bulk import FieldChange, metadata_changes
 
     assert metadata_changes({"description": "New"}, {}) == [
-        ("description", "(not set)", "New")
+        FieldChange("description", "(not set)", "New")
+    ]
+
+
+def test_metadata_changes_prints_values_that_visibly_differ_as_they_are():
+    from ia_bulk import FieldChange, metadata_changes
+
+    assert metadata_changes({"title": "New"}, {"title": "Old"}) == [
+        FieldChange("title", "Old", "New")
     ]
 
 
@@ -8851,9 +8870,89 @@ def test_metadata_changes_reports_a_repeated_ia_field_as_changed_by_a_joined_cel
     preview must call it a change even though the two render alike."""
     from ia_bulk import metadata_changes
 
-    assert metadata_changes({"subject": "a; b"}, {"subject": ["a", "b"]}) == [
-        ("subject", "a; b", "a; b")
+    changes = metadata_changes({"subject": "a; b"}, {"subject": ["a", "b"]})
+
+    assert [change.field_name for change in changes] == ["subject"]
+
+
+def test_metadata_changes_notes_a_repeated_ia_field_that_reads_like_the_joined_cell():
+    """Both lines read `a; b`; without a note the preview looks wrong."""
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"subject": "a; b"}, {"subject": ["a", "b"]})
+
+    assert (change.now, change.new) == ("a; b", "a; b")
+    assert change.note is not None and "2 separate values" in change.note
+
+
+def test_metadata_changes_leaves_a_repeated_ia_field_that_already_reads_differently_alone():
+    from ia_bulk import FieldChange, metadata_changes
+
+    assert metadata_changes({"subject": "a; c"}, {"subject": ["a", "b"]}) == [
+        FieldChange("subject", "a; b", "a; c")
     ]
+
+
+def test_metadata_changes_shows_line_breaks_as_escapes():
+    """Printed raw, a line break splits the pair; escaped, it shows which breaks differ."""
+    from ia_bulk import FieldChange, metadata_changes
+
+    assert metadata_changes(
+        {"description": "Line one\nLine two"}, {"description": "Line one\r\nLine two"}
+    ) == [FieldChange("description", "Line one\\r\\nLine two", "Line one\\nLine two")]
+
+
+def test_metadata_changes_notes_values_that_differ_only_in_spaces():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"description": "one two"}, {"description": "one  two "})
+
+    assert change.note == "(the two differ only in spaces)"
+
+
+def test_metadata_changes_notes_characters_that_do_not_show():
+    """A decomposed accent and a zero-width space both print like the Sheet's text."""
+    from ia_bulk import metadata_changes
+
+    changes = metadata_changes(
+        {"title": "Café on Commercial Street", "description": "Astoria docks"},
+        {"title": "Café on Commercial Street", "description": "Astoria​ docks"},
+    )
+
+    assert [(change.now == change.new, change.note) for change in changes] == [
+        (True, "(the two differ in a way that does not show on screen)")
+    ] * 2
+
+
+def test_metadata_changes_gives_a_one_value_list_the_plain_note():
+    """'Holds 1 separate value; replaces them with one' would describe nothing."""
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"subject": "Astoria"}, {"subject": ["Astoria"]})
+
+    assert change.note == "(the two differ in a way that does not show on screen)"
+
+
+def test_metadata_changes_does_not_claim_a_spacing_difference_that_is_not_there():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"year": "1920"}, {"year": 1920})
+
+    assert change.note == "(the two differ in a way that does not show on screen)"
+
+
+def test_metadata_changes_notes_are_ascii():
+    """Same console codepage reason as _elide's ellipsis."""
+    from ia_bulk import metadata_changes
+
+    changes = metadata_changes(
+        {"subject": "a; b", "description": "one two", "title": "Café"},
+        {"subject": ["a", "b"], "description": "one  two", "title": "Café"},
+    )
+
+    notes = [change.note for change in changes]
+
+    assert len(notes) == 3 and all(note is not None and note.isascii() for note in notes)
 
 
 def test_metadata_changes_catches_an_edit_past_the_display_cutoff():
@@ -8866,19 +8965,169 @@ def test_metadata_changes_catches_an_edit_past_the_display_cutoff():
         {"description": shared_prefix + " fixed"}, {"description": shared_prefix + " fxied"}
     )
 
-    assert [field_name for (field_name, _, _) in changes] == ["description"]
+    assert [change.field_name for change in changes] == ["description"]
+
+
+def test_metadata_changes_shows_an_edit_past_the_display_cutoff_where_it_happened():
+    from ia_bulk import metadata_changes
+
+    long_description = (
+        "View of the Astoria waterfront from the hill above Taylor Avenue, showing "
+        "the old cannery buildings, the ferry landing, and the {} docks"
+    )
+    (change,) = metadata_changes(
+        {"description": long_description.format("fixed")},
+        {"description": long_description.format("fxied")},
+    )
+
+    assert change.now.startswith("...") and change.now.endswith("and the fxied docks")
+    assert change.new.startswith("...") and change.new.endswith("and the fixed docks")
+
+
+def test_metadata_changes_shows_text_appended_past_the_display_cutoff():
+    """The first difference is where the shorter value ends."""
+    from ia_bulk import metadata_changes
+
+    long_description = (
+        "View of the Astoria waterfront from the hill above Taylor Avenue, showing "
+        "the old cannery buildings and the ferry landing."
+    )
+    (change,) = metadata_changes(
+        {"description": long_description + " Photographer unknown."},
+        {"description": long_description},
+    )
+
+    assert change.now.startswith("...") and change.now.endswith("the ferry landing.")
+    assert change.new.startswith("...") and change.new.endswith(
+        "the ferry landing. Photographer unknown."
+    )
+
+
+def test_metadata_changes_prints_a_difference_the_cutoff_does_not_hide_in_full():
+    """Both fit on screen, so there is nothing to window even though they
+    differ near the cutoff."""
+    from ia_bulk import FieldChange, metadata_changes
+
+    assert metadata_changes({"title": "x" * 94 + "ac"}, {"title": "x" * 94 + "ab"}) == [
+        FieldChange("title", "x" * 94 + "ab", "x" * 94 + "ac")
+    ]
+
+
+FITS_ON_SCREEN = (
+    "View of the Astoria waterfront from the hill above Taylor Avenue, showing "
+    "the old ferry landing."
+)
+
+
+def test_metadata_changes_shows_text_appended_to_a_value_that_fit_on_screen():
+    """Only the new value is cut, so the cutoff alone would hide the addition."""
+    from ia_bulk import DRY_RUN_VALUE_WIDTH, metadata_changes
+
+    assert len(FITS_ON_SCREEN) <= DRY_RUN_VALUE_WIDTH
+    (change,) = metadata_changes(
+        {"description": FITS_ON_SCREEN + " Photographer unknown."},
+        {"description": FITS_ON_SCREEN},
+    )
+
+    assert change.now.startswith("...") and change.now.endswith("ferry landing.")
+    assert change.new.startswith("...") and change.new.endswith(
+        "ferry landing. Photographer unknown."
+    )
+
+
+def test_metadata_changes_shows_text_removed_down_to_a_value_that_fits_on_screen():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes(
+        {"description": FITS_ON_SCREEN},
+        {"description": FITS_ON_SCREEN + " Photographer unknown."},
+    )
+
+    assert change.now.endswith("ferry landing. Photographer unknown.")
+    assert change.new.startswith("...") and change.new.endswith("ferry landing.")
+
+
+def test_metadata_changes_shows_an_edit_past_the_cutoff_behind_an_earlier_spacing_change():
+    """A double space tidied early must not stand in for the edit further on."""
+    from ia_bulk import metadata_changes
+
+    long_description = (
+        "View of the Astoria waterfront{}from the hill above Taylor Avenue, showing "
+        "the old cannery buildings, the ferry landing, and the {} docks"
+    )
+    (change,) = metadata_changes(
+        {"description": long_description.format(" ", "fixed")},
+        {"description": long_description.format("  ", "fxied")},
+    )
+
+    assert change.now.endswith("and the fxied docks")
+    assert change.new.endswith("and the fixed docks")
+    assert change.note is None
+
+
+def test_metadata_changes_windows_on_the_edit_not_on_a_spacing_change_past_the_cutoff():
+    from ia_bulk import metadata_changes
+
+    long_description = (
+        "View of the Astoria waterfront from the hill above Taylor Avenue, showing "
+        "the old cannery buildings,{}the ferry landing, the net sheds along the river, "
+        "the grain elevator, the boatyard, the lumber mill, and the {} docks"
+    )
+    (change,) = metadata_changes(
+        {"description": long_description.format(" ", "fixed")},
+        {"description": long_description.format("  ", "fxied")},
+    )
+
+    assert change.now.endswith("and the fxied docks")
+    assert change.new.endswith("and the fixed docks")
+
+
+def test_metadata_changes_notes_a_spacing_change_past_the_cutoff_without_a_window():
+    """Nothing visible to window to; the note carries it."""
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes(
+        {"description": "word " * 30 + "end"}, {"description": "word " * 30 + " end"}
+    )
+
+    assert change.now == change.new and not change.now.startswith("...")
+    assert change.note == "(the two differ only in spaces)"
 
 
 def test_metadata_changes_elides_a_very_long_value():
     from ia_bulk import DRY_RUN_VALUE_WIDTH, metadata_changes
 
-    (_, current, new) = metadata_changes({"description": "x" * 500}, {"description": "y"})[0]
-    assert current == "y"
-    assert len(new) == DRY_RUN_VALUE_WIDTH
-    # ASCII: a Windows console codepage that cannot encode U+2026 raises
-    # UnicodeEncodeError and truncates the report mid-run.
-    assert new.endswith("...")
-    assert new.isascii()
+    (change,) = metadata_changes({"description": "x" * 500}, {"description": "y"})
+    assert change.now == "y"
+    assert len(change.new) == DRY_RUN_VALUE_WIDTH
+    # ASCII: a console codepage without U+2026 would print it as an escape.
+    assert change.new.endswith("...")
+    assert change.new.isascii()
+
+
+def test_sync_dry_run_prints_a_note_under_the_change_it_explains(monkeypatch, capsys):
+    from dataclasses import replace
+
+    from ia_bulk import print_sync_dry_run
+
+    monkeypatch.setattr(
+        "ia_bulk.fetch_current_metadata",
+        lambda identifier: {"subject": ["a", "b"], "title": "Old"},
+    )
+    target = replace(_sync_target(), metadata={"subject": "a; b", "title": "New"})
+
+    print_sync_dry_run([target], [], [])
+    lines = capsys.readouterr().out.splitlines()
+    subject_at = lines.index("      subject")
+
+    assert lines[subject_at + 1 : subject_at + 3] == ["          now: a; b", "          new: a; b"]
+    assert lines[subject_at + 3].startswith("          (Internet Archive holds 2 separate values")
+    assert lines[subject_at + 4 : subject_at + 8] == [
+        "      title",
+        "          now: Old",
+        "          new: New",
+        "",
+    ]
 
 
 # --- issue #4: a failing row's error reaches the console, not only the log ---
