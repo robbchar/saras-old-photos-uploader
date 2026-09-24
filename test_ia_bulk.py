@@ -2789,19 +2789,31 @@ def test_main_dispatches_to_cmd_doctor(monkeypatch):
     assert called == ["doctor"]
 
 
+def subcommand_parsers(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    """Each subcommand's parser, by name; argparse has no public accessor."""
+    return next(
+        action.choices for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+
+
 def test_doctor_subparser_exposes_no_mutating_flags():
     """Documents the parser surface only - does not by itself prove `doctor`
     never mutates. See test_cmd_doctor_never_calls_a_failing_checks_fix for
     the behavioral guarantee."""
-    parser = ia_bulk.build_parser()
-    doctor = next(
-        action.choices["doctor"]
-        for action in parser._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
+    doctor = subcommand_parsers(ia_bulk.build_parser())["doctor"]
     flags = {action.dest for action in doctor._actions}
     assert "enable_agent" not in flags
     assert "fix" not in flags
+
+
+def test_every_parser_refuses_abbreviated_options(capsys):
+    """An old flag name must fail, not match its renamed flag as a prefix."""
+    parser = ia_bulk.build_parser()
+    parsers = {"ia_bulk": parser, **subcommand_parsers(parser)}
+    assert [name for name, each_parser in parsers.items() if each_parser.allow_abbrev] == []
+    with pytest.raises(SystemExit):
+        parser.parse_args(["setup", "--project", "demo", "--reg", "other.json"])
+    assert "unrecognized arguments: --reg" in capsys.readouterr().err
 
 
 def test_cmd_doctor_never_calls_a_failing_checks_fix(monkeypatch):

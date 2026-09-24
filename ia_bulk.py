@@ -5159,17 +5159,21 @@ def cmd_append_rows(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # allow_abbrev=False on every parser: an old flag name must fail, not match its renamed flag as a prefix.
     parser = argparse.ArgumentParser(
         prog="ia_bulk",
         description=(
             "Validate, upload, and sync metadata for Internet Archive items from "
             "a project's Google Sheet (read live)."
         ),
+        allow_abbrev=False,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser(
-        "validate", help="Validate a project's Sheet without uploading or writing anything"
+        "validate",
+        help="Validate a project's Sheet without uploading or writing anything",
+        allow_abbrev=False,
     )
     validate_parser.add_argument("--project", required=True, help="Project ID from the registry")
     validate_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
@@ -5189,7 +5193,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     upload_parser = subparsers.add_parser(
-        "upload", help="Upload items from a project's Sheet"
+        "upload", help="Upload items from a project's Sheet", allow_abbrev=False
     )
     upload_parser.add_argument("--project", required=True, help="Project ID from the registry")
     upload_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
@@ -5251,7 +5255,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    sync_parser = subparsers.add_parser("sync-metadata", help="Update metadata on already-uploaded items")
+    sync_parser = subparsers.add_parser(
+        "sync-metadata", help="Update metadata on already-uploaded items", allow_abbrev=False
+    )
     sync_parser.add_argument("--project", required=True, help="Project ID from the registry")
     sync_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     sync_parser.add_argument("--live", action="store_true", help="Read the project's real Sheet and target the real, permanent items instead of the test Sheet and its zztest- rehearsal items")
@@ -5275,6 +5281,7 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser = subparsers.add_parser(
         "reconcile-files",
         help="Find rows whose filename does not resolve against the drive and correct them",
+        allow_abbrev=False,
     )
     reconcile_parser.add_argument("--project", required=True, help="Project ID from the registry")
     reconcile_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
@@ -5285,6 +5292,7 @@ def build_parser() -> argparse.ArgumentParser:
     append_parser = subparsers.add_parser(
         "append-rows",
         help="Append a skeleton row for every photo file on the drive that no row claims",
+        allow_abbrev=False,
     )
     append_parser.add_argument("--project", required=True, help="Project ID from the registry")
     append_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
@@ -5295,6 +5303,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check that this machine is set up to run the pipeline. Reads only; changes nothing",
+        allow_abbrev=False,
     )
     doctor_parser.add_argument("--project", required=True, help="Project ID from the registry")
     doctor_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
@@ -5304,6 +5313,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser(
         "setup",
         help="Bring this machine to the state this checkout needs, then verify. Safe to re-run",
+        allow_abbrev=False,
     )
     setup_parser.add_argument("--project", required=True, help="Project ID from the registry")
     setup_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
