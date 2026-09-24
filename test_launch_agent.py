@@ -1,6 +1,13 @@
+import argparse
 import plistlib
+import re
+import shlex
 from pathlib import Path
 
+import pytest
+
+import deployment
+import ia_bulk
 import launch_agent
 
 
@@ -17,10 +24,81 @@ def test_sync_agent_spec_runs_the_venv_interpreter_not_whatever_is_on_path(tmp_p
     assert spec.program_arguments[0].endswith(str(Path(".venv") / "bin" / "python"))
 
 
-def test_sync_agent_spec_runs_sync_metadata_live(tmp_path):
-    arguments = a_spec(tmp_path).program_arguments
-    assert "sync-metadata" in arguments
-    assert "--live" in arguments
+OTHER_REGISTRY = (ia_bulk.REPO_ROOT.parent / "other_registry.json").resolve()
+CHECKOUT_REGISTRY = (ia_bulk.REPO_ROOT / ia_bulk.DEFAULT_REGISTRY).resolve()
+
+
+def strict_parser() -> argparse.ArgumentParser:
+    """build_parser() without prefix matching, so a renamed flag fails rather than abbreviates."""
+    parser = ia_bulk.build_parser()
+    subcommands = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    for each_parser in [parser, *subcommands.choices.values()]:
+        each_parser.allow_abbrev = False
+    return parser
+
+
+def agent_command_line() -> list[str]:
+    """The agent's argv, less the interpreter."""
+    _interpreter, *command_line = launch_agent.sync_agent_spec(
+        ia_bulk.REPO_ROOT, "demo", OTHER_REGISTRY
+    ).program_arguments
+    return command_line
+
+
+def install_command_line(registry: Path | None) -> list[str]:
+    """The printed ./install.sh line, as the ia_bulk.py call install.sh forwards it to."""
+    _install_sh, *arguments = shlex.split(
+        deployment.InstallCommand("demo", registry).render(enable_agent=True)
+    )
+    install_sh = (ia_bulk.REPO_ROOT / "install.sh").read_text()
+    forwarded = re.search(r'^exec \S+ (\S+) (\S+) "\$@"$', install_sh, re.MULTILINE)
+    assert forwarded, "install.sh no longer execs a script with its own arguments"
+    script, subcommand = forwarded.groups()
+    return [script, subcommand, *arguments]
+
+
+@pytest.mark.parametrize(
+    ("command_line", "expected"),
+    [
+        pytest.param(
+            agent_command_line,
+            {"command": "sync-metadata", "project": "demo", "live": True, "registry": OTHER_REGISTRY},
+            id="launch agent",
+        ),
+        pytest.param(
+            lambda: install_command_line(OTHER_REGISTRY),
+            {
+                "command": "setup",
+                "project": "demo",
+                "live": True,
+                "enable_agent": True,
+                "registry": OTHER_REGISTRY,
+            },
+            id="install command, other registry",
+        ),
+        pytest.param(
+            lambda: install_command_line(None),
+            {
+                "command": "setup",
+                "project": "demo",
+                "live": True,
+                "enable_agent": True,
+                "registry": CHECKOUT_REGISTRY,
+            },
+            id="install command, checkout registry",
+        ),
+    ],
+)
+def test_generated_command_lines_parse_with_the_real_parser(command_line, expected):
+    """Nothing runs these lines before the Mac does; the agent would exit 2 every hour."""
+    script, *arguments = command_line()
+    assert (ia_bulk.REPO_ROOT / script).resolve() == Path(ia_bulk.__file__).resolve()
+    parsed = vars(strict_parser().parse_args(arguments))
+    # Both run from the checkout, so a relative registry is read from there.
+    parsed["registry"] = (ia_bulk.REPO_ROOT / parsed["registry"]).resolve()
+    assert {key: parsed[key] for key in expected} == expected
 
 
 def test_sync_agent_spec_reads_the_registry_setup_was_given(tmp_path):
