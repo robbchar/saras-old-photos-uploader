@@ -563,9 +563,12 @@ refusal, no data rows, no row marked uploaded yet. Sync also split its
 reasons across the pair, with setup refusals on stderr and run-time exit-1
 reasons on stdout, so reading one file could miss why a run failed.
 
-Both streams now go to one `logs/launchagent-<project>.log`. The agent runs
-Python with `-u`, so lines from the two streams land in the order they were
-written. `sheet_banner()`, the first line every Sheet-path command prints,
+Both streams now go to one `logs/launchagent-<project>.log`. The plist sets
+`PYTHONUNBUFFERED=1`, so lines from the two streams land in the order they
+were written. That is the same as `python -u`, but it leaves
+`ProgramArguments` exactly the command line `ia_bulk.py` parses, which #53's
+test of the agent's arguments against the real parser relies on.
+`sheet_banner()`, the first line every Sheet-path command prints,
 leads with `utc_timestamp()`, so every run that reaches it starts with a dated
 line. A failure before the banner stays undated: a registry that will not
 load, an argument the parser rejects, an interpreter that will not start. Most

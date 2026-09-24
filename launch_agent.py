@@ -30,8 +30,6 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
         label=f"{LABEL_PREFIX}.{project_id}",
         program_arguments=[
             str(repo_root / ".venv" / "bin" / "python"),
-            # Unbuffered, so stdout and stderr lines reach the shared log in order.
-            "-u",
             str(repo_root / "ia_bulk.py"),
             "sync-metadata",
             "--project",
@@ -56,6 +54,9 @@ def render_plist(spec: AgentSpec) -> str:
         "StartInterval": spec.interval,
         "RunAtLoad": True,
         "WorkingDirectory": str(spec.working_directory),
+        # Same as python -u, so both streams reach the shared log in order, while
+        # ProgramArguments stays exactly the command line ia_bulk.py parses.
+        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
         "StandardOutPath": str(spec.log_path),
         "StandardErrorPath": str(spec.log_path),
     }
