@@ -563,23 +563,31 @@ refusal, no data rows, no row marked uploaded yet. Sync also split its
 reasons across the pair, with setup refusals on stderr and run-time exit-1
 reasons on stdout, so reading one file could miss why a run failed.
 
-Both streams now go to one `logs/launchagent-<project>.log`. The plist sets
-`PYTHONUNBUFFERED=1`, so lines from the two streams land in the order they
-were written. That is the same as `python -u`, but it leaves
-`ProgramArguments` exactly the command line `ia_bulk.py` parses, which #53's
-test of the agent's arguments against the real parser relies on.
-`sheet_banner()`, the first line every Sheet-path command prints,
-leads with `utc_timestamp()`, so every run that reaches it starts with a dated
-line. A failure before the banner stays undated: a registry that will not
-load, an argument the parser rejects, an interpreter that will not start. Most
-follow a `git pull` or an install, when someone is at the machine running
-`doctor`. The exception is a hand edit that breaks `projects_registry.json`
-on the Mac. From then on, every hourly run appends an undated traceback until
-someone fixes the file, and `doctor`'s `launch agent loaded` line is what
-shows the failing exit.
+Both streams now go to one `logs/launchagent-<project>.log`. `main()`
+line-buffers stdout, so lines from the two streams land in the order they
+were written; stderr is line-buffered already. Then, before the command loads
+anything, it prints `utc_timestamp()` and the command name. A registry that
+will not load, such as one broken by a hand edit on the Mac, still fails under
+its own run's date. Both live in `ia_bulk.py`, not the plist, so they hold
+under any runner, and `ProgramArguments` stays exactly the command line
+`ia_bulk.py` parses, which #53's test of the agent's arguments against the
+real parser relies on. Setting `PYTHONUNBUFFERED=1` in the plist was the
+first version: it ordered only the agent's output, and made every write
+unbuffered.
 
-The file is not rotated. On a one-field test Sheet, a quiet hourly run adds 7
-lines and 354 bytes. The real Sheet's field receipt is longer, but a year
+Some output still has no date of its own. An argument the parser rejects, or
+an interpreter that will not start, fails before `main()` prints anything.
+Both follow a `git pull` or an install, when someone is at the machine running
+`doctor`. A warning a library prints while being imported lands just above
+its run's dated line, where it reads as the end of the previous run.
+
+launchd creates no directory for the log file. Delete old files in `logs/`,
+never the folder: without it an enabled agent never starts again and writes
+nothing anywhere. `doctor`'s `launch agent log directory` check fails on
+that, and `./install.sh` recreates the folder.
+
+The file is not rotated. On a one-field test Sheet, a quiet hourly run adds 8
+lines and 368 bytes. The real Sheet's field receipt is longer, but a year
 still comes to a few MB.
 
 Once any row is marked uploaded, hourly sync also writes one JSONL run log

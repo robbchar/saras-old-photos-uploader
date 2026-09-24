@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import io
 import json
 import os
 import random
@@ -2055,19 +2056,18 @@ class SheetRead:
 
 
 def sheet_banner(config: ProjectConfig, live: bool) -> str:
-    """The line every Sheet-path command prints before anything else.
+    """The line every Sheet-path command prints once its project is loaded,
+    before it reads the Sheet. Not the run's first line: main() dates the run
+    first, and validate's --batch refusal comes ahead of this.
 
     The run mode is this project's core safety design - a rehearsal must
     never touch the real Sheet - so which spreadsheet and tab back it is
     printed unconditionally, not just on success. A human staring at a report
     has to be able to confirm at a glance that they are pointed where they
-    think they are.
-
-    It leads with the time because the LaunchAgent's log file has no other
-    clock, and a run refused before its JSONL opens leaves no other record."""
+    think they are."""
     mode = "live" if live else "test"
     return (
-        f"{utc_timestamp()} project '{config.project_id}': {mode} mode, "
+        f"project '{config.project_id}': {mode} mode, "
         f"spreadsheet '{config.sheet_id_for(live)}', tab '{config.sheet_tab}'"
     )
 
@@ -2278,6 +2278,7 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     checks.extend(
         [
             deployment.agent_plist_check(spec, Path.home(), install),
+            deployment.agent_log_directory_check(spec, Path.home(), install),
             deployment.agent_loaded_check(spec, install),
         ]
     )
@@ -5325,9 +5326,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def start_run_output(command: str) -> None:
+    """Called before a command loads anything, so a registry that will not load
+    still fails under its own run's date. Line-buffered because the LaunchAgent
+    sends stdout and stderr to one file, and block-buffered stdout would land
+    after stderr written later."""
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
+    print(f"{utc_timestamp()} {command}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    start_run_output(args.command)
 
     if args.command == "validate":
         return cmd_validate(args)

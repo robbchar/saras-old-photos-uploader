@@ -443,7 +443,8 @@ or hourly by a LaunchAgent on the Mac, which
 the first live runs are verified — see
 [`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync). The agent's
 runs print to `logs/launchagent-sarasoldphotos.log` instead of a screen, each
-one starting with a UTC-dated line, and `doctor --live`'s `launch agent loaded`
+one starting with a line giving the UTC time and the command (a library's
+import warning can come just before it), and `doctor --live`'s `launch agent loaded`
 line says whether its last run exited 0. Whichever way it gets run, most runs
 have nothing to do, and it says so:
 

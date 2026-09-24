@@ -387,6 +387,7 @@ def test_every_command_carrying_remedy_repeats_the_registry(tmp_path):
         deployment.dependencies_check(install).remedy,
         deployment.python_version_check((3, 9), install).remedy,
         deployment.agent_plist_check(spec, tmp_path / "home", install).remedy,
+        deployment.agent_log_directory_check(spec, tmp_path / "home", install).remedy,
         deployment.agent_loaded_check(spec, install).remedy,
     ]
     for remedy in remedies:
@@ -584,7 +585,38 @@ def test_converge_leaves_a_stale_plist_for_enable_agent_to_rewrite_and_reload(tm
 def test_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).needed_by_agent is False
+    assert deployment.agent_log_directory_check(spec, tmp_path / "home", DEMO_INSTALL).needed_by_agent is False
     assert deployment.agent_loaded_check(spec, DEMO_INSTALL).needed_by_agent is False
+
+
+def _enabled_agent_without_its_log_directory(tmp_path):
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
+    home = tmp_path / "home"
+    launch_agent.write_plist(spec, home)
+    spec.output_path.parent.rmdir()
+    return spec, home
+
+
+def test_agent_log_directory_check_fails_when_an_enabled_agent_lost_its_logs_folder(tmp_path):
+    # launchd creates no directory for StandardOutPath, so the agent can never start again.
+    spec, home = _enabled_agent_without_its_log_directory(tmp_path)
+    assert deployment.agent_log_directory_check(spec, home, DEMO_INSTALL).probe().status is Status.FAIL
+
+
+def test_agent_log_directory_check_passes_without_the_folder_when_the_agent_is_not_enabled(tmp_path):
+    spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
+    outcome = deployment.agent_log_directory_check(spec, tmp_path / "home", DEMO_INSTALL).probe()
+    assert outcome.status is Status.PASS
+    assert "not enabled" in outcome.detail
+
+
+def test_converge_recreates_the_log_folder_an_enabled_agent_needs(tmp_path):
+    spec, home = _enabled_agent_without_its_log_directory(tmp_path)
+    results = deployment.converge(
+        [deployment.agent_log_directory_check(spec, home, DEMO_INSTALL)], announce=lambda _: None
+    )
+    assert spec.output_path.parent.is_dir()
+    assert results[0][1].status is Status.PASS
 
 
 def test_agent_loaded_check_remedy_is_a_command_setup_accepts(tmp_path):
@@ -600,7 +632,8 @@ def test_agent_loaded_check_remedy_names_the_real_project_and_its_log(tmp_path):
         launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json"), DEMO_INSTALL
     ).remedy
     assert "./install.sh --project demo --live --enable-agent" in remedy
-    assert "read logs/launchagent-demo.log for why" in remedy
+    # The file is never rotated, so the remedy points at its end, not the whole thing.
+    assert "run tail -20 logs/launchagent-demo.log to see why" in remedy
 
 
 def test_agent_plist_check_has_no_fix_so_only_enable_agent_writes_it(tmp_path):

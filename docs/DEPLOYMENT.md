@@ -449,9 +449,9 @@ printed re-enables the same agent.
 re-checks, and only then writes the plist and loads the agent. A `[FAIL]` line
 on anything the hourly sync depends on — a missing key, a placeholder sheet
 id, absent sync columns — prints the report, names the failed checks, says the
-agent was **not** enabled, and exits non-zero. There is no `--force`. Three
+agent was **not** enabled, and exits non-zero. There is no `--force`. Four
 checks are reported but never block: `files drive` (`sync-metadata` never
-reads the drive), and the two `launch agent` checks, because enabling is what
+reads the drive), and the three `launch agent` checks, because enabling is what
 fixes them — including a `launch agent loaded` `FAIL` left by the agent's last
 run exiting non-zero.
 
@@ -520,8 +520,13 @@ you just started is syncing:
 tail -20 logs/launchagent-<project>.log
 ```
 
-The agent writes both its output and its errors to that one file. Each run
-starts with a line giving the UTC time, the project, the mode and the Sheet.
+The agent writes both its output and its errors to that one file. A run
+starts with a line giving the UTC time and the command. The one exception is
+a warning printed while Python loads its libraries: it comes just before that
+line, so it belongs to the run below it, not the one above. The file is never
+rotated. To clear
+out `logs/`, delete files in it, never the folder: launchd will not recreate
+it, and the agent stops running until `./install.sh --project <project>` does.
 
 ## 13. Uninstalling the agent
 
@@ -531,7 +536,7 @@ rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.sync.<project>.plist
 ```
 
 Run this as the account the agent is loaded for. `doctor` will then report
-both `launch agent` checks as `UNKNOWN`: `loaded` because it can't tell "not
+`launch agent loaded` and `launch agent plist` as `UNKNOWN`: `loaded` because it can't tell "not
 loaded" from "no session for this account", and `plist` because the agent is
 not enabled. A plain `./install.sh` — an upgrade, say — leaves it that way;
 only §12 writes the plist again. Remove the plist, not just the bootout:

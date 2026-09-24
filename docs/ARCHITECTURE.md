@@ -293,8 +293,10 @@ correct for a hand-run command over a few hundred rows and stopped holding at
 #24). That schedule is now a LaunchAgent that
 `./install.sh --project <project> --live --enable-agent` installs — see
 [`DEPLOYMENT.md`](DEPLOYMENT.md#12-enabling-the-hourly-sync); its stdout and
-stderr both go to `logs/launchagent-<project>.log`, each run starting with a
-UTC-dated banner, and `doctor`'s
+stderr both go to `logs/launchagent-<project>.log`, each run dated by the
+line `main()` prints before loading anything (see
+[`QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#the-agents-output-is-one-dated-file-never-rotated)
+for what stays undated), and `doctor`'s
 `launch agent loaded` check reports its last exit. See
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 IA's *no changes to `_meta.xml`* response still becomes `MetadataUnchanged`
