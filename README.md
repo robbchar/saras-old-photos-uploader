@@ -267,9 +267,11 @@ mistaken for a clean one.
 upload fails with what looks like Internet Archive's rate limit, the run
 stops rather than grinding through the rest of the batch as unexplained
 failures — everything already uploaded that run, in this chunk or an earlier
-one, is still confirmed in the Sheet first. This detector is best-effort: no
-`--live` run has ever happened, so no real rate-limit response has ever been
-captured, and it may not fire on one — see `docs/DECISIONS.md`, "Still open".
+one, is still confirmed in the Sheet first. Re-run later to resume: a busy IA
+queue can clear in minutes to hours, the 5,000/day cap only tomorrow, and
+the stop cannot tell which one it hit. This detector is best-effort: it has
+fired on one real response so far, and it may miss a limit IA signals some
+other way — see `docs/DECISIONS.md`, "Still open".
 `--limit` (below) is the operator-controlled fallback either way.
 
 **`--limit` and `--chunk-size`.**
