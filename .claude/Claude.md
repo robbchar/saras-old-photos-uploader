@@ -39,6 +39,8 @@ they go in the `identifier-bib` metadata field instead.
   identifiers carry a per-run stamp". The Sheet's `ia_identifier` column
   always holds real, permanent identifiers — never author a `zztest-`
   identifier by hand in it.
+  Test Sheet and `test_collection` data are ephemeral: the opt-in e2e
+  rehearsal (`test_e2e_rehearsal.py --run-e2e`) rewrites the Test Sheet.
 
 ## Source of truth
 Canonical metadata lives in a Google Sheet (replacing the old emailed-CSV

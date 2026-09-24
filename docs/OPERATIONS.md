@@ -46,10 +46,10 @@ rest of that report.
 
 ```bash
 # see what it would propose, without prompting or writing anything
-python ia_bulk.py reconcile-files --project sarasoldphotos --dry-run
+python ia_bulk.py reconcile-files --project sarasoldphotos --live --dry-run
 
 # work through the mismatches interactively
-python ia_bulk.py reconcile-files --project sarasoldphotos
+python ia_bulk.py reconcile-files --project sarasoldphotos --live
 ```
 
 It reads the Sheet live, finds every row that *named* a file which
@@ -93,10 +93,10 @@ skeleton row — folder and filename cells only — for each of them.
 
 ```bash
 # see what would be appended, grouped by folder
-python ia_bulk.py append-rows --project sarasoldphotos --dry-run
+python ia_bulk.py append-rows --project sarasoldphotos --live --dry-run
 
 # append for real
-python ia_bulk.py append-rows --project sarasoldphotos
+python ia_bulk.py append-rows --project sarasoldphotos --live
 ```
 
 The order is not optional, and the tool enforces it: `append-rows` refuses
@@ -118,8 +118,9 @@ for exactly what it writes and refuses.
 > "Why this is a hard rule" below.
 
 ```bash
-# against the project's test Sheet
-python ia_bulk.py validate --project sarasoldphotos
+# against the e2e registry's Test Sheet (the Test Sheet holds the e2e grid; see
+# docs/decisions/SHEET-PROTOCOL.md, "Test data is ephemeral")
+python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e
 
 # against the real Sheet (still uploads nothing and writes nothing)
 python ia_bulk.py validate --project sarasoldphotos --live
@@ -257,12 +258,19 @@ to recur across a 10,000-row collection.
 
 ## 2. Test run
 
+**The Test Sheet holds the `e2e` project's fixture rows**, not
+`sarasoldphotos`'s — see
+[`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+Test-mode hand commands use `--registry e2e_fixtures/registry.json --project
+e2e` in place of `--project sarasoldphotos` below; `--project sarasoldphotos`
+is for `--live` against the real Sheet.
+
 ```bash
-# against the project's test Sheet (the normal path)
-python ia_bulk.py upload --project sarasoldphotos
+# against the e2e registry's Test Sheet (the normal path)
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e
 
 # ...and again, recording the minted identifiers in the test Sheet
-python ia_bulk.py upload --project sarasoldphotos --write-identifier
+python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier
 ```
 
 Run it once without `--write-identifier` first: that mode
@@ -396,8 +404,10 @@ real files in the wrong place under a permanent identifier.
       filled in, and no edit is still sitting unsaved or as a pending
       suggestion. A `--live` run reads the Sheet directly; there is no CSV
       export step to redo, and nothing local to go stale.
-- [ ] A test run (**no** `--live`) over these same rows succeeded, and at
-      least one resulting `zztest-…` item was eyeballed in a browser.
+- [ ] The e2e rehearsal passes on this checkout
+      (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
+      `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
+      over the real Sheet printed the identifiers and cells you expected.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.
@@ -410,7 +420,7 @@ be renamed, only darkened by IA staff on request.
 The Sheet **is** the correction — edit the cell, then:
 
 ```bash
-python ia_bulk.py sync-metadata --project sarasoldphotos --dry-run
+python ia_bulk.py sync-metadata --project sarasoldphotos --live --dry-run
 python ia_bulk.py sync-metadata --project sarasoldphotos --live
 ```
 
@@ -527,6 +537,10 @@ substitution, and `tail` then reports `option used in invalid context`.
 
 ### Seeing the summary work, on purpose
 
+**The Test Sheet holds the `e2e` grid; use `--registry
+e2e_fixtures/registry.json --project e2e`** — see
+[`decisions/SHEET-PROTOCOL.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+
 **Do not clear `ia_identifier` to set this up.** Clearing those four cells is
 the *upload* rehearsal reset — §2, ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done) — and it does the
 opposite of what is wanted here. `sync-metadata` corrects items that already
@@ -547,7 +561,7 @@ whatever `ia_url` names, so rows uploaded under different stamps are each
 handled correctly:
 
 ```bash
-python ia_bulk.py sync-metadata --project sarasoldphotos
+python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e
 ```
 
 With the hashes cleared, that gives a summary where `pushed` equals
@@ -598,9 +612,11 @@ cap. Both values are recorded in the run's
 `run_header` log line (`ARCHITECTURE.md`, "Logging and resume") so a later
 read of the log shows exactly what each run was capped at. If Internet
 Archive's own rate limit shows up mid-run, the run now stops cleanly instead
-of continuing to grind through failures — but that detection is best-effort
-and unverified against a real response (`DECISIONS.md`, "Rate-limit
-detection matches a status code..."), so treat `--limit` as the dependable
+of continuing to grind through failures and names the HTTP status IA sent —
+see "Resuming after a rate-limit stop" below for which limit that may be. The
+detection is best-effort and has fired on one real response so far
+(`DECISIONS.md`, "Rate-limit detection uses a parsed status code, never
+message text"), so treat `--limit` as the dependable
 control and the detector as a bonus, not the other way around.
 
 `upload --batch "<value>"` scopes a run to one batch — the rows whose
@@ -634,11 +650,13 @@ Every run also writes `logs/<command>-<timestamp>.jsonl`, one line per row:
 
 ```json
 {"identifier": "...", "file": "...", "status": "success|unchanged|failure|unconfirmed",
- "error": null, "uploaded_as": "...", "live": false, "timestamp": "..."}
+ "error": null, "http_status": null, "uploaded_as": "...", "live": false, "timestamp": "..."}
 ```
 
 `identifier` is the real, permanent identifier; `uploaded_as` is what was
-actually sent to IA. `unconfirmed` means the item
+actually sent to IA. `http_status` is the HTTP status IA answered a `failure`
+with (`403`, `503`, ...), or `null` when there was none — a timeout or a
+dropped connection. `unconfirmed` means the item
 reached Internet Archive but the Sheet could not be updated, because the row
 no longer held the identifier the run reserved — someone edited the Sheet
 mid-run. Rerun once it has settled; the row is picked up as reserved-but-
@@ -677,7 +695,7 @@ above) rather than being waited out row by row.
 
 If Internet Archive sends a `Retry-After` header, it is honoured — but never
 for longer than 30 seconds. A longer one is treated as "stop the run and come
-back tomorrow" rather than sleeping through it, so a run cannot silently
+back later" rather than sleeping through it, so a run cannot silently
 stall for an hour inside a single row.
 
 **What this has and has not been tested against.** The retry and rate-limit
@@ -685,9 +703,28 @@ handling is exercised against a fault-injecting stand-in for
 `s3.us.archive.org` and a local server answering real status codes, so how
 the `internetarchive` library behaves for a given response is settled. What is
 *not* settled is what Internet Archive actually sends — whether the daily cap
-arrives as a 429/503 at all, and how a genuinely slow multi-megabyte upload
-behaves. No `--live` run has ever happened. Treat `--limit` as the dependable
+arrives as a 429/503 at all (the one real rate limit seen so far was the queue
+throttle below), and how a genuinely slow multi-megabyte upload behaves. No
+`--live` run has ever happened. Treat `--limit` as the dependable
 control and watch the first real run.
+
+### Resuming after a rate-limit stop
+
+A rate-limited run ends like this:
+
+```
+stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+```
+
+The tool cannot tell which of IA's limits it hit, so read the `failure` line
+just above the stop, or the last `failure` record in the log. On 2026-09-24 a
+rehearsal was stopped by *"Please reduce your request rate. -
+total_tasks_queued exceeds global_limit"*: IA's task queue was busy, not this
+account's daily cap, so a rerun later the same day is worth trying. If today's
+runs together have already sent close to 5,000 items, wait until tomorrow.
+Either way the rerun resumes by itself. The status is also in the log, as the
+failure record's `http_status` and the `run_summary`'s `rate_limit_status`.
 
 ## Reading a run
 
@@ -702,7 +739,8 @@ grep '"status": "failure"' logs/upload-20260712T125326.jsonl
 Every real run also ends with a `run_summary` line — `tail -1` of its log
 gives the whole run in one record, without the row lines above it. For
 `upload` that is `attempted` / `succeeded`, a `failures` list, an
-`unconfirmed` list, `not_attempted` and `rate_limited`. Read `unconfirmed`
+`unconfirmed` list, `not_attempted`, `rate_limited` and `rate_limit_status`.
+Read `unconfirmed`
 first: those files **are** on Internet Archive but were never marked in the
 Sheet, so the next run would upload them again under a second identifier.
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
@@ -729,6 +767,41 @@ record.
 
 ### Rehearsing the log tabs
 
+**This whole recipe is automated.** Run
+
+```bash
+python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+```
+
+It rewrites the Test Sheet from `e2e_fixtures/` first, so the Test Sheet now
+belongs to the `e2e` project; a hand rehearsal after it uses
+`--registry e2e_fixtures/registry.json --project e2e` in place of
+`--project sarasoldphotos` below — `--project sarasoldphotos` without
+`--live` now reads those same `e2e` rows, so it is for `--live` against the
+real Sheet only. Test data is ephemeral — see
+[`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+
+After a passing run, rows 2, 3 and 5 are uploaded and synced, row 2's
+`Title` is edited, and row 6 is still not ready (no theme); reset rows per
+["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done)
+(§2) before a hand upload.
+
+| Manual step (command as given below) | Automated step |
+|---|---|
+| §2 "Re-rehearsing a row that is already done": clear the four `ia_` cells by hand | 0 — whole grid rewritten |
+| Delete `Upload Log` / `Sync Log` to re-exercise creation | 0 |
+| §1 / DEPLOYMENT §16 step 1: `python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e` | 1 |
+| Step 1: `python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 1`, twice | 2, 3 |
+| Step 2: break a filename, `python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 2` (automated step uses `--limit 1`) | 4 |
+| Pre-live checklist: open a `zztest-…` item and read it | 5, 8 |
+| DEPLOYMENT §16 step 2: `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e --dry-run` | 6 |
+| Step 3: edit a Title, `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e`, twice | 7, 9 |
+| Step 4: `grep '<when value>' logs/<run value>` | 10 |
+| Step 5: File → Version history, by eye | 11 |
+| Step 2: put the cell back | 12 |
+
+Each step's failure message names the manual step it stands for.
+
 A repeatable pass against the test Sheet, for after any change to how runs
 are mirrored. Every command here is test mode: it reads the test Sheet and
 uploads to `test_collection` under `zztest-` identifiers, and `--live`
@@ -749,7 +822,7 @@ for the `sync-metadata` step, which needs rows that *are* marked uploaded
 1. **One upload, twice.**
 
    ```bash
-   python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 1
+   python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 1
    ```
 
    Run it twice. `Upload Log` should hold exactly **one** header row
@@ -763,7 +836,7 @@ for the `sync-metadata` step, which needs rows that *are* marked uploaded
    it ready but invalid, which `upload` holds back rather than sends.
 
    ```bash
-   python ia_bulk.py upload --project sarasoldphotos --write-identifier --limit 2
+   python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 2
    ```
 
    Expect the `summary` row followed by a `skipped` row naming that row's
@@ -772,7 +845,7 @@ for the `sync-metadata` step, which needs rows that *are* marked uploaded
 3. **Sync, then the quiet run.** Edit a Title on one uploaded row, then:
 
    ```bash
-   python ia_bulk.py sync-metadata --project sarasoldphotos
+   python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e
    ```
 
    Expect `Sync Log` to gain a `summary` row. Run the same command again
@@ -814,12 +887,25 @@ What a manual pass cannot show:
 ## Development
 
 ```bash
-python -m pytest test_ia_bulk.py -v
+python -m pytest
 python -m ruff check .
-python -m pyright ia_bulk.py test_ia_bulk.py conftest.py test_conftest.py
+python -m pyright
 ```
 
-Tests are pure-offline, and `conftest.py` enforces it. From the start of the
+Run them from the repository root, which each covers whole; none takes a file
+list. `pytest.ini` and `pyrightconfig.json` keep the untracked `data/` and
+`logs/` folders out of the search. `pyright` is the command-line engine behind
+the Pylance VS Code extension, so it reports what the editor would.
+`pyrightconfig.json` pins it to Python 3.10, the oldest supported version.
+
+Tests are pure-offline, and `conftest.py` enforces it. The one exception is
+the opt-in e2e rehearsal: tests marked `e2e` and run with `--run-e2e` may
+reach the network, since that is how it drives the real Test Sheet and IA's
+`test_collection` — see README's
+["E2E rehearsal (opt-in)"](../README.md#e2e-rehearsal-opt-in). For such a
+test the guard also puts back the proxy settings it strips, and it re-arms
+both after the test, so a plain run (no `--run-e2e`) skips them and
+stays offline like every other test. From the start of the
 run, any lookup of, connection to, or UDP send to a host that is not this
 machine is refused the way a real failure would be (`connect_ex` returns
 `ECONNREFUSED`). Only `localhost`, loopback and unspecified addresses count as

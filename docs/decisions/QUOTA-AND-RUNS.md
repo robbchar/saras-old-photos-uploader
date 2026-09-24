@@ -229,12 +229,46 @@ on `s3.us.archive.org` now drives the real `Item.upload_file()` and confirms
 that an S3 failure really does re-raise `HTTPError` with its `Response`
 attached, status intact, while the message loses it. What is still unverified
 is IA's own behavior: that a real rate limit arrives as one of these shapes at
-all. A missed
+all. *Amended 2026-09-24:* one has — a test-mode rehearsal was refused with
+IA's queue throttle and the detector stopped the run (see "The rate-limit stop
+names no cause it cannot see" below). A missed
 detection (an exception with neither attribute, or a genuinely different
 status) is the safe failure direction: the row is logged as one ordinary
 failure and the run continues, same as any other transient error, whereas a
 false match aborts a run mid-flight over an unrelated error. `--limit`
 (above) remains the operator-controlled fallback either way.
+
+## The rate-limit stop names no cause it cannot see
+
+*Decided 2026-09-24, after the first real rate-limit response.*
+
+A test-mode rehearsal was refused with *"Please reduce your request rate. -
+total_tasks_queued exceeds global_limit"*: IA's task queue was congested, not
+this account's 5,000/day cap. The detector stopped the run correctly, but the
+closing line said "resume by re-running tomorrow" — advice for the daily cap,
+given for a throttle that can clear in minutes to hours.
+
+The tool cannot tell the two apart. It never sees a daily-cap signal of its
+own: the only cap it enforces is the refusal to *start* a run over 5,000
+items, and it keeps no count across a day's runs. Both limits can arrive as a
+503, and telling them apart by IA's message would reintroduce exactly the
+text-reading the decision above rejected. So the stop now names what it knows
+and both possible causes:
+
+```
+stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+```
+
+The operator decides from IA's own message, which the log already keeps in
+`error`. To make the status itself reviewable later, every per-row `failure`
+record now carries `http_status` (the `parsed_status_code()` integer, or
+`null` when there was none — a connection reset, a timeout), for both
+`upload` and `sync-metadata`, and upload's `run_summary` carries
+`rate_limit_status`, the status the run stopped on. `rate_limited` is now
+derived from it, so the two cannot disagree. If real runs show the two
+limits arrive with different statuses, that is the evidence a future change
+would branch on — never the message.
 
 ## Retry covers transport failures, never refusals
 
@@ -280,7 +314,7 @@ established:
 **429 and 503 are deliberately excluded.** They are Internet Archive saying
 "slow down", and this tool already answers that with more than a retry:
 `is_rate_limit_error()` stops the whole run after the current chunk's confirm
-write so the operator resumes tomorrow. Retrying them here would delay that
+write so the operator resumes later. Retrying them here would delay that
 stop for every rate-limited row while making the overload marginally worse.
 The alternative — a short backoff before falling through to the stop, which
 is what `ia upload --retries` does — was considered and rejected as
@@ -324,7 +358,7 @@ run that had simply stopped producing output. `BoundedRetryAfter` caps it at
 `RETRY_AFTER_MAX_SECONDS` (30s). Ignoring the header outright would be worse —
 it is the server saying exactly what it wants — but this tool already has a
 better answer than waiting out a long one: a 429/503 stops the run so the
-operator resumes tomorrow. Anything longer than the bound becomes "stop the
+operator resumes later. Anything longer than the bound becomes "stop the
 run" rather than "sleep through the afternoon".
 
 That is a subclass rather than urllib3's own `retry_after_max=` argument,

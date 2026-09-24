@@ -638,18 +638,25 @@ real run. They need about five minutes and change nothing. `< /dev/null`
 detaches each command from the terminal, so nothing could stop and wait for a
 sign-in even if it tried.
 
-1. **Read the test Sheet.** Expect the normal readiness report and no sign-in
-   prompt:
+The Test Sheet holds the `e2e` project's grid — steps 1 and 2 below target it
+with `--registry e2e_fixtures/registry.json --project e2e`, not
+`<project>`/`sarasoldphotos`.
+
+1. **Read the test Sheet.** Expect a readiness report that includes `5/5
+   rows passed`, followed by more summary lines (after a rehearsal, `3
+   already uploaded`, `1 row ready to upload`, `1` not yet catalogued for
+   the no-theme row) and no sign-in prompt:
 
    ```bash
-   .venv/bin/python ia_bulk.py validate --project <project> < /dev/null
+   .venv/bin/python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e < /dev/null
    ```
 
-2. **Preview a sync.** Expect the usual summary line, for example
-   `10 uploaded rows; … 10 already in sync and would not be sent`:
+2. **Preview a sync.** Expect a summary line, for example
+   `3 uploaded rows; 0 with no push on record, 0 changed since their last
+   push, 3 already in sync and would not be sent`:
 
    ```bash
-   .venv/bin/python ia_bulk.py sync-metadata --project <project> --dry-run < /dev/null
+   .venv/bin/python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e --dry-run < /dev/null
    ```
 
 3. **See the failure message once.** Move the key aside, run `validate`, and
@@ -662,8 +669,17 @@ sign-in even if it tried.
    mv .ignored/google-service-account.json.off .ignored/google-service-account.json
    ```
 
+Steps 1 and 2 are also covered by the e2e rehearsal, a development tool run
+on a dev machine (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`);
+step 3 is not, so run it by hand after replacing the key.
+
 For a full round trip — a real edit reaching Internet Archive, and the Sheet's
 version history showing the service account as its editor — follow
 [4. Corrections](OPERATIONS.md#4-corrections) against the test Sheet: change
 one uploaded row's title, sync, check the item, then change it back and sync
-again.
+again. §4's commands carry `--live`; for the test Sheet, sync with this
+instead:
+
+```bash
+.venv/bin/python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e < /dev/null
+```

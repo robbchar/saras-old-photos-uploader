@@ -57,6 +57,7 @@ against a Sheet edited mid-run, and how corrections get back out.
 - [A fingerprint only proves identity while it is unique](decisions/SHEET-PROTOCOL.md#a-fingerprint-only-proves-identity-while-it-is-unique)
 - [The Sheet's log tabs are telemetry, never an input](decisions/SHEET-PROTOCOL.md#the-sheets-log-tabs-are-telemetry-never-an-input)
 - [The rehearsal reset is a hand edit, not a command](decisions/SHEET-PROTOCOL.md#the-rehearsal-reset-is-a-hand-edit-not-a-command)
+- [Test data is ephemeral](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral)
 
 ## [Readiness and errors](decisions/READINESS.md)
 
@@ -102,6 +103,7 @@ run writes down about itself.
 - [A run is scoped to a batch by value; the column is registry configuration](decisions/QUOTA-AND-RUNS.md#a-run-is-scoped-to-a-batch-by-value-the-column-is-registry-configuration)
 - [A run may not exceed Internet Archive's daily item cap](decisions/QUOTA-AND-RUNS.md#a-run-may-not-exceed-internet-archives-daily-item-cap)
 - [Rate-limit detection uses a parsed status code, never message text](decisions/QUOTA-AND-RUNS.md#rate-limit-detection-uses-a-parsed-status-code-never-message-text)
+- [The rate-limit stop names no cause it cannot see](decisions/QUOTA-AND-RUNS.md#the-rate-limit-stop-names-no-cause-it-cannot-see)
 - [Retry covers transport failures, never refusals](decisions/QUOTA-AND-RUNS.md#retry-covers-transport-failures-never-refusals)
 - [A status the metadata call strips is recovered, still without reading text](decisions/QUOTA-AND-RUNS.md#a-status-the-metadata-call-strips-is-recovered-still-without-reading-text)
 - [`internetarchive` is pinned exactly](decisions/QUOTA-AND-RUNS.md#internetarchive-is-pinned-exactly)
@@ -164,7 +166,14 @@ run writes down about itself.
   stays open is only whether IA's response is distinguishable when the cap is
   hit anyway, e.g. across two runs in one day, which the tool does not track.
   `--limit` (see "`--limit` counts planned targets..." above) remains the
-  operator-controlled fallback either way.
+  operator-controlled fallback either way. **2026-09-24:** the first real
+  rate-limit response arrived, in a test-mode rehearsal against archive.org —
+  a queue throttle ("total_tasks_queued exceeds global_limit"), not the daily
+  cap — and the detector stopped the run on it. Its status code was not logged
+  then; every failure now records `http_status`, so the next one will show
+  whether IA's two limits differ by status. The stop message no longer claims
+  the daily cap (see "The rate-limit stop names no cause it cannot see" in
+  `decisions/QUOTA-AND-RUNS.md`).
 - ~~How a run establishes the next free `NUMBER`~~ **Settled 2026-08-08**:
   reserve in the Sheet before uploading, and track completion in an
   `ia_uploaded` column so an interrupted run is recoverable.

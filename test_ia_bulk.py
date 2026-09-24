@@ -40,6 +40,7 @@ from ia_bulk import (
     log_result,
     build_parser,
     build_sheet_client,
+    build_sheets_service,
     format_field_receipt,
     format_lifecycle_summary,
     format_missing_field_lines,
@@ -1237,6 +1238,19 @@ def test_build_sheet_client_passes_credentials_through_to_discovery_build(monkey
     assert captured["key_path"] == google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
 
 
+def test_build_sheets_service_loads_the_key_it_is_given(monkeypatch, tmp_path):
+    loaded = []
+    monkeypatch.setattr(
+        "ia_bulk.google_auth.load_service_account_credentials",
+        lambda key_path: loaded.append(key_path) or "FAKE_CREDS",
+    )
+    fake_service = _RecordingSheetsService({"values": []})
+    monkeypatch.setattr("ia_bulk.googleapiclient.discovery.build", lambda *a, **k: fake_service)
+
+    assert build_sheets_service(tmp_path / "key.json") is fake_service
+    assert loaded == [tmp_path / "key.json"]
+
+
 def test_cmd_validate_reads_the_sheet_and_injects_mediatype(
     tmp_path, monkeypatch, capsys
 ):
@@ -2283,9 +2297,24 @@ def test_log_result_appends_one_json_line(tmp_path):
     assert first["identifier"] == "lcps-astoriaphotos-00001"
     assert first["status"] == "success"
     assert first["error"] is None
+    assert first["http_status"] is None
     second = json.loads(lines[1])
     assert second["status"] == "failure"
     assert second["error"] == "timeout"
+
+
+def test_log_result_records_the_http_status_it_is_given(tmp_path):
+    from ia_bulk import log_result
+
+    log_path = tmp_path / "upload-test.jsonl"
+
+    log_result(
+        log_path, "lcps-astoriaphotos-00001", "photo1.jpg", "failure",
+        live=False, error="SlowDown", http_status=503,
+    )
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert entry["http_status"] == 503
 
 
 def test_recorded_timestamps_are_utc_with_an_explicit_offset(tmp_path, monkeypatch):
@@ -6247,10 +6276,13 @@ def test_cmd_upload_stops_the_run_on_a_rate_limit_instead_of_grinding_through_fa
         f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-0000{n}" for n in (1, 2, 3)
     ]
     assert (
-        "stopped: Internet Archive reported a rate limit after 3 items"
+        "stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items"
         in captured.err.splitlines()
     )
-    assert "2 uploaded this run - resume by re-running tomorrow" in captured.out.splitlines()
+    assert (
+        "2 uploaded this run - re-run later to resume: minutes to hours if IA's "
+        "queue is busy, tomorrow if today's 5,000 cap was reached"
+    ) in captured.out.splitlines()
     assert exit_code == 1
 
 
@@ -9209,6 +9241,33 @@ def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypa
     assert summary["pushed"] == 2
 
 
+def test_a_failed_sync_row_logs_the_status_internet_archive_sent(tmp_path, monkeypatch):
+    """Same per-row field as upload: every failure carries the parsed status,
+    read from the response rather than the message."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
+
+    def refuse_the_second(metadata, target):
+        if target.endswith("00002"):
+            response = requests.Response()
+            response.status_code = 403
+            raise requests.exceptions.HTTPError("Access Denied", response=response)
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", refuse_the_second)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = {
+        entry["identifier"]: entry
+        for entry in _sync_log_entries(tmp_path)
+        if entry.get("status") in ("success", "failure")
+    }
+
+    assert rows["lcps-astoriaphotos-00002"]["http_status"] == 403
+    assert rows["lcps-astoriaphotos-00001"]["http_status"] is None
+
+
 def test_a_row_that_was_never_sent_is_skipped_not_failed(tmp_path, monkeypatch):
     """The distinction the summary exists to preserve. A failure means the
     item was contacted and refused the edit; a skip means nothing was sent at
@@ -11096,6 +11155,7 @@ def test_upload_ends_with_a_machine_readable_summary(tmp_path, monkeypatch):
     assert summary["skipped"] == []
     assert summary["not_attempted"] == 0
     assert summary["rate_limited"] is False
+    assert summary["rate_limit_status"] is None
 
 
 def test_the_upload_summary_names_each_failed_row_and_why(tmp_path, monkeypatch):
@@ -11220,11 +11280,105 @@ def test_a_rate_limited_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys
     summary = _upload_log_entries(tmp_path)[-1]
 
     assert summary["rate_limited"] is True
+    assert summary["rate_limit_status"] == 503
     assert summary["succeeded"] == 2
     assert summary["not_attempted"] == 2
     assert [entry["identifier"] for entry in summary["failures"]] == [
         "lcps-astoriaphotos-00003"
     ]
+
+
+def test_a_rate_limited_row_logs_the_status_internet_archive_sent(tmp_path, monkeypatch, capsys):
+    """429 and 503 both stop the run, but a 503 can be a busy global queue
+    (clears within hours) or the daily cap (clears tomorrow); the operator
+    needs the number to start telling them apart."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["Photo 1", "photo1.jpg", "", "", "", ""]]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg",)
+    )
+
+    def rate_limited(row, target_identifier, collection, files_dir):
+        raise UploadFailed(
+            f"upload of '{target_identifier}' failed with status 429: SlowDown",
+            status_code=429,
+        )
+
+    monkeypatch.setattr("ia_bulk.upload_row", rate_limited)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    entries = _upload_log_entries(tmp_path)
+    failure = next(entry for entry in entries if entry.get("status") == "failure")
+
+    assert failure["http_status"] == 429
+    assert entries[-1]["rate_limit_status"] == 429
+
+
+def test_an_ordinary_refusal_logs_its_status_and_the_run_carries_on(
+    tmp_path, monkeypatch, capsys
+):
+    """Every failure records the status IA sent, not only rate limits - a 403
+    and a read timeout read alike in a truncated console line."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["Photo 1", "photo1.jpg", "", "", "", ""],
+        ["Photo 2", "photo2.jpg", "", "", "", ""],
+    ]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    def refuse_the_first(row, target_identifier, collection, files_dir):
+        if target_identifier.endswith("00001"):
+            raise UploadFailed(
+                f"upload of '{target_identifier}' failed with status 403: Access Denied",
+                status_code=403,
+            )
+
+    monkeypatch.setattr("ia_bulk.upload_row", refuse_the_first)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    entries = _upload_log_entries(tmp_path)
+    by_status = {entry["status"]: entry for entry in entries if "status" in entry}
+    summary = entries[-1]
+
+    assert by_status["failure"]["http_status"] == 403
+    assert by_status["success"]["http_status"] is None
+    assert summary["rate_limited"] is False
+    assert summary["rate_limit_status"] is None
+    assert summary["succeeded"] == 1
+
+
+def test_a_failure_with_no_parsed_status_logs_none(tmp_path, monkeypatch, capsys):
+    """A connection reset carries no status; the field says so rather than
+    reading one out of the message."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["Photo 1", "photo1.jpg", "", "", "", ""]]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg",)
+    )
+
+    def reset(row, target_identifier, collection, files_dir):
+        raise ConnectionError("status 503: connection reset by peer")
+
+    monkeypatch.setattr("ia_bulk.upload_row", reset)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    failure = next(
+        entry for entry in _upload_log_entries(tmp_path) if entry.get("status") == "failure"
+    )
+
+    assert failure["http_status"] is None
 
 
 def test_the_upload_console_tail_and_the_summary_record_cannot_disagree(
