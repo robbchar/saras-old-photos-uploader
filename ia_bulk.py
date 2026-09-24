@@ -12,6 +12,7 @@ import random
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -484,6 +485,13 @@ def format_field_receipt(column_map: ColumnMap) -> str:
 CONSOLE_ERROR_WIDTH = 300
 
 
+def _elide(text: str, width: int) -> str:
+    if len(text) > width:
+        # ASCII, deliberately: a console codepage without U+2026 would print it as an escape.
+        return text[:width - 3] + "..."
+    return text
+
+
 def format_row_error(exc: Exception) -> str:
     """A failing row's error, as one line to print underneath it.
 
@@ -498,10 +506,7 @@ def format_row_error(exc: Exception) -> str:
     [N/M] rhythm the operator is reading. Truncated for the same reason. The
     log keeps the complete text, which is what the log is for.
     """
-    text = " ".join(str(exc).split())
-    if len(text) > CONSOLE_ERROR_WIDTH:
-        text = text[:CONSOLE_ERROR_WIDTH - 3] + "..."
-    return text
+    return _elide(" ".join(str(exc).split()), CONSOLE_ERROR_WIDTH)
 
 
 def _pluralize(count: int, noun: str) -> str:
@@ -3417,61 +3422,71 @@ def fetch_current_metadata(identifier: str) -> dict | None:
 
 
 def _display_text(value: object) -> str:
-    """IA returns a list for a field that occurs more than once."""
-    if isinstance(value, list):
-        return "; ".join(str(part) for part in value)
-    return str(value)
-
-
-def _elide(text: str) -> str:
-    if len(text) > DRY_RUN_VALUE_WIDTH:
-        # ASCII, deliberately: this report is read on a Windows console whose
-        # codepage cannot encode U+2026, where one non-ASCII character raises
-        # UnicodeEncodeError and truncates the whole report mid-run.
-        return text[:DRY_RUN_VALUE_WIDTH - 3] + "..."
-    return text
+    """IA returns a list for a field that occurs more than once. Line breaks are
+    escaped so a value keeps to its line; accents are composed and invisible
+    characters dropped, since neither shows on screen."""
+    text = "; ".join(str(part) for part in value) if isinstance(value, list) else str(value)
+    visible = "".join(
+        char for char in unicodedata.normalize("NFC", text) if unicodedata.category(char) != "Cf"
+    )
+    return visible.replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _render(value: object) -> str:
-    return _elide(_display_text(value))
+    return _elide(_display_text(value), DRY_RUN_VALUE_WIDTH)
 
 
-def _first_difference(current_text: str, new_text: str) -> int:
-    """Index of the first differing character; the shorter length if one text starts the other."""
-    for index, (current_char, new_char) in enumerate(zip(current_text, new_text)):
-        if current_char != new_char:
-            return index
-    return min(len(current_text), len(new_text))
-
-
-def _collapse_whitespace(text: str) -> str:
-    return " ".join(text.split())
-
-
-def _why_it_reads_unchanged(current: object, current_text: str, new_text: str) -> str | None:
-    """None when the two texts visibly differ. ASCII, for the same reason as _elide."""
-    if _collapse_whitespace(current_text) != _collapse_whitespace(new_text):
+def _first_visible_difference(current_text: str, new_text: str) -> tuple[int, int] | None:
+    """Where each text first reads differently, any run of whitespace reading
+    as one space; None when the two read alike."""
+    current_words = list(re.finditer(r"\S+", current_text))
+    new_words = list(re.finditer(r"\S+", new_text))
+    current_end = new_end = 0
+    for current_word, new_word in zip(current_words, new_words):
+        if current_word.group() != new_word.group():
+            shared = len(os.path.commonprefix([current_word.group(), new_word.group()]))
+            return current_word.start() + shared, new_word.start() + shared
+        current_end, new_end = current_word.end(), new_word.end()
+    if len(current_words) == len(new_words):
         return None
-    if isinstance(current, list):
+    return current_end, new_end
+
+
+def _hidden_by_cutoff(text: str, position: int) -> bool:
+    return len(text) > DRY_RUN_VALUE_WIDTH and position >= DRY_RUN_VALUE_WIDTH - 3
+
+
+def _window(text: str, position: int) -> str:
+    start = max(0, position - DRY_RUN_DIFFERENCE_CONTEXT)
+    return _elide(("..." if start else "") + text[start:], DRY_RUN_VALUE_WIDTH)
+
+
+def _why_it_reads_unchanged(current: object, new: str) -> str | None:
+    """None when the two visibly differ. ASCII, for the same reason as _elide."""
+    current_text, new_text = _display_text(current), _display_text(new)
+    if _first_visible_difference(current_text, new_text) is not None:
+        return None
+    if isinstance(current, list) and len(current) > 1:
         return (
             f"(Internet Archive holds {_pluralize(len(current), 'separate value')}; "
             "the sync replaces them with one)"
         )
-    return "(the two differ only in spaces or line breaks)"
+    if current_text != new_text:
+        return "(the two differ only in spaces)"
+    return "(the two differ in a way that does not show on screen)"
 
 
 def _render_change(field_name: str, current: object, new: str) -> FieldChange:
-    """When the cutoff would hide the difference, both values are shown from
-    just before it instead of from their start."""
-    current_text = _display_text(current)
-    current_shown, new_shown = _elide(current_text), _elide(new)
-    if current_shown == new_shown and current_text != new:
-        start = max(0, _first_difference(current_text, new) - DRY_RUN_DIFFERENCE_CONTEXT)
-        current_shown = _elide("..." + current_text[start:])
-        new_shown = _elide("..." + new[start:])
-    return FieldChange(
-        field_name, current_shown, new_shown, _why_it_reads_unchanged(current, current_text, new)
-    )
+    """When the cutoff would hide where the two first read differently, both
+    are shown from just before that point instead of from their start."""
+    current_shown, new_shown = _render(current), _render(new)
+    current_text, new_text = _display_text(current), _display_text(new)
+    difference = _first_visible_difference(current_text, new_text)
+    if difference is not None:
+        current_at, new_at = difference
+        if _hidden_by_cutoff(current_text, current_at) or _hidden_by_cutoff(new_text, new_at):
+            current_shown, new_shown = _window(current_text, current_at), _window(new_text, new_at)
+    return FieldChange(field_name, current_shown, new_shown, _why_it_reads_unchanged(current, new))
 
 
 def metadata_changes(sheet_metadata: dict[str, str], remote: dict) -> list[FieldChange]:
@@ -5396,9 +5411,10 @@ def start_run_output(command: str) -> None:
     """Called before a command loads anything, so a registry that will not load
     still fails under its own run's date. Line-buffered because the LaunchAgent
     sends stdout and stderr to one file, and block-buffered stdout would land
-    after stderr written later."""
+    after stderr written later. A character the console codepage lacks prints as
+    an escape, as on stderr, instead of ending the run's output there."""
     if isinstance(sys.stdout, io.TextIOWrapper):
-        sys.stdout.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(line_buffering=True, errors="backslashreplace")
     print(f"{utc_timestamp()} {command}")
 
 

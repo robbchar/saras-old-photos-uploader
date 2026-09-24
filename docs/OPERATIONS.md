@@ -428,12 +428,14 @@ Decoupled from upload and safe to re-run. Blank cell = leave alone; literal
 `REMOVE_TAG` = delete that field. `noindex` cannot be changed this way —
 see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata).
 
-The dry run prints each field it would change as a `now:` / `new:` pair. A
-long value edited past what fits on the line is shown from just before the
-edit, starting with `...`. If the two lines still read the same, a line in
+The dry run prints each field it would change as a `now:` / `new:` pair, with
+line breaks shown as `\n` (or `\r\n`) so each value stays on its line. A long
+value edited past what fits on the line is shown from just before the edit,
+starting with `...`. If the two lines still read the same, a line in
 parentheses under them says why the field changes anyway: Internet Archive
-holds several separate values that the sync replaces with one, or the two
-differ only in spaces or line breaks.
+holds several separate values that the sync replaces with one, the two differ
+only in spaces, or they differ in a way that does not show on screen (an
+invisible character, or an accent stored a different way).
 
 Every row marked uploaded is checked against the item its own `ia_url` cell
 names, so nothing needs a log and rows uploaded by different runs are each
