@@ -6,6 +6,7 @@ Each step label names the hand check it replaces.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -68,6 +69,12 @@ STEP_11 = "step 11 - only expected cells changed (OPERATIONS 'Rehearsing the log
 Found = TypeVar("Found")
 
 
+def _print_for_console(text: str) -> None:
+    """A cp1252 console can't show ia's progress-bar block char; escape what it can't show instead of raising."""
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
+
+
 def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -> subprocess.CompletedProcess[str]:
     argv = [sys.executable, "ia_bulk.py", command, *flags, "--registry", str(E2E_REGISTRY), "--project", "e2e"]
     if log_dir is not None:
@@ -82,7 +89,7 @@ def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -
         timeout=CLI_TIMEOUT_SECONDS,
         check=False,
     )
-    print(f"\n===== {step}\n$ ia_bulk.py {command} {' '.join(flags)}\n{result.stdout}{result.stderr}")
+    _print_for_console(f"\n===== {step}\n$ ia_bulk.py {command} {' '.join(flags)}\n{result.stdout}{result.stderr}")
     return result
 
 
@@ -272,3 +279,9 @@ def test_rehearsal(tmp_path):
     ]
     expect(STEP_11, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
     expect(STEP_11, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
+
+
+def test_print_for_console_survives_a_non_utf8_console(monkeypatch):
+    """A cp1252 console can't encode ia's progress-bar block char; this must not raise."""
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
+    _print_for_console("uploading e2e-01.jpg: 100%|██████████| 1/1")
