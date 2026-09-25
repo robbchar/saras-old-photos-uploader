@@ -69,6 +69,7 @@ The difference between a row nobody has filled in yet and a row that is broken
 - [On the Sheet path, `upload` uploads the valid rows and reports the rest](decisions/READINESS.md#on-the-sheet-path-upload-uploads-the-valid-rows-and-reports-the-rest)
 - [A bad row is skipped; a bad header stops the whole run](decisions/READINESS.md#a-bad-row-is-skipped-a-bad-header-stops-the-whole-run)
 - [A malformed header is rejected, never auto-corrected](decisions/READINESS.md#a-malformed-header-is-rejected-never-auto-corrected)
+- [`validate --json` is a contract, not a second report](decisions/READINESS.md#validate---json-is-a-contract-not-a-second-report)
 
 ## [Files and metadata](decisions/FILES-AND-METADATA.md)
 

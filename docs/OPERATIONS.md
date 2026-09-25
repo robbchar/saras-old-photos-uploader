@@ -235,6 +235,13 @@ has caught two real Sheet typos before they shipped as permanent IA fields.
 with every metadata column shifted into the wrong field still passes. See
 [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata).
 
+`validate --json` prints the same findings as one JSON document, for
+programs rather than people. That means the upload page. The timestamp,
+banner and any refusal go to stderr, so stdout parses whole. Its shape is
+recorded in
+[`decisions/READINESS.md`](decisions/READINESS.md#validate---json-is-a-contract-not-a-second-report),
+and `contract_fixtures/` holds a worked example of each form.
+
 ### Why this is a hard rule
 
 On 2026-08-21 a nine-row rehearsal had three rows fail file resolution. One
@@ -797,6 +804,11 @@ Read `unconfirmed`
 first: those files **are** on Internet Archive but were never marked in the
 Sheet, so the next run would upload them again under a second identifier.
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
+
+Symmetrically, `head -1` of the same log gives its `run_header`, whose
+`planned` is how many items the run meant to upload after `--limit` (`null`
+for `sync-metadata`). Set against the `run_summary`'s counts, that reads as
+"N of planned" — how much of what the run intended to do actually happened.
 
 ### Reading a run from the Sheet instead
 

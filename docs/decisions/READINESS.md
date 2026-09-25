@@ -197,3 +197,48 @@ positions, and nothing can tell you which one is right.
 applies one fixed rule and never corrects a typo; `check_column_map()` rejects
 two headers that normalize to one name, or to nothing; `check_grid_shape()`
 rejects a data row longer than its header.
+
+## `validate --json` is a contract, not a second report
+
+*Decided 2026-09-25 (#74).*
+
+The local upload page (#29) needs two things `validate` already knows but
+only printed for people: the themes to offer, each with its counts, and a
+preview of one theme with its rows and reasons. Parsing the text report
+would make every wording change a silent break, so `validate --json` prints
+one JSON document instead.
+
+- **One report, two renderings.** The lifecycle buckets are built once as
+  data (`LifecycleReport`); the text summary and the JSON both render it,
+  so they cannot disagree. Batches are grouped by the same function
+  `--batch` matches with (`batch_groups`): folded case and whitespace,
+  blanks skipped, the first-seen spelling shown.
+- **stdout is the document and nothing else.** The timestamp line, the
+  banner and every refusal go to stderr. A refusal prints no JSON and
+  exits 1. Otherwise the exit code is the text report's: 1 when any row
+  fails validation, which `valid` also says. A non-empty `sheet_errors`
+  means `upload` refuses the whole run, whichever batch is chosen.
+- **`rows_with_errors` explains `valid`.** A row can be not yet catalogued
+  and broken at once (a blank title and a filename that doesn't resolve);
+  it counts under `not_ready`, so no `invalid` count would show it.
+  `rows_with_errors` lists every in-scope row whose validation has errors,
+  whatever its verdict, so `valid` is false exactly when `sheet_errors` or
+  `rows_with_errors` is non-empty.
+- **The code's own vocabulary.** Counts are keyed by the row states
+  (`unassigned`, `done`, `reserved`) and verdicts (`ready`, `invalid`,
+  `not_ready`), all nine always present. `ready_to_upload` (overall, and
+  per batch) is what `upload` would send: ready rows not yet uploaded,
+  reserved ones included, by the same rule `upload` uses
+  (`is_upload_target`).
+- **Detail only where it is used.** Without `--batch`: counts overall and
+  per batch, for the picker. With `--batch`: that batch's counts and every
+  row with its errors and missing fields, for the preview. A project with
+  no `batch_column` gets `"batches": null`; a `batch_column` the Sheet
+  lacks is refused, as `--batch` refuses it. Each entry in a row's `errors`
+  is the operator-facing message for one problem; they are not grouped by
+  kind, so a preview lists each broken row with its own message and groups
+  only not-ready rows, by missing field.
+- **Versioned and pinned.** `format` is bumped when a field changes
+  meaning or disappears; adding a field is not a break.
+  `contract_fixtures/validate-all.json` and `validate-batch.json` are
+  pinned by the suite, and the page's own tests parse the same files.

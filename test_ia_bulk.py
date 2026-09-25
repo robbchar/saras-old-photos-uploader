@@ -999,6 +999,52 @@ def test_lifecycle_summary_raises_on_mismatched_lengths_instead_of_silently_trun
         )
 
 
+def test_build_lifecycle_report_pairs_each_row_with_its_state():
+    from ia_bulk import LifecycleEntry, LifecycleReport, RowValidation, build_lifecycle_report
+    from identifiers import RowState
+
+    rows = [
+        {"ia_identifier": "", "ia_uploaded": ""},
+        {"ia_identifier": "lcps-astoriaphotos-00001", "ia_uploaded": "2026-09-25T00:00:00Z"},
+        {"ia_identifier": "lcps-astoriaphotos-00002", "ia_uploaded": ""},
+    ]
+    results = [RowValidation(row_number=number, identifier="") for number in (2, 3, 4)]
+
+    report = build_lifecycle_report(rows, results)
+
+    assert report == LifecycleReport(
+        (
+            LifecycleEntry(RowState.UNASSIGNED, results[0]),
+            LifecycleEntry(RowState.DONE, results[1]),
+            LifecycleEntry(RowState.RESERVED, results[2]),
+        )
+    )
+
+
+def test_a_lifecycle_report_returns_each_buckets_results():
+    from ia_bulk import RowValidation, UploadVerdict, build_lifecycle_report
+    from identifiers import RowState
+
+    rows = [{"ia_identifier": "", "ia_uploaded": ""}] * 3
+    ready = RowValidation(row_number=2, identifier="")
+    broken = RowValidation(row_number=3, identifier="", errors=["file not found: x.jpg"])
+    blank = RowValidation(row_number=4, identifier="", missing_fields=["title"])
+
+    report = build_lifecycle_report(rows, [ready, broken, blank])
+
+    assert report.results(RowState.UNASSIGNED, UploadVerdict.READY) == [ready]
+    assert report.results(RowState.UNASSIGNED, UploadVerdict.INVALID) == [broken]
+    assert report.results(RowState.UNASSIGNED, UploadVerdict.NOT_READY) == [blank]
+    assert report.results(RowState.DONE, UploadVerdict.READY) == []
+
+
+def test_build_lifecycle_report_refuses_misaligned_lists():
+    from ia_bulk import RowValidation, build_lifecycle_report
+
+    with pytest.raises(ValueError):
+        build_lifecycle_report([{}], [RowValidation(2, ""), RowValidation(3, "")])
+
+
 def _one_row_in(state: str, kind: str) -> tuple[list[dict[str, str]], list[RowValidation]]:
     """One row/result pair shaped to land in exactly the (state, kind)
     lifecycle-summary bucket named by its arguments - the 3 (classify_row
@@ -2157,18 +2203,20 @@ def test_cmd_validate_passes_only_the_row_results_to_the_lifecycle_summary_not_t
     raising. A Sheet with BOTH a structural error (a header collision) and
     a normal data row is what makes the combined list a different LENGTH
     than `rows`, so this is pinned by inspecting exactly what cmd_validate
-    hands to format_lifecycle_summary, not by relying on the length guard
-    added to format_lifecycle_summary itself to happen to fire."""
-    from ia_bulk import cmd_validate
+    hands to build_lifecycle_report (the zip(rows, row_results) call
+    format_lifecycle_summary and validate_json's report both go through),
+    not by relying on the length guard added to build_lifecycle_report
+    itself to happen to fire."""
+    from ia_bulk import build_lifecycle_report, cmd_validate
 
     captured = {}
 
-    def fake_format_lifecycle_summary(rows, row_results):
+    def fake_build_lifecycle_report(rows, row_results):
         captured["rows"] = rows
         captured["row_results"] = row_results
-        return "captured"
+        return build_lifecycle_report(rows, row_results)
 
-    monkeypatch.setattr("ia_bulk.format_lifecycle_summary", fake_format_lifecycle_summary)
+    monkeypatch.setattr("ia_bulk.build_lifecycle_report", fake_build_lifecycle_report)
 
     (tmp_path / "a.jpg").write_bytes(b"x")
     grid = [
@@ -9943,6 +9991,19 @@ def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypa
     assert summary["skipped"] == []
 
 
+def test_sync_from_sheet_pins_a_null_planned_in_its_run_header(tmp_path, monkeypatch):
+    """sync-metadata never plans upload targets or takes --limit, so its
+    run_header's `planned` is always null - unlike upload's, which counts
+    what --limit capped."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert _sync_log_entries(tmp_path)[0]["planned"] is None
+
+
 def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypatch):
     """The failure list is what makes the summary actionable rather than
     merely countable - a run reporting "1 error(s)" and nothing else sends
@@ -11365,6 +11426,19 @@ def test_plan_upload_targets_still_reads_every_row_for_numbers_already_spent():
     assert [target.identifier for target in targets] == ["lcps-astoriaphotos-00008"]
 
 
+def test_batch_groups_group_the_way_batch_matches():
+    """Case and surrounding whitespace folded, blanks skipped, first-seen spelling kept,
+    sorted by the folded value - the listing and --batch can never disagree."""
+    from ia_bulk import BatchGroup, batch_groups
+
+    rows = [{"theme": "Logging"}, {"theme": " logging "}, {"theme": ""}, {"theme": "Fishing"}, {}]
+
+    assert batch_groups(rows, "theme") == [
+        BatchGroup(value="Fishing", row_numbers=frozenset({5})),
+        BatchGroup(value="Logging", row_numbers=frozenset({2, 3})),
+    ]
+
+
 BATCH_SHEET_HEADER = SHEET_HEADER + ["Theme"]
 
 
@@ -11532,6 +11606,221 @@ def test_cmd_validate_batch_reports_only_the_rows_in_that_batch(
     assert exit_code == 0
     assert "2/2 rows passed" in out
     assert "2 rows ready to upload" in out
+
+
+CONTRACT_FIXTURES = Path(__file__).resolve().parent / "contract_fixtures"
+
+
+def _contract_grid(tmp_path):
+    """Every lifecycle case the upload page shows, across two batches and one unbatched row."""
+    for name in (
+        "photo1.jpg", "photo2.jpg", "photo4.jpg", "photo5.jpg", "photo6.jpg", "photo7.jpg",
+        "photo10.jpg",
+    ):
+        (tmp_path / name).write_bytes(b"x")
+    return [
+        BATCH_SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Fishing"],
+        ["Third photo", "photo3.jpg", "", "", "", "", "logging"],
+        ["", "photo4.jpg", "", "", "", "", "Fishing"],
+        ["Fifth photo", "photo5.jpg", "", "", "", "", ""],
+        [
+            "Sixth photo", "photo6.jpg", "lcps-astoriaphotos-00001", "2026-09-25T00:00:00Z",
+            "https://archive.org/details/lcps-astoriaphotos-00001", "photo6.jpg", "Logging",
+        ],
+        ["Seventh photo", "photo7.jpg", "lcps-astoriaphotos-00002", "", "", "", "Logging"],
+        ["", "photo9.jpg", "", "", "", "", "Fishing"],
+        ["", "photo10.jpg", "", "", "", "", "Logging"],
+        ["", "photo11.jpg", "", "", "", "", "Logging"],
+    ]
+
+
+def _validate_json(tmp_path, monkeypatch, capsys, grid, registry, **overrides):
+    """Runs validate --json and returns (exit_code, document or None, stdout, stderr)."""
+    from ia_bulk import cmd_validate
+
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False, json=True)
+    for name, value in overrides.items():
+        setattr(args, name, value)
+
+    exit_code = cmd_validate(args)
+    captured = capsys.readouterr()
+    document = json.loads(captured.out) if captured.out.strip() else None
+    return exit_code, document, captured.out, captured.err
+
+
+def _portable(document, tmp_path):
+    """The document with this run's temp path and path separators made machine-independent."""
+    text = json.dumps(document)
+    for spelling in (json.dumps(str(tmp_path))[1:-1], str(tmp_path).replace("\\", "/")):
+        text = text.replace(spelling, "<files_dir>")
+    return json.loads(text.replace("\\\\", "/"))
+
+
+def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monkeypatch, capsys):
+    exit_code, document, _, _ = _validate_json(
+        tmp_path, monkeypatch, capsys, _contract_grid(tmp_path), _batch_registry(tmp_path)
+    )
+
+    assert exit_code == 1
+    assert document is not None
+    assert document["format"] == 1
+    assert document["batch"] is None
+    assert document["valid"] is False
+    assert document["rows"] is None
+    assert document["counts"] == {
+        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4},
+        "done": {"ready": 1, "invalid": 0, "not_ready": 0},
+        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
+    }
+    # Row 9 is not-ready (blank title) AND broken (unresolvable file), and not_ready
+    # beats invalid - it must not also be counted as invalid.
+    assert document["counts"]["unassigned"]["invalid"] == 1
+    assert document["rows_with_errors"] == [4, 9, 11]
+    assert document["ready_to_upload"] == 4
+    assert [batch["value"] for batch in document["batches"]] == ["Fishing", "Logging"]
+    assert document["batches"][0]["counts"]["unassigned"] == {"ready": 1, "invalid": 0, "not_ready": 2}
+    assert document["batches"][0]["ready_to_upload"] == 1
+    assert document["batches"][1]["counts"] == {
+        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2},
+        "done": {"ready": 1, "invalid": 0, "not_ready": 0},
+        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
+    }
+    assert document["batches"][1]["ready_to_upload"] == 2
+
+
+def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, monkeypatch, capsys):
+    exit_code, document, _, _ = _validate_json(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        _contract_grid(tmp_path),
+        _batch_registry(tmp_path),
+        batch="logging",
+    )
+
+    assert exit_code == 1
+    assert document is not None
+    assert document["batch"] == "logging"
+    assert document["batches"] is None
+    assert [(row["row"], row["state"], row["verdict"]) for row in document["rows"]] == [
+        (2, "unassigned", "ready"),
+        (4, "unassigned", "invalid"),
+        (7, "done", "ready"),
+        (8, "reserved", "ready"),
+        (10, "unassigned", "not_ready"),
+        (11, "unassigned", "not_ready"),
+    ]
+    assert document["rows"][1]["errors"] != []
+    assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
+    assert document["rows"][4]["missing_fields"] == ["title"]
+    assert document["rows"][5]["errors"] != []
+    # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
+    assert document["rows_with_errors"] == [4, 11]
+    assert document["ready_to_upload"] == 2
+
+
+def test_validate_json_matches_the_contract_fixtures(tmp_path, monkeypatch, capsys):
+    """The page's tests parse these same files; a change here is a contract change."""
+    _, everything, _, _ = _validate_json(
+        tmp_path, monkeypatch, capsys, _contract_grid(tmp_path), _batch_registry(tmp_path)
+    )
+    _, one_batch, _, _ = _validate_json(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        _contract_grid(tmp_path),
+        _batch_registry(tmp_path),
+        batch="logging",
+    )
+
+    # Compared as serialized text, not parsed dicts: this pins key ORDER and
+    # exact formatting too, so reordering validate_json's keys (a contract
+    # change per READINESS.md) fails here - dict == dict would not catch it.
+    assert json.dumps(_portable(everything, tmp_path), indent=2) == (
+        CONTRACT_FIXTURES / "validate-all.json"
+    ).read_text(encoding="utf-8").rstrip("\n")
+    assert json.dumps(_portable(one_batch, tmp_path), indent=2) == (
+        CONTRACT_FIXTURES / "validate-batch.json"
+    ).read_text(encoding="utf-8").rstrip("\n")
+
+
+def test_validate_json_is_null_for_batches_when_the_project_has_none(tmp_path, monkeypatch, capsys):
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [["Title", "file"], ["First photo", "photo1.jpg"]]
+
+    exit_code, document, _, _ = _validate_json(
+        tmp_path, monkeypatch, capsys, grid, make_sheet_registry(files_dir=str(tmp_path))
+    )
+
+    assert exit_code == 0
+    assert document is not None
+    assert document["valid"] is True
+    assert document["batches"] is None
+
+
+def test_validate_json_refuses_a_batch_column_the_sheet_lacks(tmp_path, monkeypatch, capsys):
+    """Listing batches is a batch operation, so it refuses the way --batch does."""
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [["Title", "file"], ["First photo", "photo1.jpg"]]
+
+    exit_code, document, out, err = _validate_json(
+        tmp_path, monkeypatch, capsys, grid, _batch_registry(tmp_path)
+    )
+
+    assert exit_code == 1
+    assert document is None
+    assert out == ""
+    assert "batch_column names 'theme', which is not a column in this Sheet" in err
+
+
+def test_validate_json_prints_a_refusal_on_stderr_and_no_json(tmp_path, monkeypatch, capsys):
+    exit_code, document, out, err = _validate_json(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        _contract_grid(tmp_path),
+        _batch_registry(tmp_path),
+        batch="Knitting",
+    )
+
+    assert exit_code == 1
+    assert document is None
+    assert out == ""
+    assert "--batch 'Knitting' matches no row" in err
+
+
+def test_validate_json_through_main_keeps_stdout_to_the_document(tmp_path, monkeypatch, capsys):
+    """The timestamp line and the banner go to stderr, so a program can parse stdout whole."""
+    from ia_bulk import main
+
+    grid = _contract_grid(tmp_path)
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_batch_registry(tmp_path)), encoding="utf-8")
+
+    main(["validate", "--project", "astoriaphotos", "--registry", str(registry_path), "--json"])
+    captured = capsys.readouterr()
+
+    assert json.loads(captured.out)["format"] == 1
+    assert captured.err.splitlines()[0].endswith(" validate")
+
+
+def test_validate_without_json_still_prints_its_timestamp_on_stdout(tmp_path, monkeypatch, capsys):
+    from ia_bulk import main
+
+    grid = _contract_grid(tmp_path)
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(_batch_registry(tmp_path)), encoding="utf-8")
+
+    main(["validate", "--project", "astoriaphotos", "--registry", str(registry_path)])
+
+    assert capsys.readouterr().out.splitlines()[0].endswith(" validate")
 
 
 def test_cmd_validate_refuses_a_batch_value_no_row_carries(tmp_path, monkeypatch, capsys):
@@ -11842,6 +12131,37 @@ def test_a_live_run_header_records_the_registrys_own_collection(tmp_path):
 
     header = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
     assert header["collection"] == "lcpsociety"
+
+
+def test_the_upload_run_header_records_how_many_items_it_plans(tmp_path, monkeypatch, capsys):
+    """So a reader - or the upload page - can show "12 of 42" from the log alone."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [[f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 4)]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=tuple(f"photo{n}.jpg" for n in range(1, 4))
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, limit=2))
+    capsys.readouterr()
+
+    header = _upload_log_entries(tmp_path)[0]
+    assert header["record"] == "run_header"
+    assert header["planned"] == 2
+
+
+def test_the_upload_run_header_plans_every_ready_row_without_a_limit(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [[f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 4)]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=tuple(f"photo{n}.jpg" for n in range(1, 4))
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert _upload_log_entries(tmp_path)[0]["planned"] == 3
 
 
 # Issue #26: the upload run's own machine-readable summary (#25 built only

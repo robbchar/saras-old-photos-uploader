@@ -4,6 +4,7 @@ identifier scheme this script assumes."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import io
 import json
@@ -16,7 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, Protocol, Sequence, TypeVar
+from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar
 
 import googleapiclient.discovery
 import internetarchive
@@ -272,6 +273,11 @@ class RowValidation:
         return UploadVerdict.READY if self.is_valid else UploadVerdict.INVALID
 
 
+def is_upload_target(state: RowState, verdict: UploadVerdict) -> bool:
+    """The one rule for which rows `upload` sends: ready, and not already uploaded."""
+    return verdict is UploadVerdict.READY and state is not RowState.DONE
+
+
 def validate_rows(
     rows: list[dict[str, str]],
     files_dir: str | Path,
@@ -518,8 +524,66 @@ def _pluralize(count: int, noun: str) -> str:
     return f"{count:,} {noun}" if count == 1 else f"{count:,} {noun}s"
 
 
+LIFECYCLE_STATES = (RowState.UNASSIGNED, RowState.DONE, RowState.RESERVED)
+
+
+@dataclass(frozen=True)
+class LifecycleEntry:
+    """One row's lifecycle: classify_row()'s state beside its validation result."""
+
+    state: RowState
+    result: RowValidation
+
+
+@dataclass(frozen=True)
+class LifecycleReport:
+    """Every row's entry, in Sheet order; the text summary and validate --json both render it."""
+
+    entries: tuple[LifecycleEntry, ...]
+    # Every entry bucketed by (state, verdict) once, so results() is a lookup
+    # rather than a fresh scan of `entries`: render and the JSON counts each
+    # ask for all nine buckets, which would otherwise be nine passes over the
+    # report (and nine more per batch). Not part of the value - excluded from
+    # __eq__/__repr__ - and set in __post_init__ because the class is frozen.
+    _buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = field(
+        init=False, compare=False, repr=False, default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = {}
+        for entry in self.entries:
+            buckets.setdefault((entry.state, entry.result.verdict), []).append(entry.result)
+        object.__setattr__(self, "_buckets", buckets)
+
+    def results(self, state: RowState, verdict: UploadVerdict) -> list[RowValidation]:
+        return list(self._buckets.get((state, verdict), []))
+
+
+def build_lifecycle_report(
+    rows: list[dict[str, str]], row_results: list[RowValidation]
+) -> LifecycleReport:
+    """row_results must be validate_rows()'s own output for these rows, in the same order."""
+    if len(rows) != len(row_results):
+        raise ValueError(
+            f"build_lifecycle_report: got {len(rows)} row(s) but {len(row_results)} "
+            "row_results - they must be the same length, in the same order. Pass "
+            "validate_rows()'s own return value here, not the combined report (which "
+            "also carries sheet_structure_validation()'s row-1/shape entries)."
+        )
+    return LifecycleReport(
+        tuple(
+            LifecycleEntry(state=classify_row(row), result=result)
+            for row, result in zip(rows, row_results)
+        )
+    )
+
+
 def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowValidation]) -> str:
-    """row_results must be validate_rows()'s own output for these exact
+    """No production caller since `validate` renders through
+    render_lifecycle_summary; retained as a convenience shim
+    (build_lifecycle_report + render) that the lifecycle tests exercise.
+
+    row_results must be validate_rows()'s own output for these exact
     rows, in the same order (one result per row) - NOT the combined report
     that also includes sheet_structure_validation()'s row-1/shape entries,
     which are not aligned with `rows` at all. Passing a mismatched list
@@ -560,29 +624,17 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
     normally the far larger of the two (an unfilled-in row rather than a
     broken one) and is not an error, so it reads before the more alarming
     invalid line rather than after it."""
-    if len(rows) != len(row_results):
-        raise ValueError(
-            f"format_lifecycle_summary: got {len(rows)} row(s) but {len(row_results)} "
-            "row_results - they must be the same length, in the same order. Pass "
-            "validate_rows()'s own return value here, not the combined report (which "
-            "also carries sheet_structure_validation()'s row-1/shape entries)."
-        )
+    return render_lifecycle_summary(build_lifecycle_report(rows, row_results))
 
-    counts: dict[tuple[RowState, UploadVerdict], int] = {
-        (state, bucket): 0
-        for state in (RowState.UNASSIGNED, RowState.DONE, RowState.RESERVED)
-        for bucket in UploadVerdict
+
+def render_lifecycle_summary(report: LifecycleReport) -> str:
+    """The lifecycle lines for a person to read; validate_json renders the same report for a program."""
+    buckets = {
+        (state, verdict): report.results(state, verdict)
+        for state in LIFECYCLE_STATES
+        for verdict in UploadVerdict
     }
-
-    # The results themselves, not merely a tally: each not-ready line renders
-    # its own missing-field detail from its own rows (see
-    # format_missing_field_lines), so the bucket has to keep them.
-    buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = {key: [] for key in counts}
-    for row, result in zip(rows, row_results):
-        state = classify_row(row)
-        bucket = result.verdict
-        buckets[(state, bucket)].append(result)
-        counts[(state, bucket)] += 1
+    counts = {key: len(results) for key, results in buckets.items()}
 
     lines = [
         f"{_pluralize(counts[(RowState.UNASSIGNED, UploadVerdict.READY)], 'row')} ready to upload "
@@ -641,6 +693,71 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
         )
 
     return "\n".join(lines)
+
+
+# Bumped when a field changes meaning or disappears; adding a field is not a break.
+VALIDATE_JSON_FORMAT = 1
+
+
+def lifecycle_counts_json(report: LifecycleReport) -> dict[str, dict[str, int]]:
+    return {
+        state.value: {verdict.value: len(report.results(state, verdict)) for verdict in UploadVerdict}
+        for state in LIFECYCLE_STATES
+    }
+
+
+def ready_to_upload_count(report: LifecycleReport) -> int:
+    """How many of this report's rows `upload` would send - see is_upload_target."""
+    return sum(1 for entry in report.entries if is_upload_target(entry.state, entry.result.verdict))
+
+
+def validate_json(
+    *,
+    project_id: str,
+    live: bool,
+    batch: str | None,
+    header_results: list[RowValidation],
+    report: LifecycleReport,
+    batches: list[tuple[BatchGroup, LifecycleReport]] | None,
+) -> dict[str, object]:
+    """validate's findings as one document for a program; the text report renders the same report."""
+    return {
+        "format": VALIDATE_JSON_FORMAT,
+        "project": project_id,
+        "live": live,
+        "batch": batch,
+        "valid": all(result.is_valid for result in header_results)
+        and all(entry.result.is_valid for entry in report.entries),
+        "sheet_errors": [error for result in header_results for error in result.errors],
+        "rows_with_errors": [
+            entry.result.row_number for entry in report.entries if entry.result.errors
+        ],
+        "ready_to_upload": ready_to_upload_count(report),
+        "counts": lifecycle_counts_json(report),
+        "batches": None
+        if batches is None
+        else [
+            {
+                "value": group.value,
+                "ready_to_upload": ready_to_upload_count(group_report),
+                "counts": lifecycle_counts_json(group_report),
+            }
+            for group, group_report in batches
+        ],
+        "rows": None
+        if batch is None
+        else [
+            {
+                "row": entry.result.row_number,
+                "state": entry.state.value,
+                "verdict": entry.result.verdict.value,
+                "identifier": entry.result.identifier,
+                "errors": list(entry.result.errors),
+                "missing_fields": list(entry.result.missing_fields),
+            }
+            for entry in report.entries
+        ],
+    }
 
 
 def _format_result_lines(results: list[RowValidation]) -> list[str]:
@@ -829,6 +946,7 @@ def log_run_header(
     limit: int | None = None,
     chunk_size: int = CHUNK_SIZE,
     batch: str | None = None,
+    planned: int | None = None,
 ) -> None:
     """The first line written to a Sheet-path run's log. `head -1 <log>` then
     answers "what did this run send, under what field names, and what did it
@@ -892,6 +1010,7 @@ def log_run_header(
         "held_back": list(column_map.held_back),
         "required_for_upload": list(config.required_for_upload),
         "limit": limit,
+        "planned": planned,  # How many items this run meant to upload, after --limit; None for sync-metadata.
         "chunk_size": chunk_size,
         "batch": batch,
         "batch_column": config.batch_column,
@@ -1797,7 +1916,7 @@ def validate_sheet_grid(
 ) -> tuple[list[RowValidation], list[RowValidation]]:
     """Returns (header_results, row_results). row_results holds exactly one
     entry per row in `rows`, in the same order - which is what
-    format_lifecycle_summary requires and what lets a caller pair a row with
+    build_lifecycle_report requires and what lets a caller pair a row with
     its verdict by index.
 
     A structural problem with one specific data row (a long row) belongs IN
@@ -1959,6 +2078,45 @@ def in_batch_scope(results: list[RowValidation], scope: set[int] | None) -> list
     return [result for result in results if result.row_number in scope]
 
 
+@dataclass(frozen=True)
+class BatchGroup:
+    """One batch as --batch matches it: the first-seen spelling and its Sheet row numbers."""
+
+    value: str
+    row_numbers: frozenset[int]
+
+
+def batch_groups(rows: list[dict[str, str]], column: str) -> list[BatchGroup]:
+    """Every non-blank batch value, grouped by fold_batch_value, sorted by the folded value."""
+    spellings: dict[str, str] = {}
+    members: dict[str, set[int]] = {}
+    for offset, row in enumerate(rows):
+        cell = (row.get(column) or "").strip()
+        if not cell:
+            # A row nobody has catalogued yet has no batch, and must not join any.
+            continue
+        folded = fold_batch_value(cell)
+        spellings.setdefault(folded, cell)
+        members.setdefault(folded, set()).add(offset + 2)
+    return [
+        BatchGroup(value=spellings[folded], row_numbers=frozenset(members[folded]))
+        for folded in sorted(spellings)
+    ]
+
+
+def require_batch_column_in_sheet(config: ProjectConfig, column_map: ColumnMap, column: str) -> None:
+    """Refuse a batch_column that names a column this Sheet does not have."""
+    known = sorted(set(column_map.field_names.values()))
+    if column not in known:
+        # The same failure check_required_for_upload guards, reached a
+        # different way: left alone this reads every row's batch as blank,
+        # matches nothing, and reports the batch as already finished.
+        raise BatchScopeError(
+            f"project '{config.project_id}': batch_column names {column!r}, which is not "
+            f"a column in this Sheet. Known columns: {', '.join(known)}"
+        )
+
+
 def batch_row_numbers(
     rows: list[dict[str, str]],
     config: ProjectConfig,
@@ -1983,40 +2141,22 @@ def batch_row_numbers(
     column = batch_column_for(config, batch_value, registry_path)
     value = batch_value.strip()
 
-    known = sorted(set(column_map.field_names.values()))
-    if column not in known:
-        # The same failure check_required_for_upload guards, reached a
-        # different way: left alone this reads every row's batch as blank,
-        # matches nothing, and reports the batch as already finished.
-        raise BatchScopeError(
-            f"project '{config.project_id}': batch_column names {column!r}, which is not "
-            f"a column in this Sheet. Known columns: {', '.join(known)}"
-        )
+    require_batch_column_in_sheet(config, column_map, column)
 
     wanted = fold_batch_value(value)
-    scope: set[int] = set()
-    # First-seen spelling per folded value, so the listing below de-duplicates
-    # exactly the way matching does - 'Logging' and 'logging' are one entry,
-    # not two, because they are one batch.
-    present: dict[str, str] = {}
-    for offset, row in enumerate(rows):
-        cell = (row.get(column) or "").strip()
-        if not cell:
-            # A row nobody has catalogued yet has no batch, and must not join
-            # whichever one happens to be running.
-            continue
-        folded = fold_batch_value(cell)
-        present.setdefault(folded, cell)
-        if folded == wanted:
-            scope.add(offset + 2)
+    groups = batch_groups(rows, column)
+    scope = next(
+        (set(group.row_numbers) for group in groups if fold_batch_value(group.value) == wanted),
+        set(),
+    )
 
     if not scope:
-        if not present:
+        if not groups:
             raise BatchScopeError(
                 f"--batch {value!r} matches no row: the '{column}' column is empty in "
                 "every row of this Sheet, so no row has been assigned a batch yet."
             )
-        ordered = [present[key] for key in sorted(present)]
+        ordered = [group.value for group in groups]
         shown = ordered[:MAX_LISTED_BATCH_VALUES]
         listing = ", ".join(repr(entry) for entry in shown)
         if len(ordered) > len(shown):
@@ -2029,6 +2169,31 @@ def batch_row_numbers(
         )
 
     return scope
+
+
+def batch_lifecycle_reports(
+    config: ProjectConfig,
+    column_map: ColumnMap,
+    rows: list[dict[str, str]],
+    row_results: list[RowValidation],
+) -> list[tuple[BatchGroup, LifecycleReport]] | None:
+    """Each batch's lifecycle, for validate --json's picker; None when the project names no
+    batch column. A column the Sheet lacks is refused, as --batch refuses it.
+
+    rows and row_results must be the full, un-narrowed lists; row numbers are positional."""
+    column = config.batch_column
+    if column is None:
+        return None
+    require_batch_column_in_sheet(config, column_map, column)
+    by_number = {result.row_number: (row, result) for row, result in zip(rows, row_results)}
+    listed: list[tuple[BatchGroup, LifecycleReport]] = []
+    for group in batch_groups(rows, column):
+        members = [by_number[number] for number in sorted(group.row_numbers)]
+        report = build_lifecycle_report(
+            [row for row, _ in members], [result for _, result in members]
+        )
+        listed.append((group, report))
+    return listed
 
 
 class SheetSetupFailed(Exception):
@@ -2481,6 +2646,16 @@ def cmd_setup(args) -> int:
 
 
 def cmd_validate(args) -> int:
+    if not getattr(args, "json", False):
+        return run_validate(args, json_out=None)
+    json_out = sys.stdout
+    # READINESS.md, "`validate --json` is a contract, not a second report".
+    with contextlib.redirect_stdout(sys.stderr):
+        return run_validate(args, json_out=json_out)
+
+
+def run_validate(args, json_out: TextIO | None) -> int:
+    """validate itself; with json_out, the report goes there as one JSON document instead of as text."""
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
     live = bool(args.live)
@@ -2508,7 +2683,7 @@ def cmd_validate(args) -> int:
 
     # `validate` previews what `upload` would do, so it must narrow to the
     # same rows through the same function. Rows and results are filtered as
-    # PAIRS: format_lifecycle_summary requires one result per row in the same
+    # PAIRS: build_lifecycle_report requires one result per row in the same
     # order and checks the lengths, and the row numbers on the results are
     # still the Sheet's own, so a report still names the row an operator has
     # to go and edit.
@@ -2527,11 +2702,35 @@ def cmd_validate(args) -> int:
         row_results = [result for _, result in in_scope]
 
     results = header_results + row_results
+    exit_code = 0 if all(r.is_valid for r in results) else 1
+    report = build_lifecycle_report(rows, row_results)
+
+    if json_out is not None:
+        try:
+            batches = (
+                None
+                if scope is not None
+                else batch_lifecycle_reports(config, column_map, rows, row_results)
+            )
+        except BatchScopeError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        document = validate_json(
+            project_id=config.project_id,
+            live=live,
+            batch=None if scope is None else args.batch.strip(),
+            header_results=header_results,
+            report=report,
+            batches=batches,
+        )
+        print(json.dumps(document, indent=2), file=json_out)
+        return exit_code
+
     print(format_report(results))
     print()
     print(format_field_receipt(column_map))
     print()
-    print(format_lifecycle_summary(rows, row_results))
+    print(render_lifecycle_summary(report))
     print()
     print("suggestions (advisory - nothing is changed automatically):")
     suggestions = suggest_standard_fields(column_map.uploadable_fields())
@@ -2541,7 +2740,7 @@ def cmd_validate(args) -> int:
     else:
         print("  (none)")
 
-    return 0 if all(r.is_valid for r in results) else 1
+    return exit_code
 
 
 class MissingWriteBackColumns(Exception):
@@ -3026,14 +3225,12 @@ def plan_upload_targets(
 
     pending: list[tuple[int, dict[str, str], RowState]] = []
     for offset, (row, result) in enumerate(zip(rows, row_results)):
-        # Not is_valid alone: an uncatalogued row is valid but NOT_READY, and uploading it
-        # mints a permanent identifier with no title and a blank `file` (see upload_row).
-        if result.verdict is not UploadVerdict.READY:
-            continue
         if scope is not None and offset + 2 not in scope:
             continue
         state = classify_row(row)
-        if state is RowState.DONE:
+        # Not is_valid alone: an uncatalogued row is valid but NOT_READY, and uploading it
+        # mints a permanent identifier with no title and a blank `file` (see upload_row).
+        if not is_upload_target(state, result.verdict):
             continue
         pending.append((offset + 2, row, state))
 
@@ -3928,6 +4125,7 @@ def upload_from_sheet(args) -> int:
             limit=limit,
             chunk_size=chunk_size,
             batch=getattr(args, "batch", None),
+            planned=len(targets),
         )
     except Exception as exc:
         # This record is a receipt for later, not part of the upload itself -
@@ -5363,6 +5561,14 @@ def build_parser() -> argparse.ArgumentParser:
             "through the same code. Matching ignores case and surrounding whitespace."
         ),
     )
+    validate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Print one JSON document instead of the text report: lifecycle counts, per batch "
+            "without --batch, per row with it. Everything else goes to stderr."
+        ),
+    )
 
     upload_parser = subparsers.add_parser(
         "upload", help="Upload items from a project's Sheet", allow_abbrev=False
@@ -5503,7 +5709,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def start_run_output(command: str) -> None:
+def start_run_output(command: str, stream: TextIO | None = None) -> None:
     """Called before a command loads anything, so a registry that will not load
     still fails under its own run's date. Line-buffered because the LaunchAgent
     sends stdout and stderr to one file, and block-buffered stdout would land
@@ -5511,13 +5717,14 @@ def start_run_output(command: str) -> None:
     an escape, as on stderr, instead of ending the run's output there."""
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(line_buffering=True, errors="backslashreplace")
-    print(f"{utc_timestamp()} {command}")
+    print(f"{utc_timestamp()} {command}", file=stream or sys.stdout)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    start_run_output(args.command)
+    # With --json, stdout carries only the document.
+    start_run_output(args.command, sys.stderr if getattr(args, "json", False) else None)
 
     if args.command == "validate":
         return cmd_validate(args)

@@ -454,7 +454,7 @@ same reason `run_stamp()` uses UTC.
 `upload`'s `log_run_header()` writes one more record as the log's
 **first** line, before any row result: `{record: "run_header", timestamp,
 project, live, dry_run, sheet_id, collection, files_dir, file_template,
-columns, held_back, required_for_upload, limit, chunk_size, batch,
+columns, held_back, required_for_upload, limit, planned, chunk_size, batch,
 batch_column}`. `columns` and `held_back` come from that run's `ColumnMap`
 (every header the Sheet had, and which were excluded as `(LCPS Internal)`);
 `required_for_upload`, `limit`, `chunk_size` and `batch` are the
@@ -462,12 +462,13 @@ readiness/scope/batching rules in effect that run. `sheet_id` and
 `collection` name what the run actually used, not what the registry
 configures — a test run records `test_collection` and the test Sheet ID,
 because a receipt naming the real, permanent collection for items that went
-somewhere else describes a run that never happened. `batch_column` is
-written even when `batch` is null, since the value alone means nothing
-without the column it was matched against. All of these can change between runs even though none of them
-changes per row within one, which is why they are captured once here
-rather than left to be reconstructed later from a Sheet that has since
-moved on.
+somewhere else describes a run that never happened. `planned` is how many
+items the run meant to upload, after `--limit`; `null` for `sync-metadata`.
+`batch_column` is written even when `batch` is null, since the value alone
+means nothing without the column it was matched against. All of these can
+change between runs even though none of them changes per row within one,
+which is why they are captured once here rather than left to be
+reconstructed later from a Sheet that has since moved on.
 
 ### The `run_summary` record
 Every real run of `sync-metadata` **or** `upload` ends with one more record

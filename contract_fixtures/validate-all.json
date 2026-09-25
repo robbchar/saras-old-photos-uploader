@@ -1,0 +1,76 @@
+{
+  "format": 1,
+  "project": "astoriaphotos",
+  "live": false,
+  "batch": null,
+  "valid": false,
+  "sheet_errors": [],
+  "rows_with_errors": [
+    4,
+    9,
+    11
+  ],
+  "ready_to_upload": 4,
+  "counts": {
+    "unassigned": {
+      "ready": 3,
+      "invalid": 1,
+      "not_ready": 4
+    },
+    "done": {
+      "ready": 1,
+      "invalid": 0,
+      "not_ready": 0
+    },
+    "reserved": {
+      "ready": 1,
+      "invalid": 0,
+      "not_ready": 0
+    }
+  },
+  "batches": [
+    {
+      "value": "Fishing",
+      "ready_to_upload": 1,
+      "counts": {
+        "unassigned": {
+          "ready": 1,
+          "invalid": 0,
+          "not_ready": 2
+        },
+        "done": {
+          "ready": 0,
+          "invalid": 0,
+          "not_ready": 0
+        },
+        "reserved": {
+          "ready": 0,
+          "invalid": 0,
+          "not_ready": 0
+        }
+      }
+    },
+    {
+      "value": "Logging",
+      "ready_to_upload": 2,
+      "counts": {
+        "unassigned": {
+          "ready": 1,
+          "invalid": 1,
+          "not_ready": 2
+        },
+        "done": {
+          "ready": 1,
+          "invalid": 0,
+          "not_ready": 0
+        },
+        "reserved": {
+          "ready": 1,
+          "invalid": 0,
+          "not_ready": 0
+        }
+      }
+    }
+  ],
+  "rows": null
+}

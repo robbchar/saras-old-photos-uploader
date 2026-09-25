@@ -1,0 +1,89 @@
+{
+  "format": 1,
+  "project": "astoriaphotos",
+  "live": false,
+  "batch": "logging",
+  "valid": false,
+  "sheet_errors": [],
+  "rows_with_errors": [
+    4,
+    11
+  ],
+  "ready_to_upload": 2,
+  "counts": {
+    "unassigned": {
+      "ready": 1,
+      "invalid": 1,
+      "not_ready": 2
+    },
+    "done": {
+      "ready": 1,
+      "invalid": 0,
+      "not_ready": 0
+    },
+    "reserved": {
+      "ready": 1,
+      "invalid": 0,
+      "not_ready": 0
+    }
+  },
+  "batches": null,
+  "rows": [
+    {
+      "row": 2,
+      "state": "unassigned",
+      "verdict": "ready",
+      "identifier": "",
+      "errors": [],
+      "missing_fields": []
+    },
+    {
+      "row": 4,
+      "state": "unassigned",
+      "verdict": "invalid",
+      "identifier": "",
+      "errors": [
+        "no file found in '<files_dir>' matching 'photo3.jpg' (looked for an exact filename match, then a case-insensitive match ignoring extension)"
+      ],
+      "missing_fields": []
+    },
+    {
+      "row": 7,
+      "state": "done",
+      "verdict": "ready",
+      "identifier": "lcps-astoriaphotos-00001",
+      "errors": [],
+      "missing_fields": []
+    },
+    {
+      "row": 8,
+      "state": "reserved",
+      "verdict": "ready",
+      "identifier": "lcps-astoriaphotos-00002",
+      "errors": [],
+      "missing_fields": []
+    },
+    {
+      "row": 10,
+      "state": "unassigned",
+      "verdict": "not_ready",
+      "identifier": "",
+      "errors": [],
+      "missing_fields": [
+        "title"
+      ]
+    },
+    {
+      "row": 11,
+      "state": "unassigned",
+      "verdict": "not_ready",
+      "identifier": "",
+      "errors": [
+        "no file found in '<files_dir>' matching 'photo11.jpg' (looked for an exact filename match, then a case-insensitive match ignoring extension)"
+      ],
+      "missing_fields": [
+        "title"
+      ]
+    }
+  ]
+}
