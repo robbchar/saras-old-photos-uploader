@@ -736,6 +736,23 @@ runs together have already sent close to 5,000 items, wait until tomorrow.
 Either way the rerun resumes by itself. The status is also in the log, as the
 failure record's `http_status` and the `run_summary`'s `rate_limit_status`.
 
+### Stopping a run on purpose
+
+Press Ctrl-C once. The run finishes the item it is uploading, records it in
+the Sheet, and stops:
+
+```
+interrupt received: stopping after the current item. Interrupt again to stop now.
+stopped: as requested, after 3 items
+3 uploaded this run - run the same command again to pick up where it left off
+```
+
+Run the same command again to carry on. The rows it never reached are
+picked up, and any it had reserved are retried under the identifiers they
+already have. Press Ctrl-C a second time only if you must stop at once:
+the run then ends without its summary, which is still safe to re-run. Why:
+[`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item).
+
 ## Reading a run
 
 ```bash
@@ -749,7 +766,8 @@ grep '"status": "failure"' logs/upload-20260712T125326.jsonl
 Every real run also ends with a `run_summary` line — `tail -1` of its log
 gives the whole run in one record, without the row lines above it. For
 `upload` that is `attempted` / `succeeded`, a `failures` list, an
-`unconfirmed` list, `not_attempted`, `rate_limited` and `rate_limit_status`.
+`unconfirmed` list, `not_attempted`, `rate_limited`, `stopped_by_request`
+and `rate_limit_status`.
 Read `unconfirmed`
 first: those files **are** on Internet Archive but were never marked in the
 Sheet, so the next run would upload them again under a second identifier.

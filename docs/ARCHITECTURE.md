@@ -484,7 +484,7 @@ skipped}`. The counts mean:
 #### `upload`
 
 `{… attempted, succeeded, failures, unconfirmed, not_attempted,
-rate_limited, rate_limit_status, skipped}`. The counts mean:
+rate_limited, stopped_by_request, rate_limit_status, skipped}`. The counts mean:
 
 | field | meaning |
 | --- | --- |
@@ -494,6 +494,7 @@ rate_limited, rate_limit_status, skipped}`. The counts mean:
 | `unconfirmed` | `{identifier, error}` per row that IS on Internet Archive but was never marked in the Sheet. |
 | `not_attempted` | rows the run stopped short of. See the overlap note below. |
 | `rate_limited` | `true` when IA said *slow down* and the run stopped early rather than finishing. Derived: `rate_limit_status` is not `null`. |
+| `stopped_by_request` | `true` when an interrupt (Ctrl-C, or the upload page's Stop) ended the run between items. The rows it never reached count under `not_attempted`. |
 | `rate_limit_status` | the parsed status (`429` or `503`) the run stopped on, else `null`. It does not say which of IA's limits fired. |
 | `skipped` | `{identifier, error}` per row nothing was sent for — held back by validation, or moved in the Sheet mid-run. |
 

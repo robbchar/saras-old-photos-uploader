@@ -110,6 +110,7 @@ run writes down about itself.
 - [Every recorded timestamp is UTC](decisions/QUOTA-AND-RUNS.md#every-recorded-timestamp-is-utc)
 - [The agent's output is one dated file, never rotated](decisions/QUOTA-AND-RUNS.md#the-agents-output-is-one-dated-file-never-rotated)
 - ["Unchanged" is a third outcome, not a failure](decisions/QUOTA-AND-RUNS.md#unchanged-is-a-third-outcome-not-a-failure)
+- [An interrupt stops a run after the current item](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)
 
 ## Still open
 

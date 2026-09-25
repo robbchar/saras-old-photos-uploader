@@ -278,6 +278,12 @@ fired on one real response so far, and it may miss a limit IA signals some
 other way — see `docs/DECISIONS.md`, "Still open".
 `--limit` (below) is the operator-controlled fallback either way.
 
+**Ctrl-C stops after the current item.** The first interrupt lets the item
+in flight finish and be recorded, then ends the run the way a rate-limit
+stop does: the summary is written with `stopped_by_request: true` and the
+command exits 1. Run the same command again to carry on. A second Ctrl-C
+stops at once.
+
 **`--limit` and `--chunk-size`.**
 
 ```bash
