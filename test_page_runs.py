@@ -47,6 +47,21 @@ def test_read_progress_no_jsonl_is_zero_and_none(tmp_path):
     assert page_runs.read_progress(page_runs.find_jsonl(tmp_path)) == (0, None)
 
 
+def test_read_progress_tolerates_a_truncated_final_line(tmp_path):
+    # A separate, still-running upload process can be killed (or caught by
+    # Windows AV/file-locking) mid-flush of its last line - the valid records
+    # written before it must still count.
+    good_lines = "".join(json.dumps(r) + "\n" for r in [
+        {"record": "run_header", "planned": 3},
+        {"identifier": "a", "status": "success"},
+    ])
+    truncated_tail = '{"identifier": "b", "status": "s'  # no closing brace, no newline
+    jsonl = tmp_path / "upload-20260925T000000Z.jsonl"
+    jsonl.write_text(good_lines + truncated_tail, encoding="utf-8")
+
+    assert page_runs.read_progress(jsonl) == (1, 3)
+
+
 # --- find_jsonl --------------------------------------------------------------
 
 
@@ -135,6 +150,22 @@ def test_read_ending_without_summary(tmp_path):
     assert ending.kind == "ended_without_summary"
 
 
+def test_read_ending_skips_a_garbage_middle_line(tmp_path):
+    summary = {**RUN_SUMMARY_BASE, "not_attempted": 0}
+    lines = [
+        json.dumps({"record": "run_header", "planned": 1}),
+        "not json at all {{{",
+        json.dumps(summary),
+    ]
+    jsonl = tmp_path / "upload-20260925T000000Z.jsonl"
+    jsonl.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    ending = page_runs.read_ending(tmp_path)
+
+    assert ending.kind == "completed"
+    assert ending.summary == summary
+
+
 # --- Ending.to_json ------------------------------------------------------------
 
 
@@ -142,6 +173,32 @@ def test_ending_to_json_round_trips_kind_and_fields(tmp_path):
     (tmp_path / "output.txt").write_text("boom\n", encoding="utf-8")
     ending = page_runs.read_ending(tmp_path)
     assert ending.to_json() == {"kind": "refused", "reason_lines": ["boom"]}
+
+
+def test_ending_to_json_stopped(tmp_path):
+    summary = {**RUN_SUMMARY_BASE, "stopped_by_request": True}
+    _write_jsonl(tmp_path, [{"record": "run_header", "planned": 5}, summary])
+    ending = page_runs.read_ending(tmp_path)
+    assert ending.to_json() == {"kind": "stopped", "summary": summary, "planned": 5}
+
+
+def test_ending_to_json_rate_limited(tmp_path):
+    summary = {**RUN_SUMMARY_BASE, "rate_limited": True, "rate_limit_status": 429}
+    _write_jsonl(tmp_path, [summary])
+    ending = page_runs.read_ending(tmp_path)
+    assert ending.to_json() == {"kind": "rate_limited", "summary": summary}
+
+
+def test_ending_to_json_completed(tmp_path):
+    _write_jsonl(tmp_path, [RUN_SUMMARY_BASE])
+    ending = page_runs.read_ending(tmp_path)
+    assert ending.to_json() == {"kind": "completed", "summary": RUN_SUMMARY_BASE}
+
+
+def test_ending_to_json_ended_without_summary(tmp_path):
+    _write_jsonl(tmp_path, [{"record": "run_header", "planned": 5}])
+    ending = page_runs.read_ending(tmp_path)
+    assert ending.to_json() == {"kind": "ended_without_summary"}
 
 
 # --- PageRun / page-run.json ---------------------------------------------------

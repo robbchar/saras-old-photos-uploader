@@ -98,13 +98,23 @@ def find_jsonl(run_dir: Path) -> Path | None:
 
 
 def _read_jsonl_records(jsonl: Path) -> list[dict[str, object]]:
+    """Parse each line as one JSON record, skipping any line that won't parse.
+
+    The writer (a separate, still-running upload process) can leave the final
+    line truncated - killed mid-flush, or caught mid-write by Windows AV/file
+    locking - so a live progress read must tolerate a partial or garbage line
+    rather than raising. A read failure of the file itself (OSError) is not
+    caught here; that's a real problem for the caller to handle."""
     text = jsonl.read_text(encoding="utf-8")
     records: list[dict[str, object]] = []
     for line in text.split("\n"):
         line = line.strip()
         if not line:
             continue
-        records.append(json.loads(line))
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return records
 
 
