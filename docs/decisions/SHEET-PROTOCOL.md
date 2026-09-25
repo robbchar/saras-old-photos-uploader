@@ -403,7 +403,10 @@ column names the JSONL to go and read for it. The columns are:
 
 The rows are rendered from `summary.as_record(live)` — the very object
 written to the JSONL a line earlier — so the tab and the file cannot
-disagree about what happened.
+disagree about what happened. For an upload that stopped early, the
+summary row's `detail` also names why — see
+[`QUOTA-AND-RUNS.md`](QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item),
+"An interrupt stops a run after the current item".
 
 **A quiet sync run is not mirrored.** An hourly sync's steady state is
 "every row already matches its last push": it sends nothing and finds

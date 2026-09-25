@@ -1,7 +1,9 @@
 import signal
+from types import SimpleNamespace
 
 import pytest
 
+import stop_request
 from stop_request import stop_request_on_interrupt
 
 
@@ -16,7 +18,7 @@ def test_the_first_interrupt_asks_for_a_stop_and_says_so(capfd):
 
         assert request.requested is True
     assert capfd.readouterr().err == (
-        "interrupt received: stopping after the current item. Interrupt again to stop now.\n"
+        "\ninterrupt received: stopping after the current item. Interrupt again to stop now.\n"
     )
 
 
@@ -58,3 +60,28 @@ def test_on_windows_a_break_asks_for_a_stop_too(capfd):
 
         assert request.requested is True
     capfd.readouterr()
+
+
+def test_a_stderr_that_cannot_be_written_still_records_the_request(monkeypatch):
+    def broken_write(fd, data):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(stop_request, "os", SimpleNamespace(write=broken_write))
+
+    with stop_request_on_interrupt() as request:
+        signal.raise_signal(signal.SIGINT)
+
+        assert request.requested is True
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGBREAK"), reason="SIGBREAK is Windows-only; the Mac needs only SIGINT"
+)
+def test_on_windows_the_previous_break_handler_comes_back_afterwards():
+    sigbreak = getattr(signal, "SIGBREAK")
+    before = signal.getsignal(sigbreak)
+
+    with stop_request_on_interrupt():
+        assert signal.getsignal(sigbreak) is not before
+
+    assert signal.getsignal(sigbreak) is before

@@ -6476,7 +6476,7 @@ def test_an_interrupted_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys
 
 
 def test_an_interrupt_between_chunks_never_reserves_the_next_chunk(tmp_path, monkeypatch, capsys):
-    """Checked before the reserve write, so a stopped run reserves nothing it won't send."""
+    """Checked before the reserve write, so a pending request never reserves another chunk."""
     from ia_bulk import cmd_upload
 
     recorder, _, registry_path, _ = setup_sheet_upload(
@@ -6487,7 +6487,7 @@ def test_an_interrupt_between_chunks_never_reserves_the_next_chunk(tmp_path, mon
     exit_code = cmd_upload(
         make_upload_args(tmp_path, registry_path, write_identifier=True, chunk_size=1)
     )
-    capsys.readouterr()
+    captured = capsys.readouterr()
 
     assert exit_code == 1
     assert recorder.writes == [
@@ -6504,6 +6504,10 @@ def test_an_interrupt_between_chunks_never_reserves_the_next_chunk(tmp_path, mon
             ("F3", "photo2.jpg"),
         ],
     ]
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["stopped_by_request"] is True
+    assert summary["not_attempted"] == 1
+    assert "stopped: as requested, after 2 items" in captured.err.splitlines()
 
 
 def test_a_second_interrupt_stops_the_upload_at_once(tmp_path, monkeypatch, capsys):
@@ -6526,6 +6530,28 @@ def test_a_second_interrupt_stops_the_upload_at_once(tmp_path, monkeypatch, caps
         f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",
     ]
     assert signal.getsignal(signal.SIGINT) is before
+    assert not any(entry.get("record") == "run_summary" for entry in _upload_log_entries(tmp_path))
+
+
+def test_an_interrupt_before_the_send_loop_stops_at_once(tmp_path, monkeypatch, capsys):
+    """The handler covers only the send loop; an interrupt while the Sheet is read stops at
+    once, before anything is reserved."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        THREE_PHOTO_GRID,
+        files=THREE_PHOTO_FILES,
+        before_read=lambda *_: signal.raise_signal(signal.SIGINT),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    capsys.readouterr()
+
+    assert recorder.uploads == []
+    assert recorder.writes == []
 
 
 def test_an_interrupt_during_the_last_item_lets_the_run_finish(tmp_path, monkeypatch, capsys):

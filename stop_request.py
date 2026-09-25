@@ -1,6 +1,6 @@
 """The first interrupt asks a run to stop after its current item; the second stops it at once.
 
-Ctrl-C sends SIGINT. The upload page's server (#29) stops a Windows child
+Ctrl-C sends SIGINT. The upload page's server stops a Windows child
 with CTRL_BREAK, which Python receives as SIGBREAK."""
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from types import FrameType
 
-STOP_NOTICE = b"interrupt received: stopping after the current item. Interrupt again to stop now.\n"
+# Leading newline: IA's progress bar leaves the cursor mid-line.
+STOP_NOTICE = b"\ninterrupt received: stopping after the current item. Interrupt again to stop now.\n"
 
 
 class StopRequest:
@@ -24,7 +25,10 @@ class StopRequest:
             raise KeyboardInterrupt
         self.requested = True
         # os.write, not print: a signal can land mid-print, and buffered streams aren't reentrant.
-        os.write(2, STOP_NOTICE)
+        try:
+            os.write(2, STOP_NOTICE)
+        except OSError:
+            pass  # A closed or full stderr must not turn a stop request into a failed item.
 
 
 def _interrupt_signals() -> list[int]:

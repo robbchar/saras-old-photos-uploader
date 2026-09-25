@@ -750,7 +750,7 @@ stopped: as requested, after 3 items
 Run the same command again to carry on. The rows it never reached are
 picked up, and any it had reserved are retried under the identifiers they
 already have. Press Ctrl-C a second time only if you must stop at once:
-the run then ends without its summary, which is still safe to re-run. Why:
+the run then ends without its summary; re-running is still safe. Why:
 [`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item).
 
 ## Reading a run

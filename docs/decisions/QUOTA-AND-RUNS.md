@@ -654,6 +654,7 @@ second one stops it at once, as Ctrl-C always did.
   flag, and adding one would make `ensure_tab` refuse every tab already
   created. So the summary row's detail names why the run stopped early:
   `… - stopped as requested`, or `… - stopped: Internet Archive asked us to
-  slow down (HTTP 503)`. A rate-limit stop left no trace in the tab before.
+  slow down (HTTP 503)`. Before, a rate-limit stop showed in the tab only
+  as its 503 `failure` row, not as the reason the run ended.
 - **Upload only.** `sync-metadata` stamps chunk by chunk, so an interrupted
   sync already resumes cleanly.

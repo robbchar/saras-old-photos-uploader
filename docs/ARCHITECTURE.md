@@ -218,7 +218,11 @@ A `write` that fails mid-protocol (`SheetUploadRun._write()`) prints a clean
 message and stops the run rather than raising, and a rate-limited row
 (`is_rate_limit_error()`) stops the run after finishing the current chunk's
 confirm write, so nothing already uploaded is left reserved-but-unconfirmed —
-see "Chunking" below.
+see "Chunking" below. A stop request (the first Ctrl-C; see
+`decisions/QUOTA-AND-RUNS.md`, "An interrupt stops a run after the current
+item") ends the run the same way: it is checked before each item and before
+each chunk's reserve write, so the item in flight finishes and is confirmed
+and no further chunk is reserved.
 
 A row is chosen for this run based on its own two tool-owned columns
 (`classify_row()` → `RowState.UNASSIGNED`/`RESERVED`/`DONE`): blank
@@ -255,7 +259,11 @@ any earlier chunk), rather than treating it as one more per-row failure and
 continuing. The stop names the parsed status but not a cause, because a 503
 does not say which of IA's limits fired. The detector has fired on one real
 response so far (a queue throttle, 2026-09-24) — see `DECISIONS.md`, "Still
-open".
+open". A stop request (the first Ctrl-C; see `decisions/QUOTA-AND-RUNS.md`,
+"An interrupt stops a run after the current item") ends the run the same
+way: it is checked before each item and before each chunk's reserve write,
+so the item in flight finishes and is confirmed and no further chunk is
+reserved.
 
 ## Progress output
 `upload`/`sync-metadata` print a `[position/total] ...` line to stdout
@@ -494,7 +502,7 @@ rate_limited, stopped_by_request, rate_limit_status, skipped}`. The counts mean:
 | `unconfirmed` | `{identifier, error}` per row that IS on Internet Archive but was never marked in the Sheet. |
 | `not_attempted` | rows the run stopped short of. See the overlap note below. |
 | `rate_limited` | `true` when IA said *slow down* and the run stopped early rather than finishing. Derived: `rate_limit_status` is not `null`. |
-| `stopped_by_request` | `true` when an interrupt (Ctrl-C, or the upload page's Stop) ended the run between items. The rows it never reached count under `not_attempted`. |
+| `stopped_by_request` | `true` when an interrupt (Ctrl-C, or the upload page's Stop once it exists) ended the run between items. The rows it never reached count under `not_attempted`. Never `true` together with `rate_limited`. |
 | `rate_limit_status` | the parsed status (`429` or `503`) the run stopped on, else `null`. It does not say which of IA's limits fired. |
 | `skipped` | `{identifier, error}` per row nothing was sent for — held back by validation, or moved in the Sheet mid-run. |
 

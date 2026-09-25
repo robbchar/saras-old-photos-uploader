@@ -3098,12 +3098,14 @@ class RequestedStop:
 
 RunStop = RateLimitStop | RequestedStop
 
+RATE_LIMIT_STOP_REASON = "Internet Archive asked us to slow down"
+
 
 def print_run_stop(stop: RunStop, attempted: int, uploaded: int) -> None:
     """The two lines a run prints when it stops early; the reason goes to stderr."""
     if isinstance(stop, RateLimitStop):
         print(
-            f"stopped: Internet Archive asked us to slow down (HTTP {stop.status}) "
+            f"stopped: {RATE_LIMIT_STOP_REASON} (HTTP {stop.status}) "
             f"after {_pluralize(attempted, 'item')}",
             file=sys.stderr,
         )
@@ -3214,7 +3216,7 @@ class SheetUploadRun:
             return summary()
 
         for chunk in chunk_rows(targets, self.chunk_size):
-            # Before the reserve write, so a stopped run never reserves rows it won't send.
+            # Before the reserve write, so a pending request never reserves another chunk.
             if self.stop_request.requested:
                 return stop_early(RequestedStop())
             # Every chunk gets a fresh timestamp. One timestamp for the whole
@@ -4221,10 +4223,7 @@ def upload_log_tab_headline(summary: UploadSummary) -> str:
     if summary.stopped_by_request:
         return f"{headline} - stopped as requested"
     if summary.rate_limited:
-        return (
-            f"{headline} - stopped: Internet Archive asked us to slow down "
-            f"(HTTP {summary.rate_limit_status})"
-        )
+        return f"{headline} - stopped: {RATE_LIMIT_STOP_REASON} (HTTP {summary.rate_limit_status})"
     return headline
 
 
