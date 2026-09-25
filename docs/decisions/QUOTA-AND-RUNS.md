@@ -647,9 +647,11 @@ second one stops it at once, as Ctrl-C always did.
 - **The handler only sets a flag.** It writes its one-line notice with
   `os.write`, not `print`: a signal can land in the middle of a print, and
   Python's buffered streams are not reentrant.
-- **It covers the send loop and the summary writes, nothing earlier.** An
-  interrupt during the Sheet read or validation still stops at once, before
-  anything is reserved. The previous handlers come back when the run ends.
+- **It covers the send loop only.** An interrupt during the Sheet read or
+  validation stops at once, before anything is reserved; one during the
+  summary and log writes that follow the run stops at once too, rather than
+  printing "stopping after the current item" when nothing is in flight. The
+  previous handlers come back when the send loop ends.
 - **The Upload Log tab says it in words.** The tab has no column for either
   flag, and adding one would make `ensure_tab` refuse every tab already
   created. So the summary row's detail names why the run stopped early:

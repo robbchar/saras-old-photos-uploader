@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import signal
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from types import FrameType
@@ -38,7 +39,15 @@ def _interrupt_signals() -> list[int]:
 
 @contextmanager
 def stop_request_on_interrupt() -> Iterator[StopRequest]:
-    """Installs the handler for the block, then restores whatever was there before."""
+    """Installs the handler for the block, then restores whatever was there before.
+
+    Must run on the main thread: signal.signal() installs handlers only there.
+    The upload page (#29) drives the run in its own process for this reason."""
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError(
+            "stop_request_on_interrupt() must run on the main thread; run the "
+            "upload in its own process, not a worker thread."
+        )
     request = StopRequest()
     previous = {signum: signal.signal(signum, request.handle) for signum in _interrupt_signals()}
     try:

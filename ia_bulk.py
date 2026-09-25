@@ -3240,6 +3240,10 @@ class SheetUploadRun:
                             ),
                         )
                     )
+                # Also after the verify: a request that arrived during those
+                # reads must not reserve this chunk either.
+                if self.stop_request.requested:
+                    return stop_early(RequestedStop())
                 if outcome.stop_reason is not None or not self._write(
                     reserve_updates(outcome.ok, self.columns), "reserve"
                 ):
@@ -3908,6 +3912,8 @@ def upload_from_sheet(args) -> int:
             file=sys.stderr,
         )
     # QUOTA-AND-RUNS.md, "An interrupt stops a run after the current item".
+    # Wraps the send loop only: once execute() has returned, a Ctrl-C should
+    # behave normally, not print "stopping after the current item".
     with stop_request_on_interrupt() as stop_request:
         summary = SheetUploadRun(
             client=client,
@@ -3924,13 +3930,13 @@ def upload_from_sheet(args) -> int:
             stop_request=stop_request,
         ).execute(targets).with_skipped(skipped_rows(blocked))
 
-        lines = upload_summary_lines(summary)
-        for line in lines:
-            print(line)
-        record = try_log_run_summary(log_path, summary, live)
-        mirror_run_to_log_tab(
-            client, config.upload_log_tab, log_path, record, upload_log_tab_headline(summary)
-        )
+    lines = upload_summary_lines(summary)
+    for line in lines:
+        print(line)
+    record = try_log_run_summary(log_path, summary, live)
+    mirror_run_to_log_tab(
+        client, config.upload_log_tab, log_path, record, upload_log_tab_headline(summary, lines[0])
+    )
     print(f"log written to {log_path}")
     return (
         1
@@ -4215,11 +4221,11 @@ def upload_summary_lines(summary: UploadSummary) -> list[str]:
     return lines
 
 
-def upload_log_tab_headline(summary: UploadSummary) -> str:
+def upload_log_tab_headline(summary: UploadSummary, headline: str) -> str:
     """The log tab's summary cell: the closing headline, plus why the run stopped early.
 
+    `headline` is the summary's first console line, which the caller already has.
     The tab has no column for either flag; adding one would make ensure_tab refuse every existing tab."""
-    headline = upload_summary_lines(summary)[0]
     if summary.stopped_by_request:
         return f"{headline} - stopped as requested"
     if summary.rate_limited:

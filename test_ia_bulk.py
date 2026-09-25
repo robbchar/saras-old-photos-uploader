@@ -6554,6 +6554,38 @@ def test_an_interrupt_before_the_send_loop_stops_at_once(tmp_path, monkeypatch, 
     assert recorder.writes == []
 
 
+def test_an_interrupt_during_the_reserve_read_does_not_reserve_the_chunk(
+    tmp_path, monkeypatch, capsys
+):
+    """A request that lands during the chunk's pre-reserve verify reads is caught
+    before the reserve write, so the chunk is never reserved with nothing uploaded."""
+    from ia_bulk import cmd_upload
+
+    def interrupt_during_the_chunk_verify(live_grid, read_count):
+        # Read 1 builds the targets; read 2 is chunk 1's pre-reserve verify.
+        if read_count == 2:
+            signal.raise_signal(signal.SIGINT)
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        THREE_PHOTO_GRID,
+        files=THREE_PHOTO_FILES,
+        before_read=interrupt_during_the_chunk_verify,
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == []
+    assert recorder.writes == []
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["stopped_by_request"] is True
+    assert summary["not_attempted"] == 3
+    assert "stopped: as requested, after 0 items" in captured.err.splitlines()
+
+
 def test_an_interrupt_during_the_last_item_lets_the_run_finish(tmp_path, monkeypatch, capsys):
     """Nothing is left to stop, so the run is a normal, complete one."""
     from ia_bulk import cmd_upload
@@ -6584,6 +6616,29 @@ def test_the_upload_restores_the_interrupt_handler_it_replaced(tmp_path, monkeyp
     capsys.readouterr()
 
     assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_a_single_interrupt_after_the_run_is_not_swallowed(tmp_path, monkeypatch, capsys):
+    """The handler covers the send loop only. Once execute() has returned, a
+    Ctrl-C during the summary and log writes stops at once rather than being
+    swallowed with the "stopping after the current item" notice."""
+    import ia_bulk
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+    real_log_run_summary = ia_bulk.try_log_run_summary
+
+    def interrupt_then_log(*args, **kwargs):
+        signal.raise_signal(signal.SIGINT)
+        return real_log_run_summary(*args, **kwargs)
+
+    monkeypatch.setattr("ia_bulk.try_log_run_summary", interrupt_then_log)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
 
 
 def test_the_upload_log_tab_says_the_run_stopped_as_requested(tmp_path, monkeypatch, capsys):

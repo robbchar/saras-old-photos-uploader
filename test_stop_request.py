@@ -1,4 +1,5 @@
 import signal
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -60,6 +61,27 @@ def test_on_windows_a_break_asks_for_a_stop_too(capfd):
 
         assert request.requested is True
     capfd.readouterr()
+
+
+def test_it_refuses_to_run_off_the_main_thread():
+    """signal.signal() only works on the main thread; the guard says so clearly
+    instead of letting a cryptic ValueError escape from a worker thread."""
+    errors = []
+
+    def enter_off_thread():
+        try:
+            with stop_request_on_interrupt():
+                pass
+        except Exception as exc:  # noqa: BLE001 - the test inspects the type it caught
+            errors.append(exc)
+
+    worker = threading.Thread(target=enter_off_thread)
+    worker.start()
+    worker.join()
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert "main thread" in str(errors[0])
 
 
 def test_a_stderr_that_cannot_be_written_still_records_the_request(monkeypatch):
