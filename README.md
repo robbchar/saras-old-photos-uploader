@@ -312,6 +312,13 @@ overrides it, and is only correct if you know IA has raised this account's
 cap. The refusal applies in test mode too: a rehearsal uploads through the
 same account and spends the same quota.
 
+**One upload at a time.** A run refuses to start while another upload is
+running from the same checkout, and names it (project, batch, mode, start
+time), because two runs at once can upload the same rows twice. The lock is
+the operating system's, so it goes away with the process that held it, even
+one that crashed. `--dry-run` doesn't take it. See
+[`docs/decisions/QUOTA-AND-RUNS.md`](docs/decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload).
+
 Other behavior:
 
 - Processes rows in chunks of 500 by default (Internet
@@ -594,6 +601,20 @@ minutes and is skipped without `--run-e2e`. Needs the service-account key at
 `.ignored/google-service-account.json` in the checkout being run (a fresh
 worktree has none) and `ia configure` done on the machine. It rewrites the
 Test Sheet every run; test data is ephemeral.
+
+**One rehearsal at a time.** Step 0 takes a lock: a tab named `E2E Lock` on
+the Test Sheet, naming the run's host, pid, checkout and log directory.
+Teardown deletes it. A rehearsal started while another holds it fails at
+step 0 with "another e2e rehearsal holds the Test Sheet", naming that run and
+when its lock expires. Wait for it to finish, then re-run. A running
+rehearsal checks in at every step. A lock that stops checking in expires 30
+minutes after the last check-in, when the next run takes it over. That
+happens when a run is killed or an API error hits its teardown. To clear one
+sooner, delete the `E2E Lock` tab by hand, once you know its run is gone. A
+run whose lock was taken over finds out at its next check-in and fails with
+"this run lost the Test Sheet lock", naming the new holder; from then on it
+writes nothing to the Sheet. Hand test-mode commands take no lock; see
+[`docs/decisions/SHEET-PROTOCOL.md`, "One rehearsal at a time"](docs/decisions/SHEET-PROTOCOL.md#one-rehearsal-at-a-time).
 
 **The Test Sheet holds the `e2e` project's grid.** Test-mode hand commands
 use `--registry e2e_fixtures/registry.json --project e2e`; `--project

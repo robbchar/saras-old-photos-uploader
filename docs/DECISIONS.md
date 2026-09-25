@@ -58,6 +58,7 @@ against a Sheet edited mid-run, and how corrections get back out.
 - [The Sheet's log tabs are telemetry, never an input](decisions/SHEET-PROTOCOL.md#the-sheets-log-tabs-are-telemetry-never-an-input)
 - [The rehearsal reset is a hand edit, not a command](decisions/SHEET-PROTOCOL.md#the-rehearsal-reset-is-a-hand-edit-not-a-command)
 - [Test data is ephemeral](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral)
+- [One rehearsal at a time](decisions/SHEET-PROTOCOL.md#one-rehearsal-at-a-time)
 
 ## [Readiness and errors](decisions/READINESS.md)
 
@@ -111,6 +112,7 @@ run writes down about itself.
 - [The agent's output is one dated file, never rotated](decisions/QUOTA-AND-RUNS.md#the-agents-output-is-one-dated-file-never-rotated)
 - ["Unchanged" is a third outcome, not a failure](decisions/QUOTA-AND-RUNS.md#unchanged-is-a-third-outcome-not-a-failure)
 - [An interrupt stops a run after the current item](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)
+- [One upload runs at a time, enforced by `upload`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload)
 
 ## Still open
 

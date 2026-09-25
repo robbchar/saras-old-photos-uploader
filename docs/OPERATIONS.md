@@ -411,6 +411,14 @@ real files in the wrong place under a permanent identifier.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.
+- [ ] **The one-upload-at-a-time lock actually refuses a second run on this
+      Mac.** Start a test-mode `upload` (no `--live`, no `--dry-run`, so it
+      takes the lock but uploads only to the sandbox) in one terminal and,
+      while it runs, start another `upload` in a second terminal — both from
+      the operating checkout. The second must exit refusing and name the first.
+      Confirm this by hand because the Mac's `flock` path never runs under
+      pytest — see
+      [`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload).
 
 Identifiers are permanent. An item uploaded under the wrong identifier cannot
 be renamed, only darkened by IA staff on request.
@@ -640,6 +648,23 @@ present in that column listed, so it never runs as a silent empty upload; the
 batch is recorded in the `run_header` log line, which is the only field that
 explains why a run uploaded 40 of 3,000 ready rows.
 
+### "another upload is already running"
+
+`upload` refuses to start while another upload is running from this
+checkout, and names it:
+
+```
+another upload is already running (project sarasoldphotos, batch 'Logging', live, started 2026-09-24T14:02:11Z, pid 4312).
+Two uploads at once can upload the same rows twice. Let that run finish, or stop it where it was started, then run this again.
+```
+
+Two runs at once can upload the same rows twice, so this is a hard stop.
+Let the other run finish, or stop it in the terminal where it was started,
+then run yours again. There is nothing to clear: the lock goes away with the
+process that held it, even one that crashed. `--dry-run` and `validate`
+never take the lock, so you can preview while a run is going. Why:
+[`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload).
+
 ## Resuming a failed run
 
 **A failing row prints why, as it happens**, indented under its own progress
@@ -808,6 +833,13 @@ belongs to the `e2e` project; a hand rehearsal after it uses
 `--live` now reads those same `e2e` rows, so it is for `--live` against the
 real Sheet only. Test data is ephemeral — see
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#test-data-is-ephemeral).
+
+Only one rehearsal runs at a time. Step 0 takes the Test Sheet's `E2E Lock`
+tab, and a second run fails at step 0 naming the first; wait for it, then
+re-run. How a stale lock clears is in README's
+["E2E rehearsal (opt-in)"](../README.md#e2e-rehearsal-opt-in). A hand
+rehearsal (the steps below) takes no lock, so check that the Test Sheet has
+no `E2E Lock` tab before starting one.
 
 After a passing run, rows 2, 3 and 5 are uploaded and synced, row 2's
 `Title` is edited, and row 6 is still not ready (no theme); reset rows per

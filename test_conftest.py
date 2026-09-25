@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+import upload_lock
+
 PROJECT_ROOT = Path(__file__).parent
 CONFTEST_SOURCE = (PROJECT_ROOT / "conftest.py").read_text(encoding="utf-8")
 
@@ -352,6 +354,13 @@ def test_no_test_reads_an_ia_config_file_on_the_developers_machine(
     suite_under_real_conftest.makepyfile(IA_CREDENTIALS_ARE_ABSENT)
     result = suite_under_real_conftest.runpytest_subprocess()
     result.assert_outcomes(passed=1)
+
+
+def test_no_test_takes_the_checkouts_real_upload_lock(tmp_path):
+    real_lock = Path(upload_lock.__file__).resolve().parent / ".ignored" / "upload.lock"
+
+    assert upload_lock.UPLOAD_LOCK_PATH != real_lock
+    assert upload_lock.UPLOAD_LOCK_PATH.is_relative_to(tmp_path)
 
 
 def test_no_test_reads_ia_credentials_from_the_environment(suite_under_real_conftest, monkeypatch):

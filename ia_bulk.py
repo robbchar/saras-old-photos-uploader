@@ -29,6 +29,7 @@ import google_auth
 import launch_agent
 import log_tab
 import platform_probe
+import upload_lock
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -3669,7 +3670,35 @@ def print_dry_run(
 
 
 def cmd_upload(args) -> int:
-    return upload_from_sheet(args)
+    # A dry run writes nothing, so it may preview while a real run is going.
+    if getattr(args, "dry_run", False):
+        return upload_from_sheet(args)
+    holder = upload_lock.LockHolder(
+        pid=os.getpid(),
+        started_at=utc_timestamp(),
+        project=args.project,
+        batch=getattr(args, "batch", None),
+        live=bool(args.live),
+    )
+    # QUOTA-AND-RUNS.md, "One upload runs at a time, enforced by `upload`".
+    try:
+        lock = upload_lock.acquire(upload_lock.UPLOAD_LOCK_PATH, holder)
+    except upload_lock.UploadLockHeld as refusal:
+        print(f"{refusal}.", file=sys.stderr)
+        print(
+            "Two uploads at once can upload the same rows twice. Let that run finish, or stop it "
+            "where it was started, then run this again.",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError as error:
+        # Creating or locking the lock file failed (permissions, a read-only
+        # checkout, an unexpected lock errno). Refuse cleanly instead of a
+        # traceback: without the lock we cannot guarantee one upload at a time.
+        print(f"could not take the upload lock: {error}.", file=sys.stderr)
+        return 1
+    with lock:
+        return upload_from_sheet(args)
 
 
 def upload_from_sheet(args) -> int:

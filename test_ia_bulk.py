@@ -4,6 +4,7 @@ import dataclasses
 import importlib.metadata
 import io
 import json
+import os
 import re
 import shlex
 import signal
@@ -22,6 +23,7 @@ from googleapiclient.errors import HttpError
 import deployment
 import google_auth
 import ia_bulk
+import upload_lock
 from column_map import build_column_map, grid_to_rows
 from ia_bulk import (
     load_registry,
@@ -4722,6 +4724,138 @@ def test_cmd_upload_through_main_runs_against_the_sheet(
 
     assert exit_code == 0
     assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
+
+
+UPLOAD_LOCK_GRID = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+
+ANOTHER_UPLOAD = upload_lock.LockHolder(
+    pid=4312,
+    started_at="2026-09-24T14:02:11Z",
+    project="astoriaphotos",
+    batch="Waterfront",
+    live=True,
+)
+
+
+def test_cmd_upload_refuses_while_another_upload_holds_the_lock(tmp_path, monkeypatch, capsys):
+    """Two runs at once can upload the same reserved rows twice under the same
+    permanent identifiers. Refused before any Sheet I/O and before a log opens."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, UPLOAD_LOCK_GRID)
+    monkeypatch.setattr(upload_lock, "ACQUIRE_ATTEMPTS", 1)
+
+    with upload_lock.acquire(upload_lock.UPLOAD_LOCK_PATH, ANOTHER_UPLOAD):
+        exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert recorder.kinds == []
+    assert not (tmp_path / "logs").exists()
+    assert err.splitlines() == [
+        "another upload is already running (project astoriaphotos, batch 'Waterfront', live, "
+        "started 2026-09-24T14:02:11Z, pid 4312).",
+        "Two uploads at once can upload the same rows twice. Let that run finish, or stop it "
+        "where it was started, then run this again.",
+    ]
+
+
+def test_cmd_upload_holds_the_lock_for_the_whole_run_and_names_itself(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, UPLOAD_LOCK_GRID)
+    upload_stub = make_upload_stub(recorder)
+    seen_mid_upload = []
+
+    def upload_and_look(row, target_identifier, collection, files_dir):
+        seen_mid_upload.append(upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH))
+        upload_stub(row, target_identifier, collection, files_dir)
+
+    monkeypatch.setattr("ia_bulk.upload_row", upload_and_look)
+    monkeypatch.setattr("ia_bulk.utc_timestamp", lambda: "2026-09-24T14:02:11Z")
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, batch=None))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert seen_mid_upload == [
+        upload_lock.RunningUpload(
+            upload_lock.LockHolder(
+                pid=os.getpid(),
+                started_at="2026-09-24T14:02:11Z",
+                project="astoriaphotos",
+                batch=None,
+                live=False,
+            )
+        )
+    ]
+    assert upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH) is None
+
+
+def test_cmd_upload_releases_the_lock_when_the_run_raises(tmp_path, monkeypatch):
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, UPLOAD_LOCK_GRID)
+
+    def interrupted(row, target_identifier, collection, files_dir):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ia_bulk.upload_row", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_upload(make_upload_args(tmp_path, registry_path))
+
+    assert upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH) is None
+
+
+def test_cmd_upload_dry_run_does_not_take_the_lock(tmp_path, monkeypatch, capsys):
+    """A dry run writes nothing, so it can preview while a real run is going."""
+    from ia_bulk import cmd_upload
+
+    _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, UPLOAD_LOCK_GRID)
+    monkeypatch.setattr(upload_lock, "ACQUIRE_ATTEMPTS", 1)
+
+    with upload_lock.acquire(upload_lock.UPLOAD_LOCK_PATH, ANOTHER_UPLOAD):
+        exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, dry_run=True))
+    capsys.readouterr()
+
+    assert exit_code == 0
+
+
+def test_cmd_validate_does_not_take_the_upload_lock(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [["Title", "file"], ["First photo", "photo1.jpg"]]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    monkeypatch.setattr(upload_lock, "ACQUIRE_ATTEMPTS", 1)
+
+    with upload_lock.acquire(upload_lock.UPLOAD_LOCK_PATH, ANOTHER_UPLOAD):
+        exit_code = cmd_validate(
+            Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
+        )
+    capsys.readouterr()
+
+    assert exit_code == 0
+
+
+def test_cmd_sync_metadata_does_not_take_the_upload_lock(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent)
+    monkeypatch.setattr(upload_lock, "ACQUIRE_ATTEMPTS", 1)
+
+    with upload_lock.acquire(upload_lock.UPLOAD_LOCK_PATH, ANOTHER_UPLOAD):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert len(sent) == 1
 
 
 def test_cmd_upload_never_sends_tool_owned_or_held_back_columns_as_ia_metadata(
