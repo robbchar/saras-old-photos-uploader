@@ -544,6 +544,35 @@ def test_post_runs_409_when_a_page_run_is_active(tmp_path, monkeypatch):
     assert called == []
 
 
+def test_post_runs_allowed_when_previous_run_finished(tmp_path, monkeypatch):
+    # Finished means the lock is free (the previous run ended, however it
+    # ended) -- unlike an active run, it must NOT block starting a new one;
+    # the page's own flow is "choose another theme" -> Start right after.
+    finished = page_runs.Finished(
+        ending=page_runs.Completed(summary={"uploaded": 5}), page_run=None
+    )
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: finished)
+    spawned = {}
+
+    def fake_spawn(argv, out_path, cwd):
+        spawned["argv"] = argv
+        return 7777
+
+    deps = _fake_deps(spawn_upload=fake_spawn, now_utc=lambda: "20260925T140000Z")
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _post_json(base + "/api/runs", {"batch": "Logging"})
+    assert status == 202
+    assert json.loads(body) == {"started_at": "20260925T140000Z"}
+    assert "argv" in spawned
+
+    run_dir = page_runs.newest_run_dir(tmp_path / "logs")
+    assert run_dir is not None
+    saved = page_runs.read_page_run(run_dir)
+    assert saved is not None
+    assert saved.pid == 7777
+
+
 def test_post_runs_missing_batch_is_400(tmp_path):
     cfg = _make_config(tmp_path)
     with upload_server.serve_in_thread(cfg, _fake_deps()) as base:

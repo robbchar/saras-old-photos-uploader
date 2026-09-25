@@ -275,21 +275,17 @@ def _check_startup(config: ServerConfig) -> project_config.ProjectConfig:
     return resolved
 
 
-def _describe_run_state(state: page_runs.RunState) -> str:
-    """The 409 reason POST /api/runs gives when compute_run_state isn't Idle.
+def _describe_run_state(state: page_runs.PageRunActive | page_runs.TerminalRunActive) -> str:
+    """The 409 reason POST /api/runs gives when a run is actively going.
 
-    Idle is the only state that route accepts, so this only ever runs against
-    the other three RunState members -- kept exhaustive (rather than assuming
-    the caller already excluded Idle) so a future RunState member fails safe
-    with a generic message instead of a crash.
+    "Actively going" means the upload lock is held -- PageRunActive or
+    TerminalRunActive, never Idle or Finished. Both of those leave the lock
+    free (Finished is a *past* run's ending, not a current one), so a new
+    run is allowed to start over them -- see _handle_start_run's gate.
     """
     if isinstance(state, page_runs.PageRunActive):
         return f"a page run for batch '{state.batch}' is already in progress (started {state.started_at})"
-    if isinstance(state, page_runs.TerminalRunActive):
-        return state.holder.describe() if state.holder is not None else "another run holds the upload lock"
-    if isinstance(state, page_runs.Finished):
-        return "the previous run has finished; check its result before starting another"
-    return "a run is already in progress"
+    return state.holder.describe() if state.holder is not None else "another run holds the upload lock"
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +543,11 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         server = self.app_server
         config = server.config
         state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
-        if not isinstance(state, page_runs.Idle):
+        # Only refuse when the lock is actually held (a run is going right
+        # now). Idle and Finished both leave the lock free -- Finished is a
+        # *past* run's ending, not a current one -- so a new run is allowed
+        # to start over either of them.
+        if isinstance(state, (page_runs.PageRunActive, page_runs.TerminalRunActive)):
             self._send_error(409, _describe_run_state(state))
             return
 
