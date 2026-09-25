@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 
 import page_runs
+import upload_lock
+from upload_lock import LockHolder, RunningUpload
 
 
 def _write_jsonl(run_dir, records):
@@ -265,3 +267,134 @@ def test_newest_run_dir_none_when_no_runs_yet(tmp_path):
 
 def test_newest_run_dir_none_when_page_runs_dir_missing(tmp_path):
     assert page_runs.newest_run_dir(tmp_path) is None
+
+
+# --- compute_run_state ----------------------------------------------------
+
+
+def test_idle_when_free_and_no_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_lock, "running_upload", lambda p: None)
+    assert page_runs.compute_run_state(tmp_path / ".lock", tmp_path / "logs").kind == "idle"
+
+
+def test_page_run_active_when_holder_pid_matches(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T120000Z")
+    page_runs.write_page_run(page_runs.PageRun(pid=999, project="p", batch="Logging",
+                                               live=False, started_at="t", dir=run_dir))
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 2},
+                           {"identifier": "a", "status": "success"}])
+    monkeypatch.setattr(upload_lock, "running_upload",
+        lambda p: RunningUpload(LockHolder(pid=999, started_at="t", project="p",
+                                           batch="Logging", live=False)))
+    st = page_runs.compute_run_state(tmp_path / ".lock", logs)
+    assert st.kind == "page_run_active" and (st.done, st.planned) == (1, 2)
+
+
+def test_terminal_run_when_holder_pid_differs(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T120000Z")
+    page_runs.write_page_run(page_runs.PageRun(pid=1, project="p", batch="b",
+                                               live=True, started_at="t", dir=run_dir))
+    monkeypatch.setattr(upload_lock, "running_upload",
+        lambda p: RunningUpload(LockHolder(pid=2, started_at="t2", project="p",
+                                           batch="Waterfront", live=True)))
+    st = page_runs.compute_run_state(tmp_path / ".lock", logs)
+    assert st.kind == "terminal_run_active"
+    assert st.holder is not None and st.holder.batch == "Waterfront"
+
+
+def test_transient_holder_none_is_terminal(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_lock, "running_upload", lambda p: RunningUpload(None))
+    st = page_runs.compute_run_state(tmp_path / ".lock", tmp_path / "logs")
+    assert st.kind == "terminal_run_active" and st.holder is None
+
+
+def test_finished_when_free_with_a_run(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T120000Z")
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 1},
+                           {"record": "run_summary", "attempted": 1, "succeeded": 1,
+                            "failures": [], "unconfirmed": [], "not_attempted": 0,
+                            "rate_limited": False, "rate_limit_status": None,
+                            "stopped_by_request": False, "skipped": []}])
+    monkeypatch.setattr(upload_lock, "running_upload", lambda p: None)
+    st = page_runs.compute_run_state(tmp_path / ".lock", logs)
+    assert st.kind == "finished" and st.ending.kind == "completed"
+
+
+def test_terminal_run_active_when_lock_held_but_no_run_dir_yet(tmp_path, monkeypatch):
+    # Lock acquired before the page has written page-run.json for this run yet
+    # (or logs_base has no page-runs at all) - can't be "our" run, so terminal.
+    monkeypatch.setattr(upload_lock, "running_upload",
+        lambda p: RunningUpload(LockHolder(pid=2, started_at="t2", project="p",
+                                           batch=None, live=True)))
+    st = page_runs.compute_run_state(tmp_path / ".lock", tmp_path / "logs")
+    assert st.kind == "terminal_run_active"
+    assert st.holder is not None and st.holder.pid == 2
+
+
+def test_finished_page_run_is_none_when_page_run_json_missing(tmp_path, monkeypatch):
+    # A run dir exists (JSONL got written) but page-run.json is missing/corrupt.
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T120000Z")
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 1}])
+    monkeypatch.setattr(upload_lock, "running_upload", lambda p: None)
+    st = page_runs.compute_run_state(tmp_path / ".lock", logs)
+    assert st.kind == "finished" and st.page_run is None
+
+
+# --- RunState.to_json -------------------------------------------------------
+
+
+def test_idle_to_json():
+    assert page_runs.Idle().to_json() == {"kind": "idle"}
+
+
+def test_page_run_active_to_json():
+    state = page_runs.PageRunActive(batch="Logging", live=False, started_at="t", done=1, planned=2)
+    assert state.to_json() == {
+        "kind": "page_run_active",
+        "batch": "Logging",
+        "live": False,
+        "started_at": "t",
+        "done": 1,
+        "planned": 2,
+    }
+
+
+def test_terminal_run_active_to_json_with_holder():
+    holder = LockHolder(pid=2, started_at="t2", project="p", batch="Waterfront", live=True)
+    state = page_runs.TerminalRunActive(holder=holder)
+    assert state.to_json() == {
+        "kind": "terminal_run_active",
+        "holder": {"started_at": "t2", "project": "p", "batch": "Waterfront", "live": True},
+    }
+
+
+def test_terminal_run_active_to_json_with_holder_none():
+    state = page_runs.TerminalRunActive(holder=None)
+    assert state.to_json() == {"kind": "terminal_run_active", "holder": None}
+
+
+def test_finished_to_json_with_page_run(tmp_path):
+    run_dir = tmp_path / "page-runs" / "20260925T120000Z"
+    run_dir.mkdir(parents=True)
+    ending = page_runs.Refused(reason_lines=["boom"])
+    pr = page_runs.PageRun(pid=1, project="p", batch="b", live=True, started_at="t", dir=run_dir)
+    state = page_runs.Finished(ending=ending, page_run=pr)
+    assert state.to_json() == {
+        "kind": "finished",
+        "ending": {"kind": "refused", "reason_lines": ["boom"]},
+        "page_run": {"pid": 1, "project": "p", "batch": "b", "live": True, "started_at": "t"},
+    }
+
+
+def test_finished_to_json_with_page_run_none():
+    ending = page_runs.Refused(reason_lines=[])
+    state = page_runs.Finished(ending=ending, page_run=None)
+    assert state.to_json() == {
+        "kind": "finished",
+        "ending": {"kind": "refused", "reason_lines": []},
+        "page_run": None,
+    }

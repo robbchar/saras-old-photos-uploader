@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import upload_lock
+from upload_lock import LockHolder
+
 PAGE_RUNS_SUBDIR = "page-runs"
 PAGE_RUN_FILENAME = "page-run.json"
 OUTPUT_FILENAME = "output.txt"
@@ -231,3 +234,105 @@ def read_ending(run_dir: Path) -> Ending:
     if summary.get("rate_limited"):
         return RateLimited(summary=summary)
     return Completed(summary=summary)
+
+
+@dataclass(frozen=True)
+class Idle:
+    """No upload lock held, and no run folder has ever been written."""
+
+    kind: Literal["idle"] = "idle"
+
+    def to_json(self) -> dict[str, object]:
+        return {"kind": self.kind}
+
+
+@dataclass(frozen=True)
+class PageRunActive:
+    """The lock's holder is this page's own newest run - safe to show live progress for."""
+
+    batch: str
+    live: bool
+    started_at: str
+    done: int
+    planned: int | None
+    kind: Literal["page_run_active"] = "page_run_active"
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "batch": self.batch,
+            "live": self.live,
+            "started_at": self.started_at,
+            "done": self.done,
+            "planned": self.planned,
+        }
+
+
+@dataclass(frozen=True)
+class TerminalRunActive:
+    """The lock is held by something other than this page's newest run (a CLI run, a
+    stale/unmatched page run, or - when holder is None - a transient probe window)."""
+
+    holder: LockHolder | None
+    kind: Literal["terminal_run_active"] = "terminal_run_active"
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "holder": None if self.holder is None else {
+                "started_at": self.holder.started_at,
+                "project": self.holder.project,
+                "batch": self.holder.batch,
+                "live": self.holder.live,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class Finished:
+    """The lock is free, and the newest run folder holds a finished (or refused) attempt."""
+
+    ending: Ending
+    page_run: PageRun | None
+    kind: Literal["finished"] = "finished"
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "ending": self.ending.to_json(),
+            "page_run": None if self.page_run is None else self.page_run.to_json(),
+        }
+
+
+RunState = Idle | PageRunActive | TerminalRunActive | Finished
+
+
+def compute_run_state(lock_path: Path, logs_base: Path) -> RunState:
+    """What the upload page should show right now, from the lock and the newest run folder.
+
+    The lock's holder pid is the only way to tell "this page's own run" apart
+    from a terminal run started elsewhere (another page instance, or the `ia`
+    CLI directly) - both hold the same lock, so only the pid distinguishes
+    them. Calls upload_lock.running_upload through the module (not a bound
+    import) so tests can monkeypatch it."""
+    running = upload_lock.running_upload(lock_path)
+    if running is not None:
+        holder = running.holder
+        newest = newest_run_dir(logs_base)
+        if newest is not None:
+            page_run = read_page_run(newest)
+            if holder is not None and page_run is not None and holder.pid == page_run.pid:
+                done, planned = read_progress(find_jsonl(newest))
+                return PageRunActive(
+                    batch=page_run.batch,
+                    live=page_run.live,
+                    started_at=page_run.started_at,
+                    done=done,
+                    planned=planned,
+                )
+        return TerminalRunActive(holder=holder)
+
+    newest = newest_run_dir(logs_base)
+    if newest is None:
+        return Idle()
+    return Finished(ending=read_ending(newest), page_run=read_page_run(newest))
