@@ -6,6 +6,7 @@ import io
 import json
 import re
 import shlex
+import signal
 import tempfile
 from argparse import Namespace
 from pathlib import Path
@@ -6395,6 +6396,222 @@ def test_cmd_upload_confirms_successes_that_happened_before_a_rate_limit_stopped
             ("F3", "photo2.jpg"),
         ],
     ]
+
+
+THREE_PHOTO_GRID = [SHEET_HEADER] + [
+    [f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 4)
+]
+THREE_PHOTO_FILES = tuple(f"photo{n}.jpg" for n in range(1, 4))
+
+
+def interrupting_upload(recorder, during, interrupts=1):
+    """upload_row that uploads, then takes real SIGINTs while the item ending `during` is in flight."""
+
+    def fake_upload_row(row, target_identifier, collection, files_dir):
+        recorder.events.append(("upload", target_identifier))
+        if target_identifier.endswith(during):
+            for _ in range(interrupts):
+                signal.raise_signal(signal.SIGINT)
+
+    return fake_upload_row
+
+
+def test_an_interrupt_stops_the_upload_after_the_current_item(tmp_path, monkeypatch, capsys):
+    """Item 2 finishes and is confirmed; item 3 is never sent. It was reserved with its
+    chunk, so it stays RESERVED and the next run retries it under the same identifier."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+    monkeypatch.setattr("ia_bulk.upload_row", interrupting_upload(recorder, during="00002"))
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001",
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",
+    ]
+    assert recorder.writes == [
+        [
+            ("C2", "lcps-astoriaphotos-00001"),
+            ("C3", "lcps-astoriaphotos-00002"),
+            ("C4", "lcps-astoriaphotos-00003"),
+        ],
+        [
+            ("D2", FIXED_TIMESTAMP),
+            ("E2", f"https://archive.org/details/zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"),
+            ("F2", "photo1.jpg"),
+            ("D3", FIXED_TIMESTAMP),
+            ("E3", f"https://archive.org/details/zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002"),
+            ("F3", "photo2.jpg"),
+        ],
+    ]
+    assert "stopped: as requested, after 2 items" in captured.err.splitlines()
+    assert (
+        "2 uploaded this run - run the same command again to pick up where it left off"
+        in captured.out.splitlines()
+    )
+
+
+def test_an_interrupted_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+    monkeypatch.setattr("ia_bulk.upload_row", interrupting_upload(recorder, during="00002"))
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["record"] == "run_summary"
+    assert summary["stopped_by_request"] is True
+    assert summary["rate_limited"] is False
+    assert summary["succeeded"] == 2
+    assert summary["not_attempted"] == 1
+
+
+def test_an_interrupt_between_chunks_never_reserves_the_next_chunk(tmp_path, monkeypatch, capsys):
+    """Checked before the reserve write, so a stopped run reserves nothing it won't send."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+    monkeypatch.setattr("ia_bulk.upload_row", interrupting_upload(recorder, during="00002"))
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, chunk_size=1)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.writes == [
+        [("C2", "lcps-astoriaphotos-00001")],
+        [
+            ("D2", FIXED_TIMESTAMP),
+            ("E2", f"https://archive.org/details/zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"),
+            ("F2", "photo1.jpg"),
+        ],
+        [("C3", "lcps-astoriaphotos-00002")],
+        [
+            ("D3", FIXED_TIMESTAMP),
+            ("E3", f"https://archive.org/details/zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002"),
+            ("F3", "photo2.jpg"),
+        ],
+    ]
+
+
+def test_a_second_interrupt_stops_the_upload_at_once(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    before = signal.getsignal(signal.SIGINT)
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+    monkeypatch.setattr(
+        "ia_bulk.upload_row", interrupting_upload(recorder, during="00002", interrupts=2)
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert recorder.uploads == [
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001",
+        f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002",
+    ]
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_an_interrupt_during_the_last_item_lets_the_run_finish(tmp_path, monkeypatch, capsys):
+    """Nothing is left to stop, so the run is a normal, complete one."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+    monkeypatch.setattr("ia_bulk.upload_row", interrupting_upload(recorder, during="00003"))
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert exit_code == 0
+    assert summary["stopped_by_request"] is False
+    assert summary["not_attempted"] == 0
+
+
+def test_the_upload_restores_the_interrupt_handler_it_replaced(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    before = signal.getsignal(signal.SIGINT)
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, THREE_PHOTO_GRID, files=THREE_PHOTO_FILES
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_the_upload_log_tab_says_the_run_stopped_as_requested(tmp_path, monkeypatch, capsys):
+    """The tab has no column for the flag, so the summary cell carries it."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        THREE_PHOTO_GRID,
+        files=THREE_PHOTO_FILES,
+        registry=_log_tab_registry(tmp_path),
+    )
+    monkeypatch.setattr("ia_bulk.upload_row", interrupting_upload(recorder, during="00002"))
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary_row = client.log_tabs["Upload Log"].appended[0]
+    assert summary_row[2] == "summary"
+    assert summary_row[4] == "2 file(s) uploaded successfully, 0 error(s) - stopped as requested"
+
+
+def test_the_upload_log_tab_says_the_run_stopped_on_a_rate_limit(tmp_path, monkeypatch, capsys):
+    """One path for both early stops; before this, a rate-limit stop left no trace in the tab."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        THREE_PHOTO_GRID,
+        files=THREE_PHOTO_FILES,
+        registry=_log_tab_registry(tmp_path),
+    )
+
+    def slowed_down_on_the_second(row, target_identifier, collection, files_dir):
+        recorder.events.append(("upload", target_identifier))
+        if target_identifier.endswith("00002"):
+            raise UploadFailed(
+                f"upload of '{target_identifier}' failed with status 503: SlowDown",
+                status_code=503,
+            )
+
+    monkeypatch.setattr("ia_bulk.upload_row", slowed_down_on_the_second)
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    summary_row = client.log_tabs["Upload Log"].appended[0]
+    assert summary_row[2] == "summary"
+    assert summary_row[4] == (
+        "1 file(s) uploaded successfully, 1 error(s) - stopped: Internet Archive asked us to "
+        "slow down (HTTP 503)"
+    )
 
 
 def test_cmd_upload_limit_and_chunk_size_combine_as_total_then_batch_size(

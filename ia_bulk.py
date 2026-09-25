@@ -52,6 +52,7 @@ from project_config import (
 )
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
+from stop_request import StopRequest, stop_request_on_interrupt
 from sync_state import (
     MissingSyncColumns,
     SyncColumns,
@@ -3084,6 +3085,39 @@ class VerifyOutcome:
 
 
 @dataclass(frozen=True)
+class RateLimitStop:
+    """Internet Archive asked us to slow down; `status` is the 429/503 it sent."""
+
+    status: int | None
+
+
+@dataclass(frozen=True)
+class RequestedStop:
+    """An interrupt asked the run to stop after its current item."""
+
+
+RunStop = RateLimitStop | RequestedStop
+
+
+def print_run_stop(stop: RunStop, attempted: int, uploaded: int) -> None:
+    """The two lines a run prints when it stops early; the reason goes to stderr."""
+    if isinstance(stop, RateLimitStop):
+        print(
+            f"stopped: Internet Archive asked us to slow down (HTTP {stop.status}) "
+            f"after {_pluralize(attempted, 'item')}",
+            file=sys.stderr,
+        )
+        # The status alone cannot say which limit fired, so name both.
+        print(
+            f"{uploaded} uploaded this run - re-run later to resume: minutes to "
+            "hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached"
+        )
+        return
+    print(f"stopped: as requested, after {_pluralize(attempted, 'item')}", file=sys.stderr)
+    print(f"{uploaded} uploaded this run - run the same command again to pick up where it left off")
+
+
+@dataclass(frozen=True)
 class SheetUploadRun:
     """Everything the reserve -> upload -> confirm loop needs that does not
     change from row to row."""
@@ -3103,6 +3137,8 @@ class SheetUploadRun:
     # still defaults to whatever CHUNK_SIZE is at call time - including a
     # test's own monkeypatched value).
     chunk_size: int = CHUNK_SIZE
+    # Set by the first interrupt; checked before each item and each chunk.
+    stop_request: StopRequest = field(default_factory=StopRequest)
 
     @functools.cached_property
     def uploadable(self) -> frozenset[str]:
@@ -3132,13 +3168,14 @@ class SheetUploadRun:
         has tested. It defaults to CHUNK_SIZE (see the field above) and is
         overridable per run via --chunk-size.
 
-        A rate-limited row (is_rate_limit_error() matches its exception)
-        stops the run after finishing this chunk's confirm write, rather
-        than being logged as an ordinary failure and moving on to the next
-        target. Every row this run already
-        uploaded successfully, in this chunk or an earlier one, is still
-        confirmed before returning: a rate limit must not leave a row
-        RESERVED-but-unconfirmed, which would make the next run re-upload
+        A rate-limited row (is_rate_limit_error() matches its exception), or
+        a stop request (the first interrupt; see stop_request.py), stops the
+        run after finishing this chunk's confirm write, through one path.
+        The request is checked before each item and before each chunk's
+        reserve write, so the item in flight always finishes. Every row this
+        run already uploaded successfully, in this chunk or an earlier one,
+        is still confirmed before returning: an early stop must not leave a
+        row RESERVED-but-unconfirmed, which would make the next run re-upload
         it under a second identifier."""
         # Counted and collected in the same step: every site that bumps a
         # number here already holds the target it belongs to, so the summary's
@@ -3147,8 +3184,8 @@ class SheetUploadRun:
         failures: list[RowFailure] = []
         unconfirmed: list[RowFailure] = []
         skipped: list[RowFailure] = []
-        # Set only once the run has stopped on it, not when a row first hits it.
-        run_stopped_on_status: int | None = None
+        # Set only once the run has stopped, not when a row first hits a rate limit.
+        run_stop: RunStop | None = None
 
         def summary() -> UploadSummary:
             return UploadSummary(
@@ -3156,7 +3193,8 @@ class SheetUploadRun:
                 failures=tuple(failures),
                 unconfirmed=tuple(unconfirmed),
                 not_attempted=tally["not_attempted"],
-                rate_limit_status=run_stopped_on_status,
+                rate_limit_status=run_stop.status if isinstance(run_stop, RateLimitStop) else None,
+                stopped_by_request=isinstance(run_stop, RequestedStop),
                 skipped=tuple(skipped),
             )
 
@@ -3167,7 +3205,18 @@ class SheetUploadRun:
         # run-stopping problem leaves unattempted, with nothing counted twice.
         settled = 0
 
+        def stop_early(stop: RunStop) -> UploadSummary:
+            """A rate limit or a stop request: the rest of the run counts as not attempted."""
+            nonlocal run_stop
+            run_stop = stop
+            tally["not_attempted"] += total - settled
+            print_run_stop(stop, attempted=tally["success"] + len(failures), uploaded=tally["success"])
+            return summary()
+
         for chunk in chunk_rows(targets, self.chunk_size):
+            # Before the reserve write, so a stopped run never reserves rows it won't send.
+            if self.stop_request.requested:
+                return stop_early(RequestedStop())
             # Every chunk gets a fresh timestamp. One timestamp for the whole
             # run would stamp chunk 20 with the time chunk 1 started, which on
             # a full-collection run is hours wrong.
@@ -3197,8 +3246,11 @@ class SheetUploadRun:
                 working = outcome.ok
 
             succeeded: list[UploadTarget] = []
-            rate_limit_status: int | None = None
+            stop: RunStop | None = None
             for target in working:
+                if self.stop_request.requested:
+                    stop = RequestedStop()
+                    break
                 position += 1
                 settled += 1
                 print(f"[{position}/{total}] uploading {target.uploaded_as} ({target.row['file']})")
@@ -3217,7 +3269,7 @@ class SheetUploadRun:
                     print(f"    - {format_row_error(exc)}")
                     self._log(target, "failure", error=str(exc), http_status=parsed_status_code(exc))
                     if is_rate_limit_error(exc):
-                        rate_limit_status = parsed_status_code(exc)
+                        stop = RateLimitStop(parsed_status_code(exc))
                         break
                     continue
                 tally["success"] += 1
@@ -3250,21 +3302,8 @@ class SheetUploadRun:
                     tally["not_attempted"] += total - settled
                     return summary()
 
-            if rate_limit_status is not None:
-                attempted = tally["success"] + len(failures)
-                tally["not_attempted"] += total - settled
-                run_stopped_on_status = rate_limit_status
-                print(
-                    f"stopped: Internet Archive asked us to slow down (HTTP {rate_limit_status}) "
-                    f"after {_pluralize(attempted, 'item')}",
-                    file=sys.stderr,
-                )
-                # The status alone cannot say which limit fired, so name both.
-                print(
-                    f"{tally['success']} uploaded this run - re-run later to resume: minutes to "
-                    "hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached"
-                )
-                return summary()
+            if stop is not None:
+                return stop_early(stop)
 
         return summary()
 
@@ -3866,25 +3905,30 @@ def upload_from_sheet(args) -> int:
             "it - this only affects the log's own audit trail, not the upload that follows.",
             file=sys.stderr,
         )
-    summary = SheetUploadRun(
-        client=client,
-        columns=columns,
-        column_map=column_map,
-        mediatype=config.mediatype,
-        file_template=config.file_template,
-        files_dir=config.files_dir,
-        collection=collection,
-        live=live,
-        write_back=write_back,
-        log_path=log_path,
-        chunk_size=chunk_size,
-    ).execute(targets).with_skipped(skipped_rows(blocked))
+    # QUOTA-AND-RUNS.md, "An interrupt stops a run after the current item".
+    with stop_request_on_interrupt() as stop_request:
+        summary = SheetUploadRun(
+            client=client,
+            columns=columns,
+            column_map=column_map,
+            mediatype=config.mediatype,
+            file_template=config.file_template,
+            files_dir=config.files_dir,
+            collection=collection,
+            live=live,
+            write_back=write_back,
+            log_path=log_path,
+            chunk_size=chunk_size,
+            stop_request=stop_request,
+        ).execute(targets).with_skipped(skipped_rows(blocked))
 
-    lines = upload_summary_lines(summary)
-    for line in lines:
-        print(line)
-    record = try_log_run_summary(log_path, summary, live)
-    mirror_run_to_log_tab(client, config.upload_log_tab, log_path, record, lines[0])
+        lines = upload_summary_lines(summary)
+        for line in lines:
+            print(line)
+        record = try_log_run_summary(log_path, summary, live)
+        mirror_run_to_log_tab(
+            client, config.upload_log_tab, log_path, record, upload_log_tab_headline(summary)
+        )
     print(f"log written to {log_path}")
     return (
         1
@@ -4095,6 +4139,8 @@ class UploadSummary:
     not_attempted: int = 0
     # The parsed 429/503 the run stopped on; None when it did not stop on one.
     rate_limit_status: int | None = None
+    # True when an interrupt ended the run between items.
+    stopped_by_request: bool = False
     skipped: tuple[RowFailure, ...] = ()
 
     @property
@@ -4140,6 +4186,7 @@ class UploadSummary:
             "not_attempted": self.not_attempted,
             "rate_limited": self.rate_limited,
             "rate_limit_status": self.rate_limit_status,
+            "stopped_by_request": self.stopped_by_request,
             "skipped": [entry.as_record() for entry in self.skipped],
         }
 
@@ -4164,6 +4211,21 @@ def upload_summary_lines(summary: UploadSummary) -> list[str]:
     if summary.skipped:
         lines.append(f"{_pluralize(len(summary.skipped), 'row')} skipped (failed validation)")
     return lines
+
+
+def upload_log_tab_headline(summary: UploadSummary) -> str:
+    """The log tab's summary cell: the closing headline, plus why the run stopped early.
+
+    The tab has no column for either flag; adding one would make ensure_tab refuse every existing tab."""
+    headline = upload_summary_lines(summary)[0]
+    if summary.stopped_by_request:
+        return f"{headline} - stopped as requested"
+    if summary.rate_limited:
+        return (
+            f"{headline} - stopped: Internet Archive asked us to slow down "
+            f"(HTTP {summary.rate_limit_status})"
+        )
+    return headline
 
 
 def log_run_summary(log_path: str | Path, record: dict) -> None:
