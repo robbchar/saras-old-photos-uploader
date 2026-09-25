@@ -11672,6 +11672,37 @@ def test_a_live_run_header_records_the_registrys_own_collection(tmp_path):
     assert header["collection"] == "lcpsociety"
 
 
+def test_the_upload_run_header_records_how_many_items_it_plans(tmp_path, monkeypatch, capsys):
+    """So a reader - or the upload page - can show "12 of 42" from the log alone."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [[f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 4)]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=tuple(f"photo{n}.jpg" for n in range(1, 4))
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path, limit=2))
+    capsys.readouterr()
+
+    header = _upload_log_entries(tmp_path)[0]
+    assert header["record"] == "run_header"
+    assert header["planned"] == 2
+
+
+def test_the_upload_run_header_plans_every_ready_row_without_a_limit(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER] + [[f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, 4)]
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=tuple(f"photo{n}.jpg" for n in range(1, 4))
+    )
+
+    cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert _upload_log_entries(tmp_path)[0]["planned"] == 3
+
+
 # Issue #26: the upload run's own machine-readable summary (#25 built only
 # sync-metadata's half), and the Sheet log tabs that mirror it.
 

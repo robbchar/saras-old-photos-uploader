@@ -915,6 +915,7 @@ def log_run_header(
     limit: int | None = None,
     chunk_size: int = CHUNK_SIZE,
     batch: str | None = None,
+    planned: int | None = None,
 ) -> None:
     """The first line written to a Sheet-path run's log. `head -1 <log>` then
     answers "what did this run send, under what field names, and what did it
@@ -978,6 +979,7 @@ def log_run_header(
         "held_back": list(column_map.held_back),
         "required_for_upload": list(config.required_for_upload),
         "limit": limit,
+        "planned": planned,  # How many items this run meant to upload, after --limit; None for sync-metadata.
         "chunk_size": chunk_size,
         "batch": batch,
         "batch_column": config.batch_column,
@@ -4020,6 +4022,7 @@ def upload_from_sheet(args) -> int:
             limit=limit,
             chunk_size=chunk_size,
             batch=getattr(args, "batch", None),
+            planned=len(targets),
         )
     except Exception as exc:
         # This record is a receipt for later, not part of the upload itself -
