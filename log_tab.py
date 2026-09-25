@@ -45,7 +45,7 @@ def log_tab_rows(record: dict, run: str, headline: str) -> list[list[str]]:
     `headline` is the command's own closing console line, passed in rather
     than rebuilt here: the tab should say exactly what the operator saw, and
     each command already renders that line from the same summary object this
-    record came from."""
+    record came from. For an upload that stopped early, that line also names why."""
     when = record.get("timestamp", "")
     rows = [[when, run, "summary", "", headline]]
     for key, outcome in PROBLEM_KINDS:

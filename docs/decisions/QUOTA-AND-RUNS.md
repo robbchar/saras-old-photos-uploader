@@ -614,6 +614,53 @@ sync logs the row as `unchanged`, counts it in `SyncSummary`, and stamps
 `ia_sync_hash` as for a real change (see "A row pushes only when its content
 changed").
 
+## An interrupt stops a run after the current item
+
+*Decided 2026-09-25 (#73).*
+
+Ctrl-C used to raise `KeyboardInterrupt` wherever `upload` happened to be:
+mid-transfer, or between an upload and its confirm write. The run ended
+without a `run_summary`, so its log could not say what happened. Re-running
+was already safe, since a reserved row is retried under its existing
+identifier, but the stop itself was blind. The local upload page (#29) needs
+a Stop button a volunteer can press, and "stop" has to mean something a
+person can predict.
+
+So the first interrupt asks the run to stop after the current item, and a
+second one stops it at once, as Ctrl-C always did.
+
+- **One path for both early stops.** The run ends the way a rate-limit stop
+  does: the current chunk's successes are confirmed, the rest count as
+  `not_attempted`, the summary is written, and the run exits 1.
+  `run_summary` says which it was: `rate_limited` or `stopped_by_request`.
+  A row the run reserved but never reached stays RESERVED, and the next run
+  retries it under the same identifier.
+- **Checked before each item and before each chunk's reserve write.** A request
+  that arrives mid-transfer waits for that item to finish, confirm write
+  included, and it never lets the run reserve another chunk: rows the current
+  chunk already reserved stay RESERVED for the next run. A request that
+  arrives during the last item changes nothing: there is nothing left to stop,
+  and the run finishes normally.
+- **SIGINT and, on Windows, SIGBREAK.** Ctrl-C sends SIGINT. The upload
+  page's server will stop a Windows child with CTRL_BREAK, which Python sees
+  as SIGBREAK. The Mac needs only SIGINT.
+- **The handler only sets a flag.** It writes its one-line notice with
+  `os.write`, not `print`: a signal can land in the middle of a print, and
+  Python's buffered streams are not reentrant.
+- **It covers the send loop only.** An interrupt during the Sheet read or
+  validation stops at once, before anything is reserved; one during the
+  summary and log writes that follow the run stops at once too, rather than
+  printing "stopping after the current item" when nothing is in flight. The
+  previous handlers come back when the send loop ends.
+- **The Upload Log tab says it in words.** The tab has no column for either
+  flag, and adding one would make `ensure_tab` refuse every tab already
+  created. So the summary row's detail names why the run stopped early:
+  `… - stopped as requested`, or `… - stopped: Internet Archive asked us to
+  slow down (HTTP 503)`. Before, a rate-limit stop showed in the tab only
+  as its 503 `failure` row, not as the reason the run ended.
+- **Upload only.** `sync-metadata` stamps chunk by chunk, so an interrupted
+  sync already resumes cleanly.
+
 ## One upload runs at a time, enforced by `upload`
 
 *Decided 2026-09-24 (#72).*
