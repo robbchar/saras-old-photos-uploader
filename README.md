@@ -167,6 +167,11 @@ rather than omitting it.
 Header problems are reported as row 1. `validate` exits non-zero if anything
 fails. Always run it before `upload`.
 
+`--json` prints the findings as one JSON document instead: counts per
+batch without `--batch`, and every row with its reasons with it. It is
+meant for the upload page; see
+[`docs/decisions/READINESS.md`](docs/decisions/READINESS.md#validate---json-is-a-contract-not-a-second-report).
+
 ### `upload` — mint identifiers, upload, record the result
 
 Reads the project's Sheet live.

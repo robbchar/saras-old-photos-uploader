@@ -235,6 +235,13 @@ has caught two real Sheet typos before they shipped as permanent IA fields.
 with every metadata column shifted into the wrong field still passes. See
 [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata).
 
+`validate --json` prints the same findings as one JSON document, for
+programs rather than people. That means the upload page. The timestamp,
+banner and any refusal go to stderr, so stdout parses whole. Its shape is
+recorded in
+[`decisions/READINESS.md`](decisions/READINESS.md#validate---json-is-a-contract-not-a-second-report),
+and `contract_fixtures/` holds a worked example of each form.
+
 ### Why this is a hard rule
 
 On 2026-08-21 a nine-row rehearsal had three rows fail file resolution. One
