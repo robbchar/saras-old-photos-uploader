@@ -4,6 +4,7 @@ identifier scheme this script assumes."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import io
 import json
@@ -16,7 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, Protocol, Sequence, TypeVar
+from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar
 
 import googleapiclient.discovery
 import internetarchive
@@ -671,6 +672,58 @@ def render_lifecycle_summary(report: LifecycleReport) -> str:
         )
 
     return "\n".join(lines)
+
+
+# Bumped when a field changes meaning or disappears; adding a field is not a break.
+VALIDATE_JSON_FORMAT = 1
+
+
+def lifecycle_counts_json(report: LifecycleReport) -> dict[str, dict[str, int]]:
+    return {
+        state.value: {verdict.value: len(report.results(state, verdict)) for verdict in UploadVerdict}
+        for state in LIFECYCLE_STATES
+    }
+
+
+def validate_json(
+    *,
+    project_id: str,
+    live: bool,
+    batch: str | None,
+    header_results: list[RowValidation],
+    report: LifecycleReport,
+    batches: list[tuple[BatchGroup, LifecycleReport]] | None,
+) -> dict[str, object]:
+    """validate's findings as one document for a program; the text report renders the same report."""
+    return {
+        "format": VALIDATE_JSON_FORMAT,
+        "project": project_id,
+        "live": live,
+        "batch": batch,
+        "valid": all(result.is_valid for result in header_results)
+        and all(entry.result.is_valid for entry in report.entries),
+        "sheet_errors": [error for result in header_results for error in result.errors],
+        "counts": lifecycle_counts_json(report),
+        "batches": None
+        if batches is None
+        else [
+            {"value": group.value, "counts": lifecycle_counts_json(group_report)}
+            for group, group_report in batches
+        ],
+        "rows": None
+        if batch is None
+        else [
+            {
+                "row": entry.result.row_number,
+                "state": entry.state.value,
+                "verdict": entry.result.verdict.value,
+                "identifier": entry.result.identifier,
+                "errors": list(entry.result.errors),
+                "missing_fields": list(entry.result.missing_fields),
+            }
+            for entry in report.entries
+        ],
+    }
 
 
 def _format_result_lines(results: list[RowValidation]) -> list[str]:
@@ -2082,6 +2135,29 @@ def batch_row_numbers(
     return scope
 
 
+def batch_lifecycle_reports(
+    config: ProjectConfig,
+    column_map: ColumnMap,
+    rows: list[dict[str, str]],
+    row_results: list[RowValidation],
+) -> list[tuple[BatchGroup, LifecycleReport]] | None:
+    """Each batch's lifecycle, for validate --json's picker; None when the project names no
+    batch column. A column the Sheet lacks is refused, as --batch refuses it."""
+    column = config.batch_column
+    if column is None:
+        return None
+    require_batch_column_in_sheet(config, column_map, column)
+    by_number = {result.row_number: (row, result) for row, result in zip(rows, row_results)}
+    listed: list[tuple[BatchGroup, LifecycleReport]] = []
+    for group in batch_groups(rows, column):
+        members = [by_number[number] for number in sorted(group.row_numbers)]
+        report = build_lifecycle_report(
+            [row for row, _ in members], [result for _, result in members]
+        )
+        listed.append((group, report))
+    return listed
+
+
 class SheetSetupFailed(Exception):
     """A Sheet-path command could not get far enough to start its own work.
 
@@ -2532,6 +2608,16 @@ def cmd_setup(args) -> int:
 
 
 def cmd_validate(args) -> int:
+    if not getattr(args, "json", False):
+        return run_validate(args, json_out=None)
+    json_out = sys.stdout
+    # READINESS.md, "`validate --json` is a contract, not a second report".
+    with contextlib.redirect_stdout(sys.stderr):
+        return run_validate(args, json_out=json_out)
+
+
+def run_validate(args, json_out: TextIO | None) -> int:
+    """validate itself; with json_out, the report goes there as one JSON document instead of as text."""
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
     live = bool(args.live)
@@ -2578,11 +2664,35 @@ def cmd_validate(args) -> int:
         row_results = [result for _, result in in_scope]
 
     results = header_results + row_results
+    exit_code = 0 if all(r.is_valid for r in results) else 1
+    report = build_lifecycle_report(rows, row_results)
+
+    if json_out is not None:
+        try:
+            batches = (
+                None
+                if scope is not None
+                else batch_lifecycle_reports(config, column_map, rows, row_results)
+            )
+        except BatchScopeError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        document = validate_json(
+            project_id=config.project_id,
+            live=live,
+            batch=None if scope is None else args.batch.strip(),
+            header_results=header_results,
+            report=report,
+            batches=batches,
+        )
+        print(json.dumps(document, indent=2), file=json_out)
+        return exit_code
+
     print(format_report(results))
     print()
     print(format_field_receipt(column_map))
     print()
-    print(format_lifecycle_summary(rows, row_results))
+    print(render_lifecycle_summary(report))
     print()
     print("suggestions (advisory - nothing is changed automatically):")
     suggestions = suggest_standard_fields(column_map.uploadable_fields())
@@ -2592,7 +2702,7 @@ def cmd_validate(args) -> int:
     else:
         print("  (none)")
 
-    return 0 if all(r.is_valid for r in results) else 1
+    return exit_code
 
 
 class MissingWriteBackColumns(Exception):
@@ -5320,6 +5430,14 @@ def build_parser() -> argparse.ArgumentParser:
             "through the same code. Matching ignores case and surrounding whitespace."
         ),
     )
+    validate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Print one JSON document instead of the text report: lifecycle counts, per batch "
+            "without --batch, per row with it. Everything else goes to stderr."
+        ),
+    )
 
     upload_parser = subparsers.add_parser(
         "upload", help="Upload items from a project's Sheet", allow_abbrev=False
@@ -5460,7 +5578,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def start_run_output(command: str) -> None:
+def start_run_output(command: str, stream: TextIO | None = None) -> None:
     """Called before a command loads anything, so a registry that will not load
     still fails under its own run's date. Line-buffered because the LaunchAgent
     sends stdout and stderr to one file, and block-buffered stdout would land
@@ -5468,13 +5586,14 @@ def start_run_output(command: str) -> None:
     an escape, as on stderr, instead of ending the run's output there."""
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(line_buffering=True, errors="backslashreplace")
-    print(f"{utc_timestamp()} {command}")
+    print(f"{utc_timestamp()} {command}", file=stream or sys.stdout)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    start_run_output(args.command)
+    # With --json, stdout carries only the document.
+    start_run_output(args.command, sys.stderr if getattr(args, "json", False) else None)
 
     if args.command == "validate":
         return cmd_validate(args)
