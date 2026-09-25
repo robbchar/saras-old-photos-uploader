@@ -312,7 +312,11 @@ def test_themes_passes_validate_json_through(tmp_path):
     with upload_server.serve_in_thread(cfg, deps) as base:
         status, body = _get(base + "/api/themes")
         assert status == 200
-        assert json.loads(body) == json.loads(all_doc)  # exact contract pass-through
+        # Byte-for-byte, not just value-equal: dict equality would still pass
+        # a json.loads-then-json.dumps re-serialization that reorders keys,
+        # which is exactly the regression this pins against.
+        assert body.decode("utf-8") == all_doc
+        assert json.loads(body) == json.loads(all_doc)
 
 
 def test_themes_response_content_type_is_json(tmp_path):
@@ -368,7 +372,21 @@ def test_preview_passes_validate_json_through(tmp_path):
     with upload_server.serve_in_thread(cfg, deps) as base:
         status, body = _get(base + "/api/preview?batch=logging")
         assert status == 200
-        assert json.loads(body) == json.loads(batch_doc)  # exact contract pass-through
+        # Byte-for-byte, not just value-equal -- see the themes test's
+        # comment: dict equality alone wouldn't catch a re-serialization
+        # that reorders keys but keeps the same values.
+        assert body.decode("utf-8") == batch_doc
+        assert json.loads(body) == json.loads(batch_doc)
+
+
+def test_preview_response_content_type_is_json(tmp_path):
+    batch_doc = (FIXTURES / "validate-batch.json").read_text(encoding="utf-8")
+    deps = _fake_deps(run_validate=lambda argv: (batch_doc, "", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        request = urllib.request.Request(base + "/api/preview?batch=logging")
+        response = urllib.request.urlopen(request)
+        assert response.headers.get("Content-Type") == "application/json"
 
 
 def test_preview_sends_batch_in_equals_form(tmp_path):
