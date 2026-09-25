@@ -3646,6 +3646,12 @@ def cmd_upload(args) -> int:
             file=sys.stderr,
         )
         return 1
+    except OSError as error:
+        # Creating or locking the lock file failed (permissions, a read-only
+        # checkout, an unexpected lock errno). Refuse cleanly instead of a
+        # traceback: without the lock we cannot guarantee one upload at a time.
+        print(f"could not take the upload lock: {error}.", file=sys.stderr)
+        return 1
     with lock:
         return upload_from_sheet(args)
 

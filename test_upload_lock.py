@@ -1,6 +1,7 @@
 import dataclasses
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -129,6 +130,21 @@ def test_overlapping_probes_never_report_a_phantom_upload(lock_path):
     phantoms = [result for result in results if result is not None]
     assert len(results) == 4000
     assert phantoms == []
+
+
+def test_a_held_lock_with_no_holder_record_is_not_a_running_upload(lock_path):
+    """_PROBE_LOCK serializes probes only within one process. Across processes a
+    probe can momentarily hold the lock; a held lock with no record beside it is
+    that, not a run - only acquire() writes a record. Uses the real OS lock."""
+    lock_path.parent.mkdir(parents=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT)
+    try:
+        assert upload_lock._try_lock(fd)  # hold it raw, as a bare probe would, writing no record
+
+        assert upload_lock.running_upload(lock_path) is None
+    finally:
+        upload_lock._unlock(fd)
+        os.close(fd)
 
 
 def test_a_holder_record_left_by_a_crashed_run_is_ignored(lock_path):

@@ -357,7 +357,7 @@ def test_no_test_reads_an_ia_config_file_on_the_developers_machine(
 
 
 def test_no_test_takes_the_checkouts_real_upload_lock(tmp_path):
-    real_lock = Path(upload_lock.__file__).resolve().parent / ".upload.lock"
+    real_lock = Path(upload_lock.__file__).resolve().parent / ".ignored" / "upload.lock"
 
     assert upload_lock.UPLOAD_LOCK_PATH != real_lock
     assert upload_lock.UPLOAD_LOCK_PATH.is_relative_to(tmp_path)

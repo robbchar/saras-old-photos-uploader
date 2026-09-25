@@ -14,11 +14,13 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# At the repo root: never --log-dir (per-run folders) nor logs/ (operators empty it).
-UPLOAD_LOCK_PATH = Path(__file__).resolve().parent / ".upload.lock"
+# In .ignored/ (the checkout's gitignored local-only area): never --log-dir
+# (per-run folders) nor logs/ (operators empty it).
+UPLOAD_LOCK_PATH = Path(__file__).resolve().parent / ".ignored" / "upload.lock"
 
-# Covers running_upload()'s momentary probe and Windows' delayed release of a dead process's lock.
-ACQUIRE_ATTEMPTS = 20
+# Covers running_upload()'s momentary probe and Windows' delayed release of a
+# dead process's lock, which the dead-process test shows can take up to ~5s.
+ACQUIRE_ATTEMPTS = 50
 ACQUIRE_RETRY_SECONDS = 0.1
 
 # Serializes in-process probes: two probes racing the OS lock could otherwise see each other's momentary hold.
@@ -116,7 +118,14 @@ def acquire(lock_path: Path, holder: LockHolder) -> HeldUploadLock:
     """Take the lock, or raise UploadLockHeld naming the run that has it."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT)
-    if not _lock_with_retries(fd):
+    try:
+        locked = _lock_with_retries(fd)
+    except BaseException:
+        # _try_lock can raise (an unexpected lock errno, or a KeyboardInterrupt
+        # during a retry sleep); don't leak the descriptor on the way out.
+        os.close(fd)
+        raise
+    if not locked:
         os.close(fd)
         raise UploadLockHeld(RunningUpload(_read_holder(lock_path)))
     _write_holder(lock_path, holder)
@@ -133,6 +142,12 @@ def running_upload(lock_path: Path) -> RunningUpload | None:
         try:
             if _try_lock(fd):
                 _unlock(fd)
+                return None
+            # The lock is held, but a real run writes its holder record the
+            # instant it locks. A held lock with no record at all is another
+            # process's probe momentarily holding it (_PROBE_LOCK serializes
+            # probes only within this process), not a run - treat it as free.
+            if not _holder_path(lock_path).exists():
                 return None
             return RunningUpload(_read_holder(lock_path))
         finally:

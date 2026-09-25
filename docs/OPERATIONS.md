@@ -411,6 +411,14 @@ real files in the wrong place under a permanent identifier.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.
+- [ ] **The one-upload-at-a-time lock actually refuses a second run on this
+      Mac.** Start a test-mode `upload` (no `--live`, no `--dry-run`, so it
+      takes the lock but uploads only to the sandbox) in one terminal and,
+      while it runs, start another `upload` in a second terminal — both from
+      the operating checkout. The second must exit refusing and name the first.
+      Confirm this by hand because the Mac's `flock` path never runs under
+      pytest — see
+      [`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload).
 
 Identifiers are permanent. An item uploaded under the wrong identifier cannot
 be renamed, only darkened by IA staff on request.
