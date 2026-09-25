@@ -42,6 +42,16 @@ import upload_lock
 # which must report the checkout's commit regardless of the server's cwd.
 _MODULE_DIR = Path(__file__).resolve().parent
 
+# Populated by _default_spawn_upload, keyed by the run's own directory
+# (out_path.parent, matching page_runs.PageRun.dir) rather than pid, since a
+# pid can be reused after the child exits but a run directory never is.
+# Task 8's SSE handler reads this to ask "has this run's child exited yet"
+# via Popen.poll() without sending it a signal. A module-level dict (not an
+# attribute on _UploadServer) because the default spawn_upload is a plain
+# function matching the ServerDeps.spawn_upload signature -- it has no
+# reference to the server instance that called it.
+_spawned_upload_processes: dict[Path, subprocess.Popen[bytes]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -113,17 +123,36 @@ def _default_run_validate(argv: list[str]) -> tuple[str, str, int]:
     return result.stdout, result.stderr, result.returncode
 
 
-def _default_spawn_upload(argv: list[str], out_path: Path, cwd: Path) -> int:
-    """Starts argv as a detached child, redirecting its combined output to out_path.
+def _process_group_kwargs() -> tuple[int, bool]:
+    """(creationflags, start_new_session) that put the upload child in its own
+    process group, so stop_request.request_stop's CTRL_BREAK (Windows) /
+    SIGINT (POSIX) reaches only this child -- never the whole console session
+    the server itself is running in.
 
-    Runs in its own process group (POSIX: start_new_session; Windows:
-    CREATE_NEW_PROCESS_GROUP) so stop_request.request_stop's CTRL_BREAK /
-    SIGINT reaches only this child, matching stop_request.py's contract.
-    Real wiring (building argv, tracking the pid) is Task 7's job; this
-    default just knows how to run *some* argv and hand back its pid.
+    NEVER DETACHED_PROCESS or CREATE_NO_WINDOW here: CTRL_BREAK requires the
+    child to still share the console (see stop_request.py's module docstring).
+    """
+    if sys.platform == "win32":
+        return subprocess.CREATE_NEW_PROCESS_GROUP, False
+    return 0, True
+
+
+def _default_spawn_upload(argv: list[str], out_path: Path, cwd: Path) -> int:
+    """Starts argv as a child in its own process group, redirecting its
+    combined stdout+stderr to out_path.
+
+    out_path is opened in binary mode; PYTHONIOENCODING forces the child's
+    own text output to UTF-8 regardless of the console's codepage (see
+    docs/decisions -- "Console encoding"), so out_path is UTF-8 too and
+    Task 8's SSE can slice it by byte offset without ever splitting a
+    multi-byte character.
+
+    Keeps the Popen in _spawned_upload_processes, keyed by out_path.parent
+    (the run's directory) -- see that dict's comment.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    creationflags, start_new_session = _process_group_kwargs()
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     with open(out_path, "wb") as out_file:
         process = subprocess.Popen(
             argv,
@@ -131,9 +160,11 @@ def _default_spawn_upload(argv: list[str], out_path: Path, cwd: Path) -> int:
             stdout=out_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            env=env,
             creationflags=creationflags,
-            start_new_session=(sys.platform != "win32"),
+            start_new_session=start_new_session,
         )
+    _spawned_upload_processes[out_path.parent] = process
     return process.pid
 
 
@@ -244,6 +275,23 @@ def _check_startup(config: ServerConfig) -> project_config.ProjectConfig:
     return resolved
 
 
+def _describe_run_state(state: page_runs.RunState) -> str:
+    """The 409 reason POST /api/runs gives when compute_run_state isn't Idle.
+
+    Idle is the only state that route accepts, so this only ever runs against
+    the other three RunState members -- kept exhaustive (rather than assuming
+    the caller already excluded Idle) so a future RunState member fails safe
+    with a generic message instead of a crash.
+    """
+    if isinstance(state, page_runs.PageRunActive):
+        return f"a page run for batch '{state.batch}' is already in progress (started {state.started_at})"
+    if isinstance(state, page_runs.TerminalRunActive):
+        return state.holder.describe() if state.holder is not None else "another run holds the upload lock"
+    if isinstance(state, page_runs.Finished):
+        return "the previous run has finished; check its result before starting another"
+    return "a run is already in progress"
+
+
 # ---------------------------------------------------------------------------
 # The server and its request handler
 # ---------------------------------------------------------------------------
@@ -277,6 +325,10 @@ class _UploadServer(ThreadingHTTPServer):
         # restart is required to pick up a new commit, which is fine -- the
         # server itself is what launchd restarts on a deploy.
         self.commit = commit
+        # Run directories POST /api/runs/current/stop has already signaled --
+        # makes the stop route idempotent (a second POST acks 202 without
+        # sending a second, hard-stop signal). See UploadPageHandler._handle_stop_run.
+        self.stopped_runs: set[Path] = set()
 
 
 def make_handler(config: ServerConfig, deps: ServerDeps) -> type[BaseHTTPRequestHandler]:
@@ -366,8 +418,13 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         if content_type.split(";")[0].strip().lower() != "application/json":
             self._send_error(415, "Content-Type must be application/json")
             return
-        # No POST routes yet -- Task 7 adds /api/runs and /api/runs/current/stop.
-        self._send_error(404, f"no such route: {self.path}")
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/runs":
+            self._handle_start_run()
+        elif path == "/api/runs/current/stop":
+            self._handle_stop_run()
+        else:
+            self._send_error(404, f"no such route: {self.path}")
 
     # -- routes -----------------------------------------------------------
 
@@ -439,6 +496,103 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             return
         stdout, stderr, _returncode = self.app_server.deps.run_validate(self._validate_argv(batch))
         self._respond_with_validate_output(stdout, stderr)
+
+    def _upload_argv(self, batch: str, run_dir: Path) -> list[str]:
+        """Builds the real `upload` command line, mirroring _validate_argv's
+        convention: `--batch` in equals form so a value starting with `-`
+        (e.g. `-weird`) is never mistaken for a flag by argparse.
+        """
+        config = self.app_server.config
+        argv = [
+            sys.executable,
+            "ia_bulk.py",
+            "upload",
+            "--project",
+            config.project,
+            "--registry",
+            config.registry,
+        ]
+        if config.live:
+            argv.append("--live")
+        argv.append(f"--batch={batch}")
+        argv.extend(["--log-dir", str(run_dir)])
+        return argv
+
+    def _read_json_body(self) -> object:
+        """Parses the POST body as JSON. A missing/empty body parses to `{}`;
+        `None` signals a *present* body that isn't valid JSON, distinct from
+        that empty-body case."""
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    def _handle_start_run(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            self._send_error(400, "invalid JSON body")
+            return
+        batch = body.get("batch") if isinstance(body, dict) else None
+        if not isinstance(batch, str) or not batch:
+            self._send_error(400, "batch is required")
+            return
+
+        server = self.app_server
+        config = server.config
+        state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
+        if not isinstance(state, page_runs.Idle):
+            self._send_error(409, _describe_run_state(state))
+            return
+
+        now = server.deps.now_utc()
+        run_dir = page_runs.new_run_dir(config.logs_base, now)
+        out_path = run_dir / page_runs.OUTPUT_FILENAME
+        pid = server.deps.spawn_upload(self._upload_argv(batch, run_dir), out_path, config.repo_root)
+        page_runs.write_page_run(
+            page_runs.PageRun(
+                pid=pid,
+                project=config.project,
+                batch=batch,
+                live=config.live,
+                started_at=now,
+                dir=run_dir,
+            )
+        )
+        self._send_json(202, {"started_at": now})
+
+    def _handle_stop_run(self) -> None:
+        """Signals the page's own run, guarding against pid reuse.
+
+        The lock's holder and the newest page-run folder are two independent
+        records of "what's running"; only signaling when they agree on the
+        pid rules out a stale page-run folder pointing at a pid the OS has
+        since handed to an unrelated process.
+        """
+        server = self.app_server
+        running = upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH)
+        holder = running.holder if running is not None else None
+
+        newest = page_runs.newest_run_dir(server.config.logs_base)
+        page_run = page_runs.read_page_run(newest) if newest is not None else None
+
+        if holder is None or page_run is None or holder.pid != page_run.pid:
+            self._send_error(409, "no page run to stop")
+            return
+
+        # Idempotent: a second POST acks 202 without signaling again -- a
+        # second real signal is stop_request's hard-stop escalation, which
+        # only the operator pressing Stop twice should trigger.
+        if page_run.dir not in server.stopped_runs:
+            server.stopped_runs.add(page_run.dir)
+            server.deps.send_stop(holder.pid)
+        self._send_json(202, {})
 
     def _respond_with_validate_output(self, stdout: str, stderr: str) -> None:
         """Empty stdout is the refusal signal -- never the exit code.

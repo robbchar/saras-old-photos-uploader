@@ -5,6 +5,7 @@ these exercise the actual HTTP stack, not a mocked one."""
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import page_runs
+import upload_lock
 import upload_server
 
 PROJECT = "astoriaphotos"
@@ -34,6 +36,10 @@ def _post(url: str, headers: dict[str, str] | None = None, body: bytes = b"{}") 
         return response.status, response.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
+
+
+def _post_json(url: str, payload: object) -> tuple[int, bytes]:
+    return _post(url, headers={"Content-Type": "application/json"}, body=json.dumps(payload).encode("utf-8"))
 
 
 def _write_registry(tmp_path: Path, project: str = PROJECT) -> Path:
@@ -455,6 +461,226 @@ def test_empty_stdout_reason_is_last_nonempty_stderr_line(tmp_path):
         status, body = _get(base + "/api/themes")
         assert status == 502
         assert json.loads(body)["error"] == "sheet_id is a placeholder"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/runs
+# ---------------------------------------------------------------------------
+
+
+def test_post_runs_spawns_and_writes_page_run(tmp_path, monkeypatch):
+    spawned = {}
+
+    def fake_spawn(argv, out_path, cwd):
+        spawned["argv"] = argv
+        spawned["out_path"] = out_path
+        spawned["cwd"] = cwd
+        return 4242
+
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: page_runs.Idle())
+    deps = _fake_deps(spawn_upload=fake_spawn, now_utc=lambda: "20260925T130000Z")
+    cfg = _make_config(tmp_path, project=PROJECT, live=False)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _post_json(base + "/api/runs", {"batch": "Logging"})
+    assert status == 202
+    assert json.loads(body) == {"started_at": "20260925T130000Z"}
+    assert "--batch=Logging" in spawned["argv"]
+    assert "--log-dir" in spawned["argv"]
+    assert "--live" not in spawned["argv"]
+    assert spawned["cwd"] == cfg.repo_root
+
+    run_dir = page_runs.newest_run_dir(tmp_path / "logs")
+    assert run_dir is not None
+    saved = page_runs.read_page_run(run_dir)
+    assert saved is not None
+    assert saved.pid == 4242
+    assert saved.project == PROJECT
+    assert saved.batch == "Logging"
+    assert saved.live is False
+    assert saved.started_at == "20260925T130000Z"
+    assert spawned["out_path"] == run_dir / "output.txt"
+
+
+def test_post_runs_adds_live_flag_when_configured_live(tmp_path, monkeypatch):
+    spawned = {}
+
+    def fake_spawn(argv, out_path, cwd):
+        spawned["argv"] = argv
+        return 1
+
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: page_runs.Idle())
+    deps = _fake_deps(spawn_upload=fake_spawn, now_utc=lambda: "20260925T130000Z")
+    cfg = _make_config(tmp_path, project=PROJECT, live=True)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        _post_json(base + "/api/runs", {"batch": "Logging"})
+    assert "--live" in spawned["argv"]
+
+
+def test_post_runs_409_when_a_run_is_going(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        page_runs, "compute_run_state", lambda lock_path, logs_base: page_runs.TerminalRunActive(holder=None)
+    )
+    called = []
+    deps = _fake_deps(spawn_upload=lambda argv, out_path, cwd: called.append(argv) or 1)
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _post_json(base + "/api/runs", {"batch": "Logging"})
+    assert status == 409
+    assert "error" in json.loads(body)
+    assert called == []
+
+
+def test_post_runs_409_when_a_page_run_is_active(tmp_path, monkeypatch):
+    active = page_runs.PageRunActive(
+        batch="B1", live=False, started_at="20260101T000000Z", done=1, planned=5
+    )
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: active)
+    called = []
+    deps = _fake_deps(spawn_upload=lambda argv, out_path, cwd: called.append(argv) or 1)
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, _body = _post_json(base + "/api/runs", {"batch": "Logging"})
+    assert status == 409
+    assert called == []
+
+
+def test_post_runs_missing_batch_is_400(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _post_json(base + "/api/runs", {})
+    assert status == 400
+    assert json.loads(body) == {"error": "batch is required"}
+
+
+def test_post_runs_empty_batch_is_400(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _post_json(base + "/api/runs", {"batch": ""})
+    assert status == 400
+    assert json.loads(body) == {"error": "batch is required"}
+
+
+def test_post_runs_malformed_json_is_400(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _post(base + "/api/runs", headers={"Content-Type": "application/json"}, body=b"{not json")
+    assert status == 400
+
+
+# ---------------------------------------------------------------------------
+# POST /api/runs/current/stop
+# ---------------------------------------------------------------------------
+
+
+def _write_matching_page_run(tmp_path: Path, pid: int, now: str = "20260925T130000Z") -> Path:
+    run_dir = page_runs.new_run_dir(tmp_path / "logs", now)
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=pid, project=PROJECT, batch="Logging", live=False, started_at=now, dir=run_dir)
+    )
+    return run_dir
+
+
+def _running(pid: int) -> upload_lock.RunningUpload:
+    return upload_lock.RunningUpload(
+        holder=upload_lock.LockHolder(
+            pid=pid, started_at="20260925T130000Z", project=PROJECT, batch="Logging", live=False
+        )
+    )
+
+
+def test_stop_signals_only_the_page_runs_pid(tmp_path, monkeypatch):
+    holder_pid = 5150
+    _write_matching_page_run(tmp_path, holder_pid)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: _running(holder_pid))
+    sent = []
+    deps = _fake_deps(send_stop=lambda pid: sent.append(pid))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, _body = _post_json(base + "/api/runs/current/stop", {})
+    assert status == 202
+    assert sent == [holder_pid]
+
+
+def test_stop_409_when_holder_pid_does_not_match_page_run(tmp_path, monkeypatch):
+    _write_matching_page_run(tmp_path, pid=111)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: _running(222))
+    sent = []
+    deps = _fake_deps(send_stop=lambda pid: sent.append(pid))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _post_json(base + "/api/runs/current/stop", {})
+    assert status == 409
+    assert json.loads(body) == {"error": "no page run to stop"}
+    assert sent == []
+
+
+def test_stop_409_when_nothing_running(tmp_path, monkeypatch):
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+    sent = []
+    deps = _fake_deps(send_stop=lambda pid: sent.append(pid))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _post_json(base + "/api/runs/current/stop", {})
+    assert status == 409
+    assert json.loads(body) == {"error": "no page run to stop"}
+    assert sent == []
+
+
+def test_stop_is_idempotent(tmp_path, monkeypatch):
+    holder_pid = 6060
+    _write_matching_page_run(tmp_path, holder_pid)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: _running(holder_pid))
+    sent = []
+    deps = _fake_deps(send_stop=lambda pid: sent.append(pid))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status1, _body1 = _post_json(base + "/api/runs/current/stop", {})
+        status2, _body2 = _post_json(base + "/api/runs/current/stop", {})
+    assert status1 == 202
+    assert status2 == 202
+    assert sent == [holder_pid]
+
+
+# ---------------------------------------------------------------------------
+# Default spawn_upload: the process-group spawn that makes Stop reachable
+# ---------------------------------------------------------------------------
+
+
+def test_default_spawn_upload_uses_process_group_and_utf8_env(tmp_path, monkeypatch):
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+            self.pid = 9999
+
+    monkeypatch.setattr(upload_server.subprocess, "Popen", _FakePopen)
+    out_path = tmp_path / "run" / "output.txt"
+
+    pid = upload_server._default_spawn_upload(["ia_bulk.py", "upload"], out_path, tmp_path)
+
+    assert pid == 9999
+    kwargs = captured["kwargs"]
+
+    if sys.platform == "win32":
+        assert kwargs["creationflags"] == upload_server.subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs["start_new_session"] is True
+
+    assert kwargs["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert kwargs["stdout"].name == str(out_path)
+    assert kwargs["stderr"] == upload_server.subprocess.STDOUT
+
+    # Never DETACHED_PROCESS/CREATE_NO_WINDOW -- CTRL_BREAK must reach a child
+    # that still shares the console (see stop_request.request_stop).
+    creationflags = kwargs.get("creationflags", 0)
+    detached = getattr(upload_server.subprocess, "DETACHED_PROCESS", None)
+    no_window = getattr(upload_server.subprocess, "CREATE_NO_WINDOW", None)
+    if detached is not None:
+        assert not (creationflags & detached)
+    if no_window is not None:
+        assert not (creationflags & no_window)
 
 
 # ---------------------------------------------------------------------------
