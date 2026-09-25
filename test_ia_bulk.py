@@ -11306,12 +11306,15 @@ def test_validate_json_matches_the_contract_fixtures(tmp_path, monkeypatch, caps
         batch="logging",
     )
 
-    assert _portable(everything, tmp_path) == json.loads(
-        (CONTRACT_FIXTURES / "validate-all.json").read_text(encoding="utf-8")
-    )
-    assert _portable(one_batch, tmp_path) == json.loads(
-        (CONTRACT_FIXTURES / "validate-batch.json").read_text(encoding="utf-8")
-    )
+    # Compared as serialized text, not parsed dicts: this pins key ORDER and
+    # exact formatting too, so reordering validate_json's keys (a contract
+    # change per READINESS.md) fails here - dict == dict would not catch it.
+    assert json.dumps(_portable(everything, tmp_path), indent=2) == (
+        CONTRACT_FIXTURES / "validate-all.json"
+    ).read_text(encoding="utf-8").rstrip("\n")
+    assert json.dumps(_portable(one_batch, tmp_path), indent=2) == (
+        CONTRACT_FIXTURES / "validate-batch.json"
+    ).read_text(encoding="utf-8").rstrip("\n")
 
 
 def test_validate_json_is_null_for_batches_when_the_project_has_none(tmp_path, monkeypatch, capsys):

@@ -538,13 +538,23 @@ class LifecycleReport:
     """Every row's entry, in Sheet order; the text summary and validate --json both render it."""
 
     entries: tuple[LifecycleEntry, ...]
+    # Every entry bucketed by (state, verdict) once, so results() is a lookup
+    # rather than a fresh scan of `entries`: render and the JSON counts each
+    # ask for all nine buckets, which would otherwise be nine passes over the
+    # report (and nine more per batch). Not part of the value - excluded from
+    # __eq__/__repr__ - and set in __post_init__ because the class is frozen.
+    _buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = field(
+        init=False, compare=False, repr=False, default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = {}
+        for entry in self.entries:
+            buckets.setdefault((entry.state, entry.result.verdict), []).append(entry.result)
+        object.__setattr__(self, "_buckets", buckets)
 
     def results(self, state: RowState, verdict: UploadVerdict) -> list[RowValidation]:
-        return [
-            entry.result
-            for entry in self.entries
-            if entry.state is state and entry.result.verdict is verdict
-        ]
+        return list(self._buckets.get((state, verdict), []))
 
 
 def build_lifecycle_report(
@@ -567,7 +577,11 @@ def build_lifecycle_report(
 
 
 def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowValidation]) -> str:
-    """row_results must be validate_rows()'s own output for these exact
+    """No production caller since `validate` renders through
+    render_lifecycle_summary; retained as a convenience shim
+    (build_lifecycle_report + render) that the lifecycle tests exercise.
+
+    row_results must be validate_rows()'s own output for these exact
     rows, in the same order (one result per row) - NOT the combined report
     that also includes sheet_structure_validation()'s row-1/shape entries,
     which are not aligned with `rows` at all. Passing a mismatched list
