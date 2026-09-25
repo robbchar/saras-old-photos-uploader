@@ -996,6 +996,52 @@ def test_lifecycle_summary_raises_on_mismatched_lengths_instead_of_silently_trun
         )
 
 
+def test_build_lifecycle_report_pairs_each_row_with_its_state():
+    from ia_bulk import LifecycleEntry, LifecycleReport, RowValidation, build_lifecycle_report
+    from identifiers import RowState
+
+    rows = [
+        {"ia_identifier": "", "ia_uploaded": ""},
+        {"ia_identifier": "lcps-astoriaphotos-00001", "ia_uploaded": "2026-09-25T00:00:00Z"},
+        {"ia_identifier": "lcps-astoriaphotos-00002", "ia_uploaded": ""},
+    ]
+    results = [RowValidation(row_number=number, identifier="") for number in (2, 3, 4)]
+
+    report = build_lifecycle_report(rows, results)
+
+    assert report == LifecycleReport(
+        (
+            LifecycleEntry(RowState.UNASSIGNED, results[0]),
+            LifecycleEntry(RowState.DONE, results[1]),
+            LifecycleEntry(RowState.RESERVED, results[2]),
+        )
+    )
+
+
+def test_a_lifecycle_report_returns_each_buckets_results():
+    from ia_bulk import RowValidation, UploadVerdict, build_lifecycle_report
+    from identifiers import RowState
+
+    rows = [{"ia_identifier": "", "ia_uploaded": ""}] * 3
+    ready = RowValidation(row_number=2, identifier="")
+    broken = RowValidation(row_number=3, identifier="", errors=["file not found: x.jpg"])
+    blank = RowValidation(row_number=4, identifier="", missing_fields=["title"])
+
+    report = build_lifecycle_report(rows, [ready, broken, blank])
+
+    assert report.results(RowState.UNASSIGNED, UploadVerdict.READY) == [ready]
+    assert report.results(RowState.UNASSIGNED, UploadVerdict.INVALID) == [broken]
+    assert report.results(RowState.UNASSIGNED, UploadVerdict.NOT_READY) == [blank]
+    assert report.results(RowState.DONE, UploadVerdict.READY) == []
+
+
+def test_build_lifecycle_report_refuses_misaligned_lists():
+    from ia_bulk import RowValidation, build_lifecycle_report
+
+    with pytest.raises(ValueError):
+        build_lifecycle_report([{}], [RowValidation(2, ""), RowValidation(3, "")])
+
+
 def _one_row_in(state: str, kind: str) -> tuple[list[dict[str, str]], list[RowValidation]]:
     """One row/result pair shaped to land in exactly the (state, kind)
     lifecycle-summary bucket named by its arguments - the 3 (classify_row
@@ -10931,6 +10977,19 @@ def test_plan_upload_targets_still_reads_every_row_for_numbers_already_spent():
     )
 
     assert [target.identifier for target in targets] == ["lcps-astoriaphotos-00008"]
+
+
+def test_batch_groups_group_the_way_batch_matches():
+    """Case and surrounding whitespace folded, blanks skipped, first-seen spelling kept,
+    sorted by the folded value - the listing and --batch can never disagree."""
+    from ia_bulk import BatchGroup, batch_groups
+
+    rows = [{"theme": "Logging"}, {"theme": " logging "}, {"theme": ""}, {"theme": "Fishing"}, {}]
+
+    assert batch_groups(rows, "theme") == [
+        BatchGroup(value="Fishing", row_numbers=frozenset({5})),
+        BatchGroup(value="Logging", row_numbers=frozenset({2, 3})),
+    ]
 
 
 BATCH_SHEET_HEADER = SHEET_HEADER + ["Theme"]

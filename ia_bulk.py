@@ -516,6 +516,50 @@ def _pluralize(count: int, noun: str) -> str:
     return f"{count:,} {noun}" if count == 1 else f"{count:,} {noun}s"
 
 
+LIFECYCLE_STATES = (RowState.UNASSIGNED, RowState.DONE, RowState.RESERVED)
+
+
+@dataclass(frozen=True)
+class LifecycleEntry:
+    """One row's lifecycle: classify_row()'s state beside its validation result."""
+
+    state: RowState
+    result: RowValidation
+
+
+@dataclass(frozen=True)
+class LifecycleReport:
+    """Every row's entry, in Sheet order; the text summary and validate --json both render it."""
+
+    entries: tuple[LifecycleEntry, ...]
+
+    def results(self, state: RowState, verdict: UploadVerdict) -> list[RowValidation]:
+        return [
+            entry.result
+            for entry in self.entries
+            if entry.state is state and entry.result.verdict is verdict
+        ]
+
+
+def build_lifecycle_report(
+    rows: list[dict[str, str]], row_results: list[RowValidation]
+) -> LifecycleReport:
+    """row_results must be validate_rows()'s own output for these rows, in the same order."""
+    if len(rows) != len(row_results):
+        raise ValueError(
+            f"format_lifecycle_summary: got {len(rows)} row(s) but {len(row_results)} "
+            "row_results - they must be the same length, in the same order. Pass "
+            "validate_rows()'s own return value here, not the combined report (which "
+            "also carries sheet_structure_validation()'s row-1/shape entries)."
+        )
+    return LifecycleReport(
+        tuple(
+            LifecycleEntry(state=classify_row(row), result=result)
+            for row, result in zip(rows, row_results)
+        )
+    )
+
+
 def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowValidation]) -> str:
     """row_results must be validate_rows()'s own output for these exact
     rows, in the same order (one result per row) - NOT the combined report
@@ -558,29 +602,17 @@ def format_lifecycle_summary(rows: list[dict[str, str]], row_results: list[RowVa
     normally the far larger of the two (an unfilled-in row rather than a
     broken one) and is not an error, so it reads before the more alarming
     invalid line rather than after it."""
-    if len(rows) != len(row_results):
-        raise ValueError(
-            f"format_lifecycle_summary: got {len(rows)} row(s) but {len(row_results)} "
-            "row_results - they must be the same length, in the same order. Pass "
-            "validate_rows()'s own return value here, not the combined report (which "
-            "also carries sheet_structure_validation()'s row-1/shape entries)."
-        )
+    return render_lifecycle_summary(build_lifecycle_report(rows, row_results))
 
-    counts: dict[tuple[RowState, UploadVerdict], int] = {
-        (state, bucket): 0
-        for state in (RowState.UNASSIGNED, RowState.DONE, RowState.RESERVED)
-        for bucket in UploadVerdict
+
+def render_lifecycle_summary(report: LifecycleReport) -> str:
+    """The lifecycle lines for a person to read; validate_json renders the same report for a program."""
+    buckets = {
+        (state, verdict): report.results(state, verdict)
+        for state in LIFECYCLE_STATES
+        for verdict in UploadVerdict
     }
-
-    # The results themselves, not merely a tally: each not-ready line renders
-    # its own missing-field detail from its own rows (see
-    # format_missing_field_lines), so the bucket has to keep them.
-    buckets: dict[tuple[RowState, UploadVerdict], list[RowValidation]] = {key: [] for key in counts}
-    for row, result in zip(rows, row_results):
-        state = classify_row(row)
-        bucket = result.verdict
-        buckets[(state, bucket)].append(result)
-        counts[(state, bucket)] += 1
+    counts = {key: len(results) for key, results in buckets.items()}
 
     lines = [
         f"{_pluralize(counts[(RowState.UNASSIGNED, UploadVerdict.READY)], 'row')} ready to upload "
@@ -1957,6 +1989,45 @@ def in_batch_scope(results: list[RowValidation], scope: set[int] | None) -> list
     return [result for result in results if result.row_number in scope]
 
 
+@dataclass(frozen=True)
+class BatchGroup:
+    """One batch as --batch matches it: the first-seen spelling and its Sheet row numbers."""
+
+    value: str
+    row_numbers: frozenset[int]
+
+
+def batch_groups(rows: list[dict[str, str]], column: str) -> list[BatchGroup]:
+    """Every non-blank batch value, grouped by fold_batch_value, sorted by the folded value."""
+    spellings: dict[str, str] = {}
+    members: dict[str, set[int]] = {}
+    for offset, row in enumerate(rows):
+        cell = (row.get(column) or "").strip()
+        if not cell:
+            # A row nobody has catalogued yet has no batch, and must not join any.
+            continue
+        folded = fold_batch_value(cell)
+        spellings.setdefault(folded, cell)
+        members.setdefault(folded, set()).add(offset + 2)
+    return [
+        BatchGroup(value=spellings[folded], row_numbers=frozenset(members[folded]))
+        for folded in sorted(spellings)
+    ]
+
+
+def require_batch_column_in_sheet(config: ProjectConfig, column_map: ColumnMap, column: str) -> None:
+    """Refuse a batch_column that names a column this Sheet does not have."""
+    known = sorted(set(column_map.field_names.values()))
+    if column not in known:
+        # The same failure check_required_for_upload guards, reached a
+        # different way: left alone this reads every row's batch as blank,
+        # matches nothing, and reports the batch as already finished.
+        raise BatchScopeError(
+            f"project '{config.project_id}': batch_column names {column!r}, which is not "
+            f"a column in this Sheet. Known columns: {', '.join(known)}"
+        )
+
+
 def batch_row_numbers(
     rows: list[dict[str, str]],
     config: ProjectConfig,
@@ -1981,40 +2052,22 @@ def batch_row_numbers(
     column = batch_column_for(config, batch_value, registry_path)
     value = batch_value.strip()
 
-    known = sorted(set(column_map.field_names.values()))
-    if column not in known:
-        # The same failure check_required_for_upload guards, reached a
-        # different way: left alone this reads every row's batch as blank,
-        # matches nothing, and reports the batch as already finished.
-        raise BatchScopeError(
-            f"project '{config.project_id}': batch_column names {column!r}, which is not "
-            f"a column in this Sheet. Known columns: {', '.join(known)}"
-        )
+    require_batch_column_in_sheet(config, column_map, column)
 
     wanted = fold_batch_value(value)
-    scope: set[int] = set()
-    # First-seen spelling per folded value, so the listing below de-duplicates
-    # exactly the way matching does - 'Logging' and 'logging' are one entry,
-    # not two, because they are one batch.
-    present: dict[str, str] = {}
-    for offset, row in enumerate(rows):
-        cell = (row.get(column) or "").strip()
-        if not cell:
-            # A row nobody has catalogued yet has no batch, and must not join
-            # whichever one happens to be running.
-            continue
-        folded = fold_batch_value(cell)
-        present.setdefault(folded, cell)
-        if folded == wanted:
-            scope.add(offset + 2)
+    groups = batch_groups(rows, column)
+    scope = next(
+        (set(group.row_numbers) for group in groups if fold_batch_value(group.value) == wanted),
+        set(),
+    )
 
     if not scope:
-        if not present:
+        if not groups:
             raise BatchScopeError(
                 f"--batch {value!r} matches no row: the '{column}' column is empty in "
                 "every row of this Sheet, so no row has been assigned a batch yet."
             )
-        ordered = [present[key] for key in sorted(present)]
+        ordered = [group.value for group in groups]
         shown = ordered[:MAX_LISTED_BATCH_VALUES]
         listing = ", ".join(repr(entry) for entry in shown)
         if len(ordered) > len(shown):
