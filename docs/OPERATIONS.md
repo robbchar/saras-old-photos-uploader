@@ -640,6 +640,22 @@ present in that column listed, so it never runs as a silent empty upload; the
 batch is recorded in the `run_header` log line, which is the only field that
 explains why a run uploaded 40 of 3,000 ready rows.
 
+### "another upload is already running"
+
+`upload` refuses to start while another upload is running from this
+checkout, and names it:
+
+```
+another upload is already running (project sarasoldphotos, batch 'Logging', live, started 2026-09-24T14:02:11Z, pid 4312).
+```
+
+Two runs at once can upload the same rows twice, so this is a hard stop.
+Let the other run finish, or stop it in the terminal where it was started,
+then run yours again. There is nothing to clear: the lock goes away with the
+process that held it, even one that crashed. `--dry-run` and `validate`
+never take the lock, so you can preview while a run is going. Why:
+[`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload).
+
 ## Resuming a failed run
 
 **A failing row prints why, as it happens**, indented under its own progress
