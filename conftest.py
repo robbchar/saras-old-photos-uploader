@@ -34,6 +34,12 @@ def _no_test_reads_the_real_ia_config(monkeypatch, _empty_ia_config_path):
     monkeypatch.delenv("IA_SECRET_ACCESS_KEY", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_test_takes_the_real_upload_lock(monkeypatch, tmp_path):
+    """The real lock is the checkout's logs/upload.lock; a test holding it would refuse a real upload."""
+    monkeypatch.setattr("upload_lock.UPLOAD_LOCK_PATH", tmp_path / "upload-lock" / "upload.lock")
+
+
 def _is_local(host: object) -> bool:
     """None or "" means this machine, as do "localhost", loopback and unspecified addresses."""
     if host in (None, "", b""):
