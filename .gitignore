@@ -11,3 +11,6 @@ data/
 # Defense in depth: these must never land in a public repo even outside .ignored/.
 *service-account*.json
 client_secret_*.json
+# The upload lock and its holder record (upload_lock.py).
+.upload.lock
+.upload.holder.json

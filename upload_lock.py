@@ -14,8 +14,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# Under the repo root, never --log-dir: page runs log to per-run folders.
-UPLOAD_LOCK_PATH = Path(__file__).resolve().parent / "logs" / "upload.lock"
+# At the repo root: never --log-dir (per-run folders) nor logs/ (operators empty it).
+UPLOAD_LOCK_PATH = Path(__file__).resolve().parent / ".upload.lock"
 
 # Covers running_upload()'s momentary probe and Windows' delayed release of a dead process's lock.
 ACQUIRE_ATTEMPTS = 20

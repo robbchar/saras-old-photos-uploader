@@ -1,4 +1,6 @@
+import dataclasses
 import importlib.util
+import json
 import subprocess
 import sys
 import threading
@@ -124,7 +126,9 @@ def test_overlapping_probes_never_report_a_phantom_upload(lock_path):
     for thread in threads:
         thread.join()
 
-    assert results == [None] * len(results)
+    phantoms = [result for result in results if result is not None]
+    assert len(results) == 4000
+    assert phantoms == []
 
 
 def test_a_holder_record_left_by_a_crashed_run_is_ignored(lock_path):
@@ -247,3 +251,29 @@ def test_on_the_mac_a_flock_that_would_block_is_refused(monkeypatch, lock_path):
 
     with pytest.raises(on_the_mac.UploadLockHeld):
         on_the_mac.acquire(lock_path, HOLDER)
+
+
+def test_on_the_mac_the_probe_takes_and_drops_a_free_lock(monkeypatch, lock_path):
+    operations: list[int] = []
+    on_the_mac = load_upload_lock_as_on_the_mac(monkeypatch, fake_fcntl(operations, False))
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+
+    assert on_the_mac.running_upload(lock_path) is None
+    assert operations == [2 | 4, 8]
+
+
+def test_on_the_mac_the_probe_names_a_held_lock_without_unlocking_it(monkeypatch, lock_path):
+    operations: list[int] = []
+    on_the_mac = load_upload_lock_as_on_the_mac(monkeypatch, fake_fcntl(operations, True))
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    lock_path.with_suffix(".holder.json").write_text(
+        json.dumps(dataclasses.asdict(HOLDER)), encoding="utf-8"
+    )
+
+    running = on_the_mac.running_upload(lock_path)
+
+    assert running is not None and running.holder is not None
+    assert dataclasses.asdict(running.holder) == dataclasses.asdict(HOLDER)
+    assert operations == [2 | 4]

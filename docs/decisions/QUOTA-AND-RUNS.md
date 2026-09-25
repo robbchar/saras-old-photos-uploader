@@ -638,18 +638,23 @@ and before its log opens, naming the run that holds the lock.
   `flock`, not `lockf`: a process drops `lockf` locks when it closes *any*
   descriptor for the file, a probe's included. On Windows it is
   `msvcrt.locking`.
-- **One fixed path per checkout**, `logs/upload.lock` under the repo root,
-  never under `--log-dir`. Page runs log to per-run folders, and a lock there
-  would not see a terminal run. Two clones don't see each other's lock; the
-  Mac has one operating checkout, so that is accepted.
+- **One fixed path per checkout**, `.upload.lock` at the repo root, never
+  under `--log-dir` and never in `logs/`. Page runs will log to per-run
+  folders, and a lock there would not see a terminal run. `logs/` is the
+  folder the runbook tells operators to empty, and on the Mac a lock file
+  deleted mid-run excludes no one: the running upload keeps its lock on the
+  deleted file, and the next run creates and locks a new one. A dot-file at
+  the repo root is out of the way of both `rm logs/*` and Finder. Two clones
+  don't see each other's lock; the Mac has one operating checkout, so that
+  is accepted.
 - **One lock for every upload**, whatever the project or mode. Test and live
   runs read different Sheets, but they spend the same account's IA quota, and
   a rule without exceptions needs no explaining at the moment it refuses.
-- **Who holds it is recorded beside it**, in `logs/upload.holder.json`: pid,
-  UTC start, project, batch, mode. It is a separate file because Windows
-  locks are mandatory: no other process can read a locked byte. A record left
-  by a crashed run is ignored, since the lock itself is free, and the next
-  run overwrites it.
+- **Who holds it is recorded beside it**, in `.upload.holder.json` beside
+  it: pid, UTC start, project, batch, mode. It is a separate file because
+  Windows locks are mandatory: no other process can read a locked byte. A
+  record left by a crashed run is ignored, since the lock itself is free,
+  and the next run overwrites it.
 - **`running_upload()` asks "is one running?" without keeping the lock.** It
   takes the lock for an instant and lets go, so `acquire()` retries for about
   two seconds before refusing. The same window covers Windows releasing a

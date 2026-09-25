@@ -647,6 +647,7 @@ checkout, and names it:
 
 ```
 another upload is already running (project sarasoldphotos, batch 'Logging', live, started 2026-09-24T14:02:11Z, pid 4312).
+Two uploads at once can upload the same rows twice. Let that run finish, or stop it where it was started, then run this again.
 ```
 
 Two runs at once can upload the same rows twice, so this is a hard stop.
