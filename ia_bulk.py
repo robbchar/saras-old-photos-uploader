@@ -703,6 +703,9 @@ def validate_json(
         "valid": all(result.is_valid for result in header_results)
         and all(entry.result.is_valid for entry in report.entries),
         "sheet_errors": [error for result in header_results for error in result.errors],
+        "rows_with_errors": [
+            entry.result.row_number for entry in report.entries if entry.result.errors
+        ],
         "counts": lifecycle_counts_json(report),
         "batches": None
         if batches is None

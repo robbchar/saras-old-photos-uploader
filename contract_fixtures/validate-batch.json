@@ -5,6 +5,9 @@
   "batch": "logging",
   "valid": false,
   "sheet_errors": [],
+  "rows_with_errors": [
+    4
+  ],
   "counts": {
     "unassigned": {
       "ready": 1,

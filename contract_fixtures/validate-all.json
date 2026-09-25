@@ -5,11 +5,15 @@
   "batch": null,
   "valid": false,
   "sheet_errors": [],
+  "rows_with_errors": [
+    4,
+    9
+  ],
   "counts": {
     "unassigned": {
       "ready": 3,
       "invalid": 1,
-      "not_ready": 1
+      "not_ready": 2
     },
     "done": {
       "ready": 1,
@@ -29,7 +33,7 @@
         "unassigned": {
           "ready": 1,
           "invalid": 0,
-          "not_ready": 1
+          "not_ready": 2
         },
         "done": {
           "ready": 0,

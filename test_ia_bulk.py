@@ -11182,6 +11182,7 @@ def _contract_grid(tmp_path):
             "https://archive.org/details/lcps-astoriaphotos-00001", "photo6.jpg", "Logging",
         ],
         ["Seventh photo", "photo7.jpg", "lcps-astoriaphotos-00002", "", "", "", "Logging"],
+        ["", "photo9.jpg", "", "", "", "", "Fishing"],
     ]
 
 
@@ -11222,12 +11223,16 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["valid"] is False
     assert document["rows"] is None
     assert document["counts"] == {
-        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 1},
+        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 2},
         "done": {"ready": 1, "invalid": 0, "not_ready": 0},
         "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
     }
+    # Row 9 is not-ready (blank title) AND broken (unresolvable file), and not_ready
+    # beats invalid - it must not also be counted as invalid.
+    assert document["counts"]["unassigned"]["invalid"] == 1
+    assert document["rows_with_errors"] == [4, 9]
     assert [batch["value"] for batch in document["batches"]] == ["Fishing", "Logging"]
-    assert document["batches"][0]["counts"]["unassigned"] == {"ready": 1, "invalid": 0, "not_ready": 1}
+    assert document["batches"][0]["counts"]["unassigned"] == {"ready": 1, "invalid": 0, "not_ready": 2}
     assert document["batches"][1]["counts"] == {
         "unassigned": {"ready": 1, "invalid": 1, "not_ready": 0},
         "done": {"ready": 1, "invalid": 0, "not_ready": 0},
@@ -11257,6 +11262,8 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
     ]
     assert document["rows"][1]["errors"] != []
     assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
+    # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
+    assert document["rows_with_errors"] == [4]
 
 
 def test_validate_json_matches_the_contract_fixtures(tmp_path, monkeypatch, capsys):
