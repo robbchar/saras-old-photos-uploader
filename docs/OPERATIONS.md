@@ -762,6 +762,11 @@ first: those files **are** on Internet Archive but were never marked in the
 Sheet, so the next run would upload them again under a second identifier.
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
 
+Symmetrically, `head -1` of the same log gives its `run_header`, whose
+`planned` is how many items the run meant to upload after `--limit` (`null`
+for `sync-metadata`). Set against the `run_summary`'s counts, that reads as
+"N of planned" — how much of what the run intended to do actually happened.
+
 ### Reading a run from the Sheet instead
 
 If the project's registry names `upload_log_tab` / `sync_log_tab`, that same

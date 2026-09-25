@@ -9559,6 +9559,19 @@ def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypa
     assert summary["skipped"] == []
 
 
+def test_sync_from_sheet_pins_a_null_planned_in_its_run_header(tmp_path, monkeypatch):
+    """sync-metadata never plans upload targets or takes --limit, so its
+    run_header's `planned` is always null - unlike upload's, which counts
+    what --limit capped."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert _sync_log_entries(tmp_path)[0]["planned"] is None
+
+
 def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypatch):
     """The failure list is what makes the summary actionable rather than
     merely countable - a run reporting "1 error(s)" and nothing else sends
@@ -11168,7 +11181,10 @@ CONTRACT_FIXTURES = Path(__file__).resolve().parent / "contract_fixtures"
 
 def _contract_grid(tmp_path):
     """Every lifecycle case the upload page shows, across two batches and one unbatched row."""
-    for name in ("photo1.jpg", "photo2.jpg", "photo4.jpg", "photo5.jpg", "photo6.jpg", "photo7.jpg"):
+    for name in (
+        "photo1.jpg", "photo2.jpg", "photo4.jpg", "photo5.jpg", "photo6.jpg", "photo7.jpg",
+        "photo10.jpg",
+    ):
         (tmp_path / name).write_bytes(b"x")
     return [
         BATCH_SHEET_HEADER,
@@ -11183,6 +11199,8 @@ def _contract_grid(tmp_path):
         ],
         ["Seventh photo", "photo7.jpg", "lcps-astoriaphotos-00002", "", "", "", "Logging"],
         ["", "photo9.jpg", "", "", "", "", "Fishing"],
+        ["", "photo10.jpg", "", "", "", "", "Logging"],
+        ["", "photo11.jpg", "", "", "", "", "Logging"],
     ]
 
 
@@ -11223,21 +11241,24 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["valid"] is False
     assert document["rows"] is None
     assert document["counts"] == {
-        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 2},
+        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4},
         "done": {"ready": 1, "invalid": 0, "not_ready": 0},
         "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
     }
     # Row 9 is not-ready (blank title) AND broken (unresolvable file), and not_ready
     # beats invalid - it must not also be counted as invalid.
     assert document["counts"]["unassigned"]["invalid"] == 1
-    assert document["rows_with_errors"] == [4, 9]
+    assert document["rows_with_errors"] == [4, 9, 11]
+    assert document["ready_to_upload"] == 4
     assert [batch["value"] for batch in document["batches"]] == ["Fishing", "Logging"]
     assert document["batches"][0]["counts"]["unassigned"] == {"ready": 1, "invalid": 0, "not_ready": 2}
+    assert document["batches"][0]["ready_to_upload"] == 1
     assert document["batches"][1]["counts"] == {
-        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 0},
+        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2},
         "done": {"ready": 1, "invalid": 0, "not_ready": 0},
         "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
     }
+    assert document["batches"][1]["ready_to_upload"] == 2
 
 
 def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, monkeypatch, capsys):
@@ -11259,11 +11280,16 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
         (4, "unassigned", "invalid"),
         (7, "done", "ready"),
         (8, "reserved", "ready"),
+        (10, "unassigned", "not_ready"),
+        (11, "unassigned", "not_ready"),
     ]
     assert document["rows"][1]["errors"] != []
     assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
+    assert document["rows"][4]["missing_fields"] == ["title"]
+    assert document["rows"][5]["errors"] != []
     # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
-    assert document["rows_with_errors"] == [4]
+    assert document["rows_with_errors"] == [4, 11]
+    assert document["ready_to_upload"] == 2
 
 
 def test_validate_json_matches_the_contract_fixtures(tmp_path, monkeypatch, capsys):

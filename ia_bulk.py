@@ -271,6 +271,11 @@ class RowValidation:
         return UploadVerdict.READY if self.is_valid else UploadVerdict.INVALID
 
 
+def is_upload_target(state: RowState, verdict: UploadVerdict) -> bool:
+    """The one rule for which rows `upload` sends: ready, and not already uploaded."""
+    return verdict is UploadVerdict.READY and state is not RowState.DONE
+
+
 def validate_rows(
     rows: list[dict[str, str]],
     files_dir: str | Path,
@@ -548,7 +553,7 @@ def build_lifecycle_report(
     """row_results must be validate_rows()'s own output for these rows, in the same order."""
     if len(rows) != len(row_results):
         raise ValueError(
-            f"format_lifecycle_summary: got {len(rows)} row(s) but {len(row_results)} "
+            f"build_lifecycle_report: got {len(rows)} row(s) but {len(row_results)} "
             "row_results - they must be the same length, in the same order. Pass "
             "validate_rows()'s own return value here, not the combined report (which "
             "also carries sheet_structure_validation()'s row-1/shape entries)."
@@ -685,6 +690,11 @@ def lifecycle_counts_json(report: LifecycleReport) -> dict[str, dict[str, int]]:
     }
 
 
+def ready_to_upload_count(report: LifecycleReport) -> int:
+    """How many of this report's rows `upload` would send - see is_upload_target."""
+    return sum(1 for entry in report.entries if is_upload_target(entry.state, entry.result.verdict))
+
+
 def validate_json(
     *,
     project_id: str,
@@ -706,11 +716,16 @@ def validate_json(
         "rows_with_errors": [
             entry.result.row_number for entry in report.entries if entry.result.errors
         ],
+        "ready_to_upload": ready_to_upload_count(report),
         "counts": lifecycle_counts_json(report),
         "batches": None
         if batches is None
         else [
-            {"value": group.value, "counts": lifecycle_counts_json(group_report)}
+            {
+                "value": group.value,
+                "ready_to_upload": ready_to_upload_count(group_report),
+                "counts": lifecycle_counts_json(group_report),
+            }
             for group, group_report in batches
         ],
         "rows": None
@@ -1885,7 +1900,7 @@ def validate_sheet_grid(
 ) -> tuple[list[RowValidation], list[RowValidation]]:
     """Returns (header_results, row_results). row_results holds exactly one
     entry per row in `rows`, in the same order - which is what
-    format_lifecycle_summary requires and what lets a caller pair a row with
+    build_lifecycle_report requires and what lets a caller pair a row with
     its verdict by index.
 
     A structural problem with one specific data row (a long row) belongs IN
@@ -2147,7 +2162,9 @@ def batch_lifecycle_reports(
     row_results: list[RowValidation],
 ) -> list[tuple[BatchGroup, LifecycleReport]] | None:
     """Each batch's lifecycle, for validate --json's picker; None when the project names no
-    batch column. A column the Sheet lacks is refused, as --batch refuses it."""
+    batch column. A column the Sheet lacks is refused, as --batch refuses it.
+
+    rows and row_results must be the full, un-narrowed lists; row numbers are positional."""
     column = config.batch_column
     if column is None:
         return None
@@ -2650,7 +2667,7 @@ def run_validate(args, json_out: TextIO | None) -> int:
 
     # `validate` previews what `upload` would do, so it must narrow to the
     # same rows through the same function. Rows and results are filtered as
-    # PAIRS: format_lifecycle_summary requires one result per row in the same
+    # PAIRS: build_lifecycle_report requires one result per row in the same
     # order and checks the lengths, and the row numbers on the results are
     # still the Sheet's own, so a report still names the row an operator has
     # to go and edit.
@@ -3192,14 +3209,12 @@ def plan_upload_targets(
 
     pending: list[tuple[int, dict[str, str], RowState]] = []
     for offset, (row, result) in enumerate(zip(rows, row_results)):
-        # Not is_valid alone: an uncatalogued row is valid but NOT_READY, and uploading it
-        # mints a permanent identifier with no title and a blank `file` (see upload_row).
-        if result.verdict is not UploadVerdict.READY:
-            continue
         if scope is not None and offset + 2 not in scope:
             continue
         state = classify_row(row)
-        if state is RowState.DONE:
+        # Not is_valid alone: an uncatalogued row is valid but NOT_READY, and uploading it
+        # mints a permanent identifier with no title and a blank `file` (see upload_row).
+        if not is_upload_target(state, result.verdict):
             continue
         pending.append((offset + 2, row, state))
 

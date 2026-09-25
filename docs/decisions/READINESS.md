@@ -216,7 +216,8 @@ one JSON document instead.
 - **stdout is the document and nothing else.** The timestamp line, the
   banner and every refusal go to stderr. A refusal prints no JSON and
   exits 1. Otherwise the exit code is the text report's: 1 when any row
-  fails validation, which `valid` also says.
+  fails validation, which `valid` also says. A non-empty `sheet_errors`
+  means `upload` refuses the whole run, whichever batch is chosen.
 - **`rows_with_errors` explains `valid`.** A row can be not yet catalogued
   and broken at once (a blank title and a filename that doesn't resolve);
   it counts under `not_ready`, so no `invalid` count would show it.
@@ -225,14 +226,18 @@ one JSON document instead.
   `rows_with_errors` is non-empty.
 - **The code's own vocabulary.** Counts are keyed by the row states
   (`unassigned`, `done`, `reserved`) and verdicts (`ready`, `invalid`,
-  `not_ready`), all nine always present. "Ready to upload" is
-  `unassigned.ready + reserved.ready`: a stopped run leaves reserved rows
-  that the next run uploads under the identifiers they already have.
+  `not_ready`), all nine always present. `ready_to_upload` (overall, and
+  per batch) is what `upload` would send: ready rows not yet uploaded,
+  reserved ones included, by the same rule `upload` uses
+  (`is_upload_target`).
 - **Detail only where it is used.** Without `--batch`: counts overall and
   per batch, for the picker. With `--batch`: that batch's counts and every
   row with its errors and missing fields, for the preview. A project with
   no `batch_column` gets `"batches": null`; a `batch_column` the Sheet
-  lacks is refused, as `--batch` refuses it.
+  lacks is refused, as `--batch` refuses it. Each entry in a row's `errors`
+  is the operator-facing message for one problem; they are not grouped by
+  kind, so a preview lists each broken row with its own message and groups
+  only not-ready rows, by missing field.
 - **Versioned and pinned.** `format` is bumped when a field changes
   meaning or disappears; adding a field is not a break.
   `contract_fixtures/validate-all.json` and `validate-batch.json` are
