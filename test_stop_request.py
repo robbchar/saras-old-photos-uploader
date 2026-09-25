@@ -141,10 +141,16 @@ def test_request_stop_makes_a_real_child_stop_gracefully(tmp_path):
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     child = subprocess.Popen([sys.executable, str(child_py)], creationflags=flags)
     try:
-        time.sleep(1.0)  # let the handler install
+        # Known, accepted trade-off (carried from the brief): a fixed sleep to let the
+        # child's signal handler install before we signal it. Flaky-in-theory, not
+        # worth replacing with a readiness handshake for a one-shot integration test.
+        time.sleep(1.0)
         stop_request.request_stop(child.pid)
         child.wait(timeout=10)
         assert marker.read_text() == "stopped"
     finally:
-        if child.poll() is None:
-            child.terminate()
+        # Unconditional kill+wait (matches test_upload_lock.py:215-217): reaps the
+        # child even when the wait above already timed out, so this can never leave
+        # a zombie/defunct process behind.
+        child.kill()
+        child.wait(timeout=10)
