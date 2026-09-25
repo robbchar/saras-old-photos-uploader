@@ -1,11 +1,18 @@
+import os
 import signal
+import subprocess
+import sys
 import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import stop_request
 from stop_request import stop_request_on_interrupt
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 def test_nothing_is_requested_until_an_interrupt_arrives():
@@ -107,3 +114,37 @@ def test_on_windows_the_previous_break_handler_comes_back_afterwards():
         assert signal.getsignal(sigbreak) is not before
 
     assert signal.getsignal(sigbreak) is before
+
+
+def test_request_stop_sends_platform_signal(monkeypatch):
+    sent = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    stop_request.request_stop(4321)
+    expected = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
+    assert sent == [(4321, expected)]
+
+
+def test_request_stop_makes_a_real_child_stop_gracefully(tmp_path):
+    marker = tmp_path / "marker.txt"
+    child_py = tmp_path / "child.py"
+    child_py.write_text(
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(PROJECT_ROOT)!r})\n"
+        "import stop_request\n"
+        "with stop_request.stop_request_on_interrupt() as stop:\n"
+        "    for _ in range(200):\n"
+        "        if stop.requested:\n"
+        f"            open({str(marker)!r}, 'w').write('stopped'); break\n"
+        "        time.sleep(0.05)\n",
+        encoding="ascii",
+    )
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    child = subprocess.Popen([sys.executable, str(child_py)], creationflags=flags)
+    try:
+        time.sleep(1.0)  # let the handler install
+        stop_request.request_stop(child.pid)
+        child.wait(timeout=10)
+        assert marker.read_text() == "stopped"
+    finally:
+        if child.poll() is None:
+            child.terminate()
