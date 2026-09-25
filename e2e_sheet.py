@@ -14,6 +14,8 @@ from project_config import PLACEHOLDER_SHEET_ID_FORM, is_placeholder_sheet_id
 from sheet_client import SheetClient, column_letter, quote_tab
 
 E2E_PROJECT = "e2e"
+# Present only while a rehearsal runs; e2e_lock owns it.
+LOCK_TAB = "E2E Lock"
 
 
 class ResetRefused(Exception):
@@ -80,6 +82,8 @@ def check_reset_allowed(
     # The reset deletes the log tabs; one named like the data tab would take the data tab with it.
     if target.data_tab in target.log_tabs:
         raise ResetRefused(f"'{project}' names the data tab '{target.data_tab}' as a log tab")
+    if LOCK_TAB in (target.data_tab, *target.log_tabs):
+        raise ResetRefused(f"'{project}' names a tab '{LOCK_TAB}', the tab that holds the rehearsal lock")
 
     live_ids = {
         str(live_block.get("sheet_id") or "").strip()

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from e2e_sheet import (
+    LOCK_TAB,
     E2ESheet,
     ResetRefused,
     check_reset_allowed,
@@ -108,6 +109,14 @@ def test_guard_refuses_a_log_tab_named_like_the_data_tab(tmp_path, key):
     e2e_path, live_path = write_registries(tmp_path, e2e_block(**{key: "Test Sheet"}), {})
 
     with pytest.raises(ResetRefused, match="as a log tab"):
+        check_reset_allowed(e2e_path, live_path)
+
+
+@pytest.mark.parametrize("key", ["sheet_tab", "upload_log_tab", "sync_log_tab"])
+def test_guard_refuses_a_tab_named_like_the_lock_tab(tmp_path, key):
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(**{key: LOCK_TAB}), {})
+
+    with pytest.raises(ResetRefused, match="rehearsal lock"):
         check_reset_allowed(e2e_path, live_path)
 
 
