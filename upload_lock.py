@@ -9,6 +9,7 @@ import errno
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,6 +20,9 @@ UPLOAD_LOCK_PATH = Path(__file__).resolve().parent / "logs" / "upload.lock"
 # Covers running_upload()'s momentary probe and Windows' delayed release of a dead process's lock.
 ACQUIRE_ATTEMPTS = 20
 ACQUIRE_RETRY_SECONDS = 0.1
+
+# Serializes in-process probes: two probes racing the OS lock could otherwise see each other's momentary hold.
+_PROBE_LOCK = threading.Lock()
 
 if sys.platform == "win32":
     import msvcrt
@@ -121,17 +125,18 @@ def acquire(lock_path: Path, holder: LockHolder) -> HeldUploadLock:
 
 def running_upload(lock_path: Path) -> RunningUpload | None:
     """Which upload holds the lock, if any; takes it for an instant to find out."""
-    try:
-        fd = os.open(lock_path, os.O_RDWR)
-    except FileNotFoundError:
-        return None
-    try:
-        if _try_lock(fd):
-            _unlock(fd)
+    with _PROBE_LOCK:
+        try:
+            fd = os.open(lock_path, os.O_RDWR)
+        except FileNotFoundError:
             return None
-        return RunningUpload(_read_holder(lock_path))
-    finally:
-        os.close(fd)
+        try:
+            if _try_lock(fd):
+                _unlock(fd)
+                return None
+            return RunningUpload(_read_holder(lock_path))
+        finally:
+            os.close(fd)
 
 
 def _lock_with_retries(fd: int) -> bool:

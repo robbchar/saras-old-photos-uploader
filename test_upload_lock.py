@@ -106,6 +106,27 @@ def test_running_upload_names_the_holder_and_lets_go(lock_path, no_retry):
     assert upload_lock.running_upload(lock_path) is None
 
 
+def test_overlapping_probes_never_report_a_phantom_upload(lock_path):
+    """Two in-process probes landing in the same instant must not see each other's momentary hold."""
+    upload_lock.acquire(lock_path, HOLDER).release()
+    results: list[RunningUpload | None] = []
+    results_lock = threading.Lock()
+
+    def probe_repeatedly() -> None:
+        for _ in range(2000):
+            result = upload_lock.running_upload(lock_path)
+            with results_lock:
+                results.append(result)
+
+    threads = [threading.Thread(target=probe_repeatedly) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert results == [None] * len(results)
+
+
 def test_a_holder_record_left_by_a_crashed_run_is_ignored(lock_path):
     lock_path.parent.mkdir(parents=True)
     lock_path.touch()
