@@ -198,6 +198,18 @@ def _load_registry(registry_path: str) -> dict:
         return json.load(handle)
 
 
+def _last_nonempty_line(text: str) -> str | None:
+    """The last non-blank line of `text`, or None when every line is blank.
+
+    Used to pick validate's most relevant refusal reason out of stderr --
+    validate may print several diagnostic lines before the one that
+    actually explains why it produced no stdout.
+    """
+    lines = [line.strip() for line in text.splitlines()]
+    non_empty = [line for line in lines if line]
+    return non_empty[-1] if non_empty else None
+
+
 def _test_collection() -> str:
     """ia_bulk.TEST_COLLECTION, fetched lazily so this module never imports
     ia_bulk at load time (ia_bulk imports upload_server at ITS module top,
@@ -336,6 +348,10 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             self._handle_health()
         elif path == "/api/status":
             self._handle_status()
+        elif path == "/api/themes":
+            self._handle_themes()
+        elif path == "/api/preview":
+            self._handle_preview()
         elif path.startswith("/api/"):
             self._send_error(404, f"no such route: {path}")
         else:
@@ -381,6 +397,68 @@ class UploadPageHandler(BaseHTTPRequestHandler):
                 "run": run_state.to_json(),
             },
         )
+
+    def _validate_argv(self, batch: str | None = None) -> list[str]:
+        """Builds the real `validate --json` command line.
+
+        The default run_validate just runs argv verbatim (see
+        _default_run_validate's docstring) -- this is the one place that
+        turns "run validate" into the actual
+        `python ia_bulk.py validate --project P --registry R [--live]
+        [--batch=value] --json` command a real run_validate executes.
+        `--batch` is passed in equals form so a value starting with `-`
+        (e.g. `-weird`) is never mistaken for a flag by argparse.
+        """
+        config = self.app_server.config
+        argv = [
+            sys.executable,
+            "ia_bulk.py",
+            "validate",
+            "--project",
+            config.project,
+            "--registry",
+            config.registry,
+        ]
+        if config.live:
+            argv.append("--live")
+        if batch is not None:
+            argv.append(f"--batch={batch}")
+        argv.append("--json")
+        return argv
+
+    def _handle_themes(self) -> None:
+        stdout, stderr, _returncode = self.app_server.deps.run_validate(self._validate_argv())
+        self._respond_with_validate_output(stdout, stderr)
+
+    def _handle_preview(self) -> None:
+        query = urllib.parse.urlsplit(self.path).query
+        values = urllib.parse.parse_qs(query).get("batch")
+        batch = values[0] if values else ""
+        if not batch:
+            self._send_error(400, "batch is required")
+            return
+        stdout, stderr, _returncode = self.app_server.deps.run_validate(self._validate_argv(batch))
+        self._respond_with_validate_output(stdout, stderr)
+
+    def _respond_with_validate_output(self, stdout: str, stderr: str) -> None:
+        """Empty stdout is the refusal signal -- never the exit code.
+
+        Nearly every real Sheet exits 1 because some row is broken, so a
+        non-zero returncode is normal and carries no meaning here; only an
+        empty (or whitespace-only) stdout means validate refused to run at
+        all. On success, stdout is forwarded VERBATIM as the response body
+        -- never parsed and re-serialized -- so the page's zod validates
+        the exact document `validate --json` produced.
+        """
+        if not stdout.strip():
+            self._send_error(502, _last_nonempty_line(stderr) or "validate refused")
+            return
+        body = stdout.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_static(self, path: str) -> None:
         """Serves a file under page_dir/dist; `/` maps to index.html.

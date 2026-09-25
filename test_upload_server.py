@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ import page_runs
 import upload_server
 
 PROJECT = "astoriaphotos"
+FIXTURES = Path(__file__).resolve().parent / "contract_fixtures"
 
 
 def _get(url: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
@@ -296,6 +298,145 @@ def test_status_reports_finished_state(tmp_path, monkeypatch):
             "ending": {"kind": "completed", "summary": {"uploaded": 5}},
             "page_run": None,
         }
+
+
+# ---------------------------------------------------------------------------
+# /api/themes and /api/preview
+# ---------------------------------------------------------------------------
+
+
+def test_themes_passes_validate_json_through(tmp_path):
+    all_doc = (FIXTURES / "validate-all.json").read_text(encoding="utf-8")
+    deps = _fake_deps(run_validate=lambda argv: (all_doc, "12:00 checked\n", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _get(base + "/api/themes")
+        assert status == 200
+        assert json.loads(body) == json.loads(all_doc)  # exact contract pass-through
+
+
+def test_themes_response_content_type_is_json(tmp_path):
+    all_doc = (FIXTURES / "validate-all.json").read_text(encoding="utf-8")
+    deps = _fake_deps(run_validate=lambda argv: (all_doc, "", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        request = urllib.request.Request(base + "/api/themes")
+        response = urllib.request.urlopen(request)
+        assert response.headers.get("Content-Type") == "application/json"
+
+
+def test_themes_builds_the_real_validate_argv(tmp_path):
+    seen = {}
+
+    def fake(argv):
+        seen["argv"] = argv
+        return ("{}", "", 0)
+
+    deps = _fake_deps(run_validate=fake)
+    cfg = _make_config(tmp_path, project=PROJECT, live=False)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        _get(base + "/api/themes")
+    # The DEFAULT run_validate does `subprocess.run(argv, ...)` verbatim --
+    # this route is responsible for the full real command (see
+    # upload_server._default_run_validate's docstring).
+    assert seen["argv"][0] == upload_server.sys.executable
+    assert seen["argv"][1:4] == ["ia_bulk.py", "validate", "--project"]
+    assert "--registry" in seen["argv"]
+    assert "--json" in seen["argv"]
+    assert "--live" not in seen["argv"]
+    assert "--batch" not in " ".join(seen["argv"])
+
+
+def test_themes_adds_live_flag_when_configured_live(tmp_path):
+    seen = {}
+
+    def fake(argv):
+        seen["argv"] = argv
+        return ("{}", "", 0)
+
+    deps = _fake_deps(run_validate=fake)
+    cfg = _make_config(tmp_path, project=PROJECT, live=True)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        _get(base + "/api/themes")
+    assert "--live" in seen["argv"]
+
+
+def test_preview_passes_validate_json_through(tmp_path):
+    batch_doc = (FIXTURES / "validate-batch.json").read_text(encoding="utf-8")
+    deps = _fake_deps(run_validate=lambda argv: (batch_doc, "", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _get(base + "/api/preview?batch=logging")
+        assert status == 200
+        assert json.loads(body) == json.loads(batch_doc)  # exact contract pass-through
+
+
+def test_preview_sends_batch_in_equals_form(tmp_path):
+    seen = {}
+    batch_doc = (FIXTURES / "validate-batch.json").read_text(encoding="utf-8")
+
+    def fake(argv):
+        seen["argv"] = argv
+        return (batch_doc, "", 1)
+
+    deps = _fake_deps(run_validate=fake)
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        _get(base + "/api/preview?batch=" + urllib.parse.quote("-weird"))
+    assert "--batch=-weird" in seen["argv"]
+
+
+def test_preview_missing_batch_is_400(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/preview")
+        assert status == 400
+        assert json.loads(body) == {"error": "batch is required"}
+
+
+def test_preview_empty_batch_value_is_400(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/preview?batch=")
+        assert status == 400
+        assert json.loads(body) == {"error": "batch is required"}
+
+
+def test_empty_stdout_is_refusal_502(tmp_path):
+    deps = _fake_deps(run_validate=lambda argv: ("", "sheet_id is a placeholder\n", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _get(base + "/api/themes")
+        assert status == 502
+        assert json.loads(body)["error"] == "sheet_id is a placeholder"
+
+
+def test_whitespace_only_stdout_is_refusal_502(tmp_path):
+    deps = _fake_deps(run_validate=lambda argv: ("   \n", "row 4 is broken\n", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _get(base + "/api/themes")
+        assert status == 502
+        assert json.loads(body)["error"] == "row 4 is broken"
+
+
+def test_empty_stdout_and_stderr_uses_fallback_message(tmp_path):
+    deps = _fake_deps(run_validate=lambda argv: ("", "", 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _get(base + "/api/themes")
+        assert status == 502
+        assert json.loads(body)["error"] == "validate refused"
+
+
+def test_empty_stdout_reason_is_last_nonempty_stderr_line(tmp_path):
+    stderr = "warming up...\n\nsheet_id is a placeholder\n"
+    deps = _fake_deps(run_validate=lambda argv: ("", stderr, 1))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status, body = _get(base + "/api/themes")
+        assert status == 502
+        assert json.loads(body)["error"] == "sheet_id is a placeholder"
 
 
 # ---------------------------------------------------------------------------
