@@ -226,6 +226,15 @@ A row is chosen for this run based on its own two tool-owned columns
 `ia_uploaded` means retry under the existing identifier (crash recovery,
 never re-mint), both set means skip entirely.
 
+### One run at a time
+
+The protocol assumes a run owns the rows it reserved until it confirms them.
+A second run would read those rows as RESERVED and retry them under the same
+identifiers mid-upload, so `cmd_upload` holds `upload_lock`'s OS lock for the
+whole run and refuses to start while another run holds it (`--dry-run`
+excepted). See `decisions/QUOTA-AND-RUNS.md`, "One upload runs at a time,
+enforced by `upload`".
+
 ## Chunking
 `upload` processes targets in batches of 500 (IA's per-run batch
 limit) by default, via `chunk_rows()`. This is a real checkpoint boundary:

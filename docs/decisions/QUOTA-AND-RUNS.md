@@ -613,3 +613,64 @@ flip the exit code on a re-run of a correct CSV — which matters because
 sync logs the row as `unchanged`, counts it in `SyncSummary`, and stamps
 `ia_sync_hash` as for a real change (see "A row pushes only when its content
 changed").
+
+## One upload runs at a time, enforced by `upload`
+
+*Decided 2026-09-24 (#72).*
+
+Nothing used to stop two `upload` runs at once. A row with an
+`ia_identifier` but no `ia_uploaded` is RESERVED, and a run retries a
+RESERVED row under its existing identifier; `check_claimed_identifiers` only
+checks newly minted ones. So a second run that read the Sheet after the first
+had reserved a chunk would upload those rows again, under the same permanent
+identifiers, while the first was still uploading them. That took two
+terminals. The local upload page (#29) would make it one more click, so the
+rule lives in `upload` itself, where it covers the terminal and the page
+alike.
+
+`upload` takes an OS file lock (`upload_lock.py`) before it reads anything
+and holds it for the whole run. A second run exits 1 before any Sheet read
+and before its log opens, naming the run that holds the lock.
+
+- **An OS lock, not a pid file.** The OS releases it when the process dies,
+  however it dies — a crash, a kill, the Mac losing power — so there is no
+  stale lock to clear and no cleanup step to document. On the Mac it is
+  `flock`, not `lockf`: a process drops `lockf` locks when it closes *any*
+  descriptor for the file, a probe's included. On Windows it is
+  `msvcrt.locking`.
+- **One fixed path per checkout**, `.ignored/upload.lock` in the checkout's
+  gitignored local-only area, never under `--log-dir` and never in `logs/`.
+  Page runs will log to per-run folders, and a lock there would not see a
+  terminal run. `logs/` is the folder the runbook tells operators to empty,
+  and on the Mac a lock file deleted mid-run excludes no one: the running
+  upload keeps its lock on the deleted file, and the next run creates and
+  locks a new one. `.ignored/` is where the project keeps local-only files
+  (see the repo `CLAUDE.md`), out of the way of both `rm logs/*` and Finder.
+  Two clones don't see each other's lock; the Mac has one operating checkout,
+  so that is accepted.
+- **One lock for every upload**, whatever the project or mode. Test and live
+  runs read different Sheets, but they spend the same account's IA quota, and
+  a rule without exceptions needs no explaining at the moment it refuses.
+- **Who holds it is recorded beside it**, in `upload.holder.json` beside
+  it: pid, UTC start, project, batch, mode. It is a separate file because
+  Windows locks are mandatory: no other process can read a locked byte. A
+  record left by a crashed run is ignored, since the lock itself is free,
+  and the next run overwrites it.
+- **`running_upload()` asks "is one running?" without keeping the lock.** It
+  takes the lock for an instant and lets go, so `acquire()` retries for about
+  five seconds before refusing. The same window covers Windows releasing a
+  dead process's lock after a delay (the dead-process test shows it can need
+  ~5s). A real refusal therefore takes a few seconds to arrive. A lock held
+  for only that instant with no holder record beside it is read as free, not
+  as a run: only `acquire()` writes a record.
+- **Only `upload` takes it.** `--dry-run` writes nothing and may preview
+  while a run is going; `validate` only reads; `sync-metadata` touches only
+  finished rows. The opt-in e2e rehearsal runs `upload` as a real process, so
+  it takes this checkout's lock like any other run; the suite's own tests
+  point the lock at a temporary folder.
+
+The Windows branch is exercised by the suite on the dev box, including a real
+cross-process lock (`test_a_lock_held_by_another_process...`); the `flock`
+branch runs only against a fake `fcntl` there, since the Mac never runs
+pytest. Two terminals running `upload` on the Mac is its real check, so it is a
+pre-live gate in [`OPERATIONS.md`](../OPERATIONS.md#pre-live-checklist).

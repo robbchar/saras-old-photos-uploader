@@ -306,6 +306,13 @@ overrides it, and is only correct if you know IA has raised this account's
 cap. The refusal applies in test mode too: a rehearsal uploads through the
 same account and spends the same quota.
 
+**One upload at a time.** A run refuses to start while another upload is
+running from the same checkout, and names it (project, batch, mode, start
+time), because two runs at once can upload the same rows twice. The lock is
+the operating system's, so it goes away with the process that held it, even
+one that crashed. `--dry-run` doesn't take it. See
+[`docs/decisions/QUOTA-AND-RUNS.md`](docs/decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload).
+
 Other behavior:
 
 - Processes rows in chunks of 500 by default (Internet
