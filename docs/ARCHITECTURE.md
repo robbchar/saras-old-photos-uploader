@@ -622,6 +622,50 @@ stamps `ia_sync_hash` as for a real change — subject to the same late
 identity check (`_verified`) — so a row that's already correct doesn't
 inflate the error count or flip the exit code.
 
+## `serve` and the upload page
+
+The `serve` subcommand (see [`README.md`](../README.md), "`serve`", for the
+full command) runs a small stdlib HTTP server that serves the committed
+React bundle in `upload_page/dist/` and a JSON API the page polls and
+drives. The server holds no rules of its own: every button on the page runs
+a real `validate`/`upload` subprocess (`[sys.executable, "ia_bulk.py", ...]`,
+from the repo root) and reads back what that command already writes —
+`validate --json`'s document, and the upload's own JSONL log — rather than
+reimplementing any of the pipeline's decisions. See
+[`DECISIONS.md`](decisions/UPLOAD-PAGE.md) for why the page is built this
+way, and for its request guard and run-state model in full.
+
+- **`upload_server.py`** — the HTTP server: routing, the request guard
+  (Host/Origin/Content-Type, every one rejecting a request before it reaches
+  a route), static file serving for the bundle, the `/api/*` routes
+  (`health`, `status`, `themes`, `preview`, starting and stopping a run, and
+  the `/api/runs/current/output` Server-Sent-Events stream), and the
+  subprocess plumbing that actually runs `validate`/`upload`. Bound to
+  `127.0.0.1` only. Every side effect (running a command, spawning the
+  upload child, sending it a stop, reading the clock, reading the checkout's
+  commit) is a field on one `ServerDeps` dataclass, each with a real
+  default, so a test overrides only the one it is exercising.
+- **`page_runs.py`** — pure disk logic, no HTTP and no subprocess spawning:
+  the per-run folder layout under `logs/page-runs/<UTC>/` (`page-run.json`,
+  `output.txt`, the run's own `upload-*.jsonl`), reading a run's live
+  progress and how it ended, and `compute_run_state()`, which derives what
+  the page should show from the upload lock plus the newest run folder
+  alone — see
+  [`DECISIONS.md`, "The run-state model"](decisions/UPLOAD-PAGE.md#the-run-state-model).
+- **`build_stamp.py`** — computes a content-hash "stamp" over the
+  front-end's build inputs (`index.html`, `package.json`, `yarn.lock`, the
+  TypeScript/Vite/Vitest configs, everything under `upload_page/src/`), so
+  the server can tell whether the committed `dist/` bundle actually matches
+  its source without needing Node installed to rebuild it and check.
+  `upload_page/scripts/build-stamp.mjs` computes the same stamp on the Node
+  side at build time — the two must agree byte for byte — and a pytest
+  guard (`test_committed_bundle_is_current` in `test_build_stamp.py`) fails
+  the suite whenever they have drifted.
+- **`upload_page/`** — the Vite/React/TypeScript page itself, with its
+  built `dist/` committed to the repo, since the Mac this server runs on has
+  no Node. See [`upload_page/README.md`](../upload_page/README.md) for the
+  dev loop and where its design tokens live.
+
 ## Safety rail
 Default target is `test_collection`; `--live` is required to target the
 real collection and use the real identifier as-is. When not `--live`,
