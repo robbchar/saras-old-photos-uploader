@@ -1,9 +1,329 @@
-// Placeholder shell -- later tasks add the zod schemas, reducer, and real
-// components that read/write upload_server.py's /api routes.
-export default function App() {
+// Wires the state machine (state/reducer.ts) to the outside world: the
+// REST/SSE client (api/client.ts) and the browser (timers, EventSource,
+// window.location). Every other component in src/components is purely
+// presentational - this is the one place that performs I/O and the one
+// place that dispatches the Actions those side effects produce.
+
+import { useEffect, useReducer, useRef, useState } from "react";
+import {
+  getHealth,
+  getPreview,
+  getStatus,
+  getThemes,
+  openOutput,
+  startRun,
+  stopRun,
+  type OutputHandlers,
+} from "./api/client";
+import type { AppState, TerminalRunHolder } from "./state/types";
+import { reducer } from "./state/reducer";
+import { Header } from "./components/Header";
+import { ThemePicker } from "./components/ThemePicker";
+import { Preview } from "./components/Preview";
+import { StartDialog } from "./components/StartDialog";
+import { RunningOutput } from "./components/RunningOutput";
+import { Finished } from "./components/Finished";
+import { LiveRegion } from "./components/LiveRegion";
+
+/** How often the page checks whether a newer build has been deployed. A
+ * fresh `bundle_stamp` means the server was restarted with new code - the
+ * only fix is a hard reload, since this is a single-page app with no
+ * client-side update mechanism of its own. */
+const HEALTH_POLL_INTERVAL_MS = 10_000;
+
+interface PageIdentity {
+  project: string;
+  collection: string;
+  live: boolean;
+}
+
+/** Turns any error a fetch/SSE call can throw into operator-facing text.
+ * `Event` covers EventSource's connection-level errors (a real DOM Event,
+ * not an Error) - see OutputHandlers.onError in api/client.ts. */
+function describeError(error: unknown): string {
+  if (error instanceof Event) {
+    return "Lost the connection to the server.";
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function announcementFor(state: AppState): string {
+  switch (state.kind) {
+    case "loading":
+      return "Loading";
+    case "choosing":
+      return state.themes === null ? "Loading themes" : "Choose a theme";
+    case "checking":
+      return "Checking preview";
+    case "previewed":
+      return "Preview ready";
+    case "confirming":
+      return "Preview ready";
+    case "running":
+      return "Upload running";
+    case "stopping":
+      return "Stopping the upload";
+    case "finished":
+      return "Upload finished";
+    case "terminal-run":
+      return "Another run is already in progress";
+    case "error":
+      return `Error: ${state.message}`;
+    default: {
+      const exhaustiveCheck: never = state;
+      return exhaustiveCheck;
+    }
+  }
+}
+
+function TerminalRunView({ holder }: { holder: TerminalRunHolder }) {
   return (
-    <main>
-      <h1>Upload</h1>
+    <section className="rounded border border-border bg-surface p-4 text-text">
+      <p className="font-semibold">Another run is already in progress on this machine.</p>
+      {holder ? (
+        <p className="mt-2 text-muted">
+          {`Started ${holder.started_at} for "${holder.project}"${holder.batch ? ` (${holder.batch})` : ""}.`}
+        </p>
+      ) : (
+        <p className="mt-2 text-muted">Its details are not available from here.</p>
+      )}
+    </section>
+  );
+}
+
+export default function App() {
+  const [state, dispatch] = useReducer(reducer, { kind: "loading" });
+  const [identity, setIdentity] = useState<PageIdentity | null>(null);
+  const [lines, setLines] = useState<string[]>([]);
+  const eventSourceRef = useRef<ReturnType<typeof openOutput> | null>(null);
+  const rememberedBundleStampRef = useRef<string | null>(null);
+
+  // Mount, and every return trip through "loading" (Choose-another routes
+  // back here too - see the choose-another handler below) - fetch status
+  // and route to the matching screen. The reducer returns the *same*
+  // AppState reference for a no-op action, so this only re-fires when we
+  // are genuinely (re)entering "loading", not on every unrelated render.
+  useEffect(() => {
+    if (state.kind !== "loading") return;
+    let cancelled = false;
+    getStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setIdentity({ project: status.project, collection: status.collection, live: status.live });
+        dispatch({ type: "status/received", run: status.run });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) dispatch({ type: "error", message: describeError(error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
+  // Load the theme list the first time the picker is shown (including
+  // after Choose-another routes back through "loading" -> "choosing").
+  useEffect(() => {
+    if (state.kind !== "choosing" || state.themes !== null) return;
+    let cancelled = false;
+    getThemes()
+      .then((themes) => {
+        if (!cancelled) dispatch({ type: "themes/loaded", themes });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) dispatch({ type: "error", message: describeError(error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
+  // "checking" is entered both by picking a theme and by Re-check - one
+  // effect covers both, since both just mean "fetch a fresh preview for
+  // this batch".
+  useEffect(() => {
+    if (state.kind !== "checking") return;
+    let cancelled = false;
+    getPreview(state.batch)
+      .then((preview) => {
+        if (!cancelled) {
+          dispatch({ type: "preview/loaded", preview, checkedAt: new Date().toISOString() });
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) dispatch({ type: "preview/failed", message: describeError(error) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
+  // Close the output stream once a run is no longer active, and on
+  // unmount - never leave a dangling EventSource open.
+  useEffect(() => {
+    if (state.kind !== "running" && state.kind !== "stopping") {
+      eventSourceRef.current?.close();
+      eventSourceRef.current = null;
+    }
+  }, [state]);
+  useEffect(() => {
+    return () => eventSourceRef.current?.close();
+  }, []);
+
+  // Poll /api/health for a changed bundle_stamp - a new deploy - and hard
+  // reload when it changes. Independent of AppState: a stale bundle needs
+  // reloading no matter what screen is showing.
+  useEffect(() => {
+    let cancelled = false;
+    async function checkHealth() {
+      try {
+        const health = await getHealth();
+        if (cancelled) return;
+        if (rememberedBundleStampRef.current === null) {
+          rememberedBundleStampRef.current = health.bundle_stamp;
+        } else if (health.bundle_stamp !== rememberedBundleStampRef.current) {
+          window.location.reload();
+        }
+      } catch {
+        // A transient health-check failure isn't worth surfacing as an
+        // app-level error - the next poll tries again.
+      }
+    }
+    void checkHealth();
+    const intervalId = window.setInterval(checkHealth, HEALTH_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  function handleThemeSelect(batch: string) {
+    dispatch({ type: "theme/selected", batch });
+  }
+
+  function handleRecheck() {
+    dispatch({ type: "recheck/clicked" });
+  }
+
+  function subscribeToOutput() {
+    const handlers: OutputHandlers = {
+      onLine: (text) => setLines((previous) => [...previous, text]),
+      onProgress: (progress) => dispatch({ type: "sse/progress", ...progress }),
+      onFinished: (ending) => {
+        dispatch({ type: "sse/finished", ending });
+        eventSourceRef.current?.close();
+        eventSourceRef.current = null;
+      },
+      onError: (error) => dispatch({ type: "error", message: describeError(error) }),
+    };
+    eventSourceRef.current = openOutput(handlers);
+  }
+
+  // StartDialog's own Trigger opens/closes the confirmation UI entirely on
+  // its own (it is an uncontrolled Radix dialog - see StartDialog.tsx) -
+  // there is no moment for this component to observe separately from
+  // Confirm/Cancel themselves firing. So both handlers below dispatch
+  // "start/clicked" immediately before the action it gates: the reducer
+  // only accepts confirm/yes and confirm/cancel from "confirming", never
+  // from "previewed" directly (see reducer.test.ts's impossible-transition
+  // coverage), and React 18+ batches same-tick dispatches, so the
+  // intermediate "confirming" state is never actually painted - the user
+  // sees one continuous screen through the whole picker-to-running flow.
+  function handleConfirmStart(batch: string) {
+    dispatch({ type: "start/clicked" });
+    dispatch({ type: "confirm/yes" });
+    setLines([]);
+    startRun(batch)
+      .then(() => subscribeToOutput())
+      .catch((error: unknown) => dispatch({ type: "error", message: describeError(error) }));
+  }
+
+  function handleCancelStart() {
+    dispatch({ type: "start/clicked" });
+    dispatch({ type: "confirm/cancel" });
+  }
+
+  function handleStop() {
+    dispatch({ type: "stop/clicked" });
+    stopRun().catch((error: unknown) => dispatch({ type: "error", message: describeError(error) }));
+  }
+
+  function handleChooseAnother() {
+    setLines([]);
+    dispatch({ type: "choose-another/clicked" });
+  }
+
+  function renderBody() {
+    switch (state.kind) {
+      case "loading":
+        return <p className="text-muted">Loading…</p>;
+
+      case "choosing":
+        return state.themes === null ? (
+          <p className="text-muted">Loading themes…</p>
+        ) : (
+          <ThemePicker batches={state.themes.batches ?? []} onSelect={handleThemeSelect} />
+        );
+
+      case "checking":
+        return <p className="text-muted">Checking…</p>;
+
+      case "previewed":
+      case "confirming":
+        return (
+          <>
+            <Preview doc={state.preview} checkedAt={state.checkedAt} onRecheck={handleRecheck} />
+            <div className="mt-4">
+              <StartDialog
+                count={state.preview.ready_to_upload}
+                batch={state.batch}
+                live={identity?.live ?? false}
+                onConfirm={() => handleConfirmStart(state.batch)}
+                onCancel={handleCancelStart}
+              />
+            </div>
+          </>
+        );
+
+      case "running":
+      case "stopping":
+        return (
+          <RunningOutput
+            lines={lines}
+            done={state.done}
+            planned={state.planned}
+            stopping={state.kind === "stopping"}
+            onStop={handleStop}
+          />
+        );
+
+      case "finished":
+        return <Finished ending={state.ending} onChooseAnother={handleChooseAnother} />;
+
+      case "terminal-run":
+        return <TerminalRunView holder={state.holder} />;
+
+      case "error":
+        return (
+          <section role="alert" className="rounded border border-danger-border bg-danger-bg p-4 text-danger">
+            {state.message}
+          </section>
+        );
+
+      default: {
+        const exhaustiveCheck: never = state;
+        return exhaustiveCheck;
+      }
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-bg p-4">
+      {identity && <Header project={identity.project} collection={identity.collection} live={identity.live} />}
+      <div className="mt-4">{renderBody()}</div>
+      <LiveRegion message={announcementFor(state)} />
     </main>
   );
 }
