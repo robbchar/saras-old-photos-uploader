@@ -64,3 +64,9 @@ def test_bundle_is_current_false_when_stale(tmp_path):
     # Mutate a src file after the stamp was written; the stamp is now stale.
     (tmp_path / "src" / "a.ts").write_bytes(b"export const a = 2\n")
     assert build_stamp.bundle_is_current(tmp_path) is False
+
+
+def test_committed_bundle_is_current():
+    page_dir = Path(__file__).resolve().parent / "upload_page"
+    assert build_stamp.bundle_is_current(page_dir), (
+        "run `yarn build` in upload_page/ and commit dist/")
