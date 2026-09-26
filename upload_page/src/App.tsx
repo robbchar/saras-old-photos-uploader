@@ -28,13 +28,68 @@ import { LiveRegion } from "./components/LiveRegion";
 /** How often the page checks whether a newer build has been deployed. A
  * fresh `bundle_stamp` means the server was restarted with new code - the
  * only fix is a hard reload, since this is a single-page app with no
- * client-side update mechanism of its own. */
-const HEALTH_POLL_INTERVAL_MS = 10_000;
+ * client-side update mechanism of its own. Exported so App.test.tsx drives
+ * its fake timers off the same number instead of a hand-mirrored copy. */
+export const HEALTH_POLL_INTERVAL_MS = 10_000;
+
+/** How many of the most recent output lines to keep on screen. A run over
+ * ~10,000 photos can write far more lines than anyone will ever scroll
+ * back to; capping the buffer keeps both the array and the DOM it renders
+ * into bounded, without changing what the reader sees at the bottom. */
+const MAX_BUFFERED_LINES = 2000;
+
+function appendLineCapped(previous: string[], line: string): string[] {
+  const next = previous.length < MAX_BUFFERED_LINES ? [...previous, line] : [...previous.slice(1), line];
+  return next;
+}
 
 interface PageIdentity {
   project: string;
   collection: string;
   live: boolean;
+}
+
+// Resuming the output stream across a reload (see the resubscribe effect
+// below) needs to remember, per run, the last byte offset already shown -
+// sessionStorage survives a reload but not a closed tab, which matches a
+// run's own lifetime. Keyed by batch so a stale offset from a finished run
+// is never mistaken for the current one's.
+const OUTPUT_OFFSET_STORAGE_KEY = "upload-page:output-offset";
+
+interface StoredOutputOffset {
+  batch: string;
+  byteOffset: number;
+}
+
+function readStoredOffset(batch: string): number {
+  try {
+    const raw = window.sessionStorage.getItem(OUTPUT_OFFSET_STORAGE_KEY);
+    if (!raw) return 0;
+    const stored = JSON.parse(raw) as StoredOutputOffset;
+    return stored.batch === batch ? stored.byteOffset : 0;
+  } catch {
+    // Private browsing, disabled storage, or a malformed stored value -
+    // resuming from 0 (a full replay) is a safe fallback, not a crash.
+    return 0;
+  }
+}
+
+function writeStoredOffset(batch: string, byteOffset: number): void {
+  try {
+    const stored: StoredOutputOffset = { batch, byteOffset };
+    window.sessionStorage.setItem(OUTPUT_OFFSET_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // If storage isn't available, a reload just can't resume - it still
+    // reconnects and shows new output going forward.
+  }
+}
+
+function clearStoredOffset(): void {
+  try {
+    window.sessionStorage.removeItem(OUTPUT_OFFSET_STORAGE_KEY);
+  } catch {
+    // Nothing to clean up if storage was never writable.
+  }
 }
 
 /** Turns any error a fetch/SSE call can throw into operator-facing text.
@@ -161,7 +216,10 @@ export default function App() {
   }, [state]);
 
   // Close the output stream once a run is no longer active, and on
-  // unmount - never leave a dangling EventSource open.
+  // unmount - never leave a dangling EventSource open. This only ever
+  // closes; it can never fire in the same render as the resubscribe
+  // effect below, since that one only opens while state IS running or
+  // stopping, and this one only closes when it is neither.
   useEffect(() => {
     if (state.kind !== "running" && state.kind !== "stopping") {
       eventSourceRef.current?.close();
@@ -171,6 +229,23 @@ export default function App() {
   useEffect(() => {
     return () => eventSourceRef.current?.close();
   }, []);
+
+  // (Re)subscribe to the output stream for every path that lands on
+  // "running"/"stopping" - not just a fresh Confirm click. A page reload
+  // mid-run (including one this task's own health-reload effect triggers
+  // mid-upload), a second tab, or simply mounting while a run is already
+  // active (getStatus() -> page_run_active) all route straight into
+  // "running" with no EventSource of their own - without this effect,
+  // RunningOutput would render frozen (no lines, stale done/planned) and
+  // Stop would appear to do nothing. Guarded on eventSourceRef.current
+  // being null so a run already streaming is never resubscribed, and
+  // resumes from the last byte offset this browser saw for this batch
+  // (0 for a run this tab has never seen output from).
+  useEffect(() => {
+    if (state.kind !== "running" && state.kind !== "stopping") return;
+    if (eventSourceRef.current !== null) return;
+    ensureSubscribed(state.batch, readStoredOffset(state.batch));
+  }, [state]);
 
   // Poll /api/health for a changed bundle_stamp - a new deploy - and hard
   // reload when it changes. Independent of AppState: a stale bundle needs
@@ -207,18 +282,27 @@ export default function App() {
     dispatch({ type: "recheck/clicked" });
   }
 
-  function subscribeToOutput() {
+  // The single place an EventSource is ever opened - called from the
+  // resubscribe effect above for every entry into "running"/"stopping".
+  // Guarded so a run already streaming is never given a second connection.
+  function ensureSubscribed(batch: string, fromOffset: number) {
+    if (eventSourceRef.current !== null) return;
     const handlers: OutputHandlers = {
-      onLine: (text) => setLines((previous) => [...previous, text]),
+      onLine: (text, byteOffset) => {
+        writeStoredOffset(batch, byteOffset);
+        setLines((previous) => appendLineCapped(previous, text));
+      },
       onProgress: (progress) => dispatch({ type: "sse/progress", ...progress }),
       onFinished: (ending) => {
         dispatch({ type: "sse/finished", ending });
         eventSourceRef.current?.close();
         eventSourceRef.current = null;
+        clearStoredOffset();
+        setLines([]);
       },
       onError: (error) => dispatch({ type: "error", message: describeError(error) }),
     };
-    eventSourceRef.current = openOutput(handlers);
+    eventSourceRef.current = openOutput(handlers, fromOffset);
   }
 
   // StartDialog's own Trigger opens/closes the confirmation UI entirely on
@@ -229,15 +313,18 @@ export default function App() {
   // only accepts confirm/yes and confirm/cancel from "confirming", never
   // from "previewed" directly (see reducer.test.ts's impossible-transition
   // coverage), and React 18+ batches same-tick dispatches, so the
-  // intermediate "confirming" state is never actually painted - the user
-  // sees one continuous screen through the whole picker-to-running flow.
+  // intermediate "confirming" state is never actually painted - the Radix
+  // dialog IS the "confirming" screen, and the user sees one continuous
+  // view through the whole picker-to-running flow.
   function handleConfirmStart(batch: string) {
     dispatch({ type: "start/clicked" });
     dispatch({ type: "confirm/yes" });
     setLines([]);
-    startRun(batch)
-      .then(() => subscribeToOutput())
-      .catch((error: unknown) => dispatch({ type: "error", message: describeError(error) }));
+    clearStoredOffset();
+    // Only starts the run server-side; the resubscribe effect (state is
+    // "running" as soon as the dispatch above lands) opens the stream, so
+    // there is exactly one place that ever calls openOutput.
+    startRun(batch).catch((error: unknown) => dispatch({ type: "error", message: describeError(error) }));
   }
 
   function handleCancelStart() {
@@ -252,6 +339,7 @@ export default function App() {
 
   function handleChooseAnother() {
     setLines([]);
+    clearStoredOffset();
     dispatch({ type: "choose-another/clicked" });
   }
 

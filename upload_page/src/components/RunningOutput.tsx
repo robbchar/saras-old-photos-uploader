@@ -84,7 +84,10 @@ export function RunningOutput({ lines, done, planned, stopping, onStop }: Runnin
             Stopping after the current photo…
           </button>
         ) : confirmingStop ? (
-          <span role="alertdialog" aria-label="Confirm stop" className="flex items-center gap-2">
+          // A plain labeled group, not a modal - this is an inline
+          // two-button confirm with no focus trap or Escape handling, so
+          // "alertdialog" would overstate its semantics to assistive tech.
+          <span role="group" aria-label="Confirm stop" className="flex items-center gap-2">
             <span className="text-text">Stop after the current photo?</span>
             <button
               type="button"

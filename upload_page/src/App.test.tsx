@@ -6,7 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { OutputHandlers } from "./api/client";
 import type { Ending, Health, Status, ValidateDoc, ValidateRow } from "./api/schemas";
-import App from "./App";
+import App, { HEALTH_POLL_INTERVAL_MS } from "./App";
 
 // vi.mock's factory is hoisted above every other statement in this file,
 // so the mocks it returns must themselves come from vi.hoisted - a plain
@@ -32,11 +32,6 @@ vi.mock("./api/client", () => ({
   openOutput: mockOpenOutput,
 }));
 
-// Mirrors App.tsx's own HEALTH_POLL_INTERVAL_MS - not exported, so the
-// health-reload test keeps its own copy rather than reaching into the
-// module's internals.
-const HEALTH_POLL_INTERVAL_MS = 10_000;
-
 // jsdom has no layout engine, so it never implemented scrollIntoView -
 // Radix's Select scrolls the selected/first item into view as soon as its
 // listbox opens (see ThemePicker.test.tsx for the same polyfill).
@@ -52,6 +47,23 @@ const STATUS_IDLE: Status = {
   project: "astoriaphotos",
   collection: "sarasoldphotos",
   run: { kind: "idle" },
+};
+
+// A run already active when the page loads - a fresh mount mid-run, a
+// second tab, or a reload triggered mid-upload (e.g. by the health-reload
+// effect itself) all boot straight into this via getStatus().
+const STATUS_RUNNING_MID_UPLOAD: Status = {
+  live: false,
+  project: "astoriaphotos",
+  collection: "sarasoldphotos",
+  run: {
+    kind: "page_run_active",
+    batch: "Fishing",
+    live: false,
+    started_at: "2026-09-25T12:00:00Z",
+    done: 2,
+    planned: 5,
+  },
 };
 
 const THEMES: ValidateDoc = {
@@ -117,6 +129,10 @@ const COMPLETED_ENDING: Ending = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The output-offset resume key lives in sessionStorage, which jsdom keeps
+  // across tests in the same file - start each test with a clean slate so
+  // one test's remembered offset can't leak into the next.
+  window.sessionStorage.clear();
   mockGetStatus.mockResolvedValue(STATUS_IDLE);
   mockGetThemes.mockResolvedValue(THEMES);
   mockGetPreview.mockResolvedValue(PREVIEW);
@@ -163,6 +179,38 @@ describe("App", () => {
     await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith("Fishing"));
     expect(await screen.findByRole("log")).toBeInTheDocument();
     expect(mockOpenOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it("resubscribes to the output stream when mounting mid-run, with no Confirm click involved", async () => {
+    let capturedHandlers: OutputHandlers | undefined;
+    mockOpenOutput.mockImplementation((handlers: OutputHandlers) => {
+      capturedHandlers = handlers;
+      return { close: vi.fn() };
+    });
+    mockGetStatus.mockResolvedValue(STATUS_RUNNING_MID_UPLOAD);
+
+    render(<App />);
+
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
+    expect(mockOpenOutput).toHaveBeenCalledWith(expect.anything(), 0);
+    expect(await screen.findByRole("log")).toBeInTheDocument();
+    expect(screen.getByText("2 of 5")).toBeInTheDocument();
+
+    // A progress event reaching this fresh subscription updates the UI.
+    act(() => {
+      capturedHandlers?.onProgress({ done: 3, planned: 5 });
+    });
+    expect(await screen.findByText("3 of 5")).toBeInTheDocument();
+
+    // Stop still works on a run this page never itself started.
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(mockStopRun).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      capturedHandlers?.onFinished(COMPLETED_ENDING);
+    });
+    expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
   });
 
   it("shows the Finished screen once the output stream reports the run ended", async () => {
