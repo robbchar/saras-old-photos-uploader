@@ -181,6 +181,44 @@ describe("App", () => {
     expect(mockOpenOutput).toHaveBeenCalledTimes(1);
   });
 
+  it("waits for startRun to succeed before opening the output stream (no race against the new run existing)", async () => {
+    const callOrder: string[] = [];
+    mockStartRun.mockImplementation(async (batch: string) => {
+      callOrder.push(`startRun:${batch}`);
+      return { started_at: "2026-09-25T12:00:00Z" };
+    });
+    mockOpenOutput.mockImplementation(() => {
+      callOrder.push("openOutput");
+      return { close: vi.fn() };
+    });
+
+    await selectFishingTheme();
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    // startRun's promise has not resolved yet at this synchronous point -
+    // the stream must not open (and the page must not claim "running")
+    // until it does.
+    expect(mockOpenOutput).not.toHaveBeenCalled();
+    expect(screen.queryByRole("log")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
+    expect(callOrder).toEqual(["startRun:Fishing", "openOutput"]);
+    expect(await screen.findByRole("log")).toBeInTheDocument();
+  });
+
+  it("shows an error instead of a stuck running screen when startRun is refused (e.g. a 409)", async () => {
+    mockStartRun.mockRejectedValue(new Error("409 a run is already active for this project"));
+
+    await selectFishingTheme();
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("409 a run is already active for this project");
+    expect(screen.queryByRole("log")).not.toBeInTheDocument();
+    expect(mockOpenOutput).not.toHaveBeenCalled();
+  });
+
   it("resubscribes to the output stream when mounting mid-run, with no Confirm click involved", async () => {
     let capturedHandlers: OutputHandlers | undefined;
     mockOpenOutput.mockImplementation((handlers: OutputHandlers) => {

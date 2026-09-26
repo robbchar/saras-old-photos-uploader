@@ -129,7 +129,17 @@ describe("REST client methods", () => {
 // server events at it.
 class FakeEventSource extends EventTarget {
   static instances: FakeEventSource[] = [];
+  // Mirrors the real EventSource readyState constants (0/1/2) so
+  // client.ts's `source.readyState === EventSource.CONNECTING` check works
+  // identically against this stub as it would against the real global.
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSED = 2;
   readonly url: string;
+  // Defaults to OPEN, same as a real EventSource once connected - tests
+  // that don't care about reconnect behavior get the "genuine failure"
+  // path (anything other than CONNECTING escalates to onError).
+  readyState: number = FakeEventSource.OPEN;
 
   constructor(url: string) {
     super();
@@ -138,7 +148,7 @@ class FakeEventSource extends EventTarget {
   }
 
   close(): void {
-    // no-op: nothing to release in the fake
+    this.readyState = FakeEventSource.CLOSED;
   }
 }
 
@@ -213,6 +223,31 @@ describe("openOutput", () => {
     const onError = vi.fn();
     openOutput({ onLine: vi.fn(), onProgress: vi.fn(), onFinished: vi.fn(), onError });
     const source = FakeEventSource.instances[0];
+
+    source.dispatchEvent(new Event("error"));
+
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not surface an error while the browser is auto-reconnecting (readyState CONNECTING)", () => {
+    // A server restart mid-run drops the connection; the browser retries
+    // on its own and resends Last-Event-ID, so this must not be treated
+    // as a run-ending failure.
+    const onError = vi.fn();
+    openOutput({ onLine: vi.fn(), onProgress: vi.fn(), onFinished: vi.fn(), onError });
+    const source = FakeEventSource.instances[0];
+    source.readyState = FakeEventSource.CONNECTING;
+
+    source.dispatchEvent(new Event("error"));
+
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an error once the connection is fully closed (readyState CLOSED)", () => {
+    const onError = vi.fn();
+    openOutput({ onLine: vi.fn(), onProgress: vi.fn(), onFinished: vi.fn(), onError });
+    const source = FakeEventSource.instances[0];
+    source.readyState = FakeEventSource.CLOSED;
 
     source.dispatchEvent(new Event("error"));
 

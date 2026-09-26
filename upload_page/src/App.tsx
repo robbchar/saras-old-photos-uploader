@@ -155,6 +155,10 @@ export default function App() {
   const [lines, setLines] = useState<string[]>([]);
   const eventSourceRef = useRef<ReturnType<typeof openOutput> | null>(null);
   const rememberedBundleStampRef = useRef<string | null>(null);
+  // Guards against a double Confirm click re-entering handleConfirmStart
+  // while its startRun call is still in flight (state sits in "confirming"
+  // for that whole window now - see handleConfirmStart below).
+  const startInFlightRef = useRef(false);
 
   // Mount, and every return trip through "loading" (Choose-another routes
   // back here too - see the choose-another handler below) - fetch status
@@ -308,23 +312,46 @@ export default function App() {
   // StartDialog's own Trigger opens/closes the confirmation UI entirely on
   // its own (it is an uncontrolled Radix dialog - see StartDialog.tsx) -
   // there is no moment for this component to observe separately from
-  // Confirm/Cancel themselves firing. So both handlers below dispatch
-  // "start/clicked" immediately before the action it gates: the reducer
-  // only accepts confirm/yes and confirm/cancel from "confirming", never
-  // from "previewed" directly (see reducer.test.ts's impossible-transition
-  // coverage), and React 18+ batches same-tick dispatches, so the
-  // intermediate "confirming" state is never actually painted - the Radix
-  // dialog IS the "confirming" screen, and the user sees one continuous
-  // view through the whole picker-to-running flow.
+  // Confirm/Cancel themselves firing, so both handlers dispatch
+  // "start/clicked" first: the reducer only accepts confirm/yes and
+  // confirm/cancel from "confirming", never from "previewed" directly (see
+  // reducer.test.ts's impossible-transition coverage). The Radix dialog IS
+  // the "confirming" screen - it renders identically to "previewed" (see
+  // renderBody below) - so the reducer's confirming state, whether it's
+  // painted for one tick or the width of a network call, is never a
+  // visually distinct screen of its own.
+  //
+  // Unlike Cancel, Confirm must NOT dispatch confirm/yes in the same tick:
+  // the resubscribe effect opens the output stream the instant state
+  // becomes "running", so doing that before startRun's POST has actually
+  // created the run server-side raced the server's own "current run"
+  // lookup - landing on nothing (a 204) or, worse, the *previous* finished
+  // run's output. So confirm/yes is deferred until startRun resolves,
+  // which also means "confirming" can now genuinely be on screen for the
+  // length of that request - startInFlightRef guards against a second
+  // Confirm click (the trigger button is technically clickable again once
+  // Radix's own dialog closes) re-entering this function mid-flight.
   function handleConfirmStart(batch: string) {
+    if (startInFlightRef.current) return;
+    startInFlightRef.current = true;
     dispatch({ type: "start/clicked" });
-    dispatch({ type: "confirm/yes" });
     setLines([]);
     clearStoredOffset();
-    // Only starts the run server-side; the resubscribe effect (state is
-    // "running" as soon as the dispatch above lands) opens the stream, so
-    // there is exactly one place that ever calls openOutput.
-    startRun(batch).catch((error: unknown) => dispatch({ type: "error", message: describeError(error) }));
+    startRun(batch)
+      .then(() => {
+        startInFlightRef.current = false;
+        // Only now does a run actually exist server-side for the
+        // resubscribe effect to attach to.
+        dispatch({ type: "confirm/yes" });
+      })
+      .catch((error: unknown) => {
+        startInFlightRef.current = false;
+        // Stay out of "running" - e.g. a 409 because a run was already
+        // started elsewhere. Surfacing this as an error (rather than
+        // silently reopening the dialog) matches how every other fetch
+        // failure on this page is handled.
+        dispatch({ type: "error", message: describeError(error) });
+      });
   }
 
   function handleCancelStart() {
