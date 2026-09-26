@@ -396,9 +396,11 @@ export default function App() {
 
   return (
     <main className="min-h-screen bg-bg p-4">
-      {identity && <Header project={identity.project} collection={identity.collection} live={identity.live} />}
-      <div className="mt-4">{renderBody()}</div>
-      <LiveRegion message={announcementFor(state, starting)} />
+      <div className="mx-auto w-full max-w-[1000px]">
+        {identity && <Header project={identity.project} collection={identity.collection} live={identity.live} />}
+        <div className="mt-4">{renderBody()}</div>
+        <LiveRegion message={announcementFor(state, starting)} />
+      </div>
     </main>
   );
 }

@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -7,21 +7,27 @@ import tailwindcss from "@tailwindcss/vite";
 // because the dev proxy target never varies across machines.
 const UPLOAD_SERVER_ORIGIN = "http://127.0.0.1:5277";
 
+// `changeOrigin` rewrites the outgoing Host header to the target, but NOT the
+// Origin header - so a POST/SSE from the Vite dev origin (e.g. localhost:5173)
+// still carries that Origin and the server's same-origin guard rejects it 403.
+// Rewrite Origin to the upload server's own here, so the guard stays strict in
+// production (served directly, no Vite) yet passes for the dev proxy.
+const uploadServerProxy: ProxyOptions = {
+  target: UPLOAD_SERVER_ORIGIN,
+  changeOrigin: true,
+  configure: (proxy) => {
+    proxy.on("proxyReq", (proxyReq) => {
+      proxyReq.setHeader("origin", UPLOAD_SERVER_ORIGIN);
+    });
+  },
+};
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      // changeOrigin rewrites the dev server's Origin header to the
-      // upload_server's own, so its same-origin guard stays strict instead
-      // of having to allow the Vite dev origin as a special case.
-      "/api": {
-        target: UPLOAD_SERVER_ORIGIN,
-        changeOrigin: true,
-      },
-      "/assets": {
-        target: UPLOAD_SERVER_ORIGIN,
-        changeOrigin: true,
-      },
+      "/api": uploadServerProxy,
+      "/assets": uploadServerProxy,
     },
   },
 });
