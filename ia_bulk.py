@@ -1045,6 +1045,25 @@ def log_result(
         f.write(json.dumps(entry) + "\n")
 
 
+def log_item_start(log_path: str | Path, identifier: str, file_value: str, index: int) -> None:
+    """One line marking that item `index` (1-based in the run) has begun
+    uploading, written just before the blocking upload call so a reader can name
+    the photo in flight - the library reports no per-byte progress. The "record"
+    key keeps it out of the per-item result count (page_runs.read_progress), and
+    `identifier` matches the later result record so page_runs.read_current_item
+    can tell a still-uploading item from a finished one. The kind string mirrors
+    page_runs.ITEM_START_RECORD (kept as a literal here, as run_header/run_summary
+    are, since the two files share the log format but not an import)."""
+    entry = {
+        "record": "item_start",
+        "identifier": identifier,
+        "file": file_value,
+        "index": index,
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
 def run_stamp() -> str:
     """A lowercase, IA-identifier-safe stamp unique to this invocation of the
     script - e.g. "20260819t144907". Computed ONCE per run and threaded
@@ -3470,6 +3489,7 @@ class SheetUploadRun:
                 position += 1
                 settled += 1
                 print(f"[{position}/{total}] uploading {target.uploaded_as} ({target.row['file']})")
+                self._log_start(target, position)
                 try:
                     upload_row(
                         sheet_upload_metadata(target, self.uploadable, self.mediatype),
@@ -3636,6 +3656,15 @@ class SheetUploadRun:
             uploaded_as=target.uploaded_as,
             http_status=http_status,
         )
+
+    def _log_start(self, target: UploadTarget, index: int) -> None:
+        """Best-effort: the marker only drives the page's progress display, so a
+        write failure must not stop a run about to create permanent items - the
+        result record (log_result) is the one that must always be written."""
+        try:
+            log_item_start(self.log_path, target.identifier, target.row["file"], index)
+        except OSError:
+            pass
 
 
 REMOVE_TAG_SENTINEL = "REMOVE_TAG"

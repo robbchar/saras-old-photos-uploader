@@ -4186,8 +4186,8 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     assert len(log_files) == 1
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
-    # Header, the one row, then the closing run summary.
-    assert len(lines) == 3
+    # Header, the item's start marker, the one row's result, then the run summary.
+    assert len(lines) == 4
 
     header = json.loads(lines[0])
     assert header["record"] == "run_header"
@@ -4205,9 +4205,76 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     assert header["limit"] is None
     assert header["chunk_size"] == CHUNK_SIZE
 
-    result = json.loads(lines[1])
+    # lines[1] is the item_start marker; lines[2] is the row's own result.
+    start = json.loads(lines[1])
+    assert start["record"] == "item_start"
+    result = json.loads(lines[2])
     assert result["status"] == "success"
     assert result["identifier"] == "lcps-astoriaphotos-00001"
+
+
+def test_cmd_upload_writes_an_item_start_marker_before_each_item(
+    tmp_path, monkeypatch, capsys
+):
+    """The upload page names the photo uploading right now by reading an
+    item_start marker written just before the (blocking) upload call. It must
+    precede that item's own result record, carry the run's 1-based position, and
+    use the same identifier the result record does so the page can pair them."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
+    records = [
+        json.loads(line)
+        for line in log_files[0].read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    starts = [r for r in records if r.get("record") == "item_start"]
+    assert [(s["index"], s["identifier"], s["file"]) for s in starts] == [
+        (1, "lcps-astoriaphotos-00001", "photo1.jpg"),
+        (2, "lcps-astoriaphotos-00002", "photo2.jpg"),
+    ]
+    # The first item's marker comes before its own success record.
+    start_index = records.index(starts[0])
+    result_index = next(
+        i
+        for i, r in enumerate(records)
+        if r.get("status") == "success" and r.get("identifier") == "lcps-astoriaphotos-00001"
+    )
+    assert start_index < result_index
+
+
+def test_cmd_upload_survives_an_item_start_write_failure_and_still_uploads(
+    tmp_path, monkeypatch, capsys
+):
+    """The item_start marker only feeds the page's progress display, so a
+    failure writing it must never stop a run about to create permanent items."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+    monkeypatch.setattr(
+        "ia_bulk.log_item_start",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
 
 
 def test_cmd_upload_survives_a_run_header_write_failure_and_still_uploads(
@@ -4241,11 +4308,12 @@ def test_cmd_upload_survives_a_run_header_write_failure_and_still_uploads(
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
     # The header failed to write, so no run_header record exists - proving
     # the failure was swallowed rather than silently retried or masked. The
-    # run's own records are all still there: the row result, then the closing
-    # summary.
+    # run's own records are all still there: the item_start marker, the row
+    # result, then the closing summary.
     records = [json.loads(line) for line in lines]
     assert not any(entry.get("record") == "run_header" for entry in records)
-    assert records[0]["status"] == "success"
+    result = next(entry for entry in records if "record" not in entry)
+    assert result["status"] == "success"
 
 
 def test_cmd_upload_with_write_identifier_reserves_then_uploads_then_confirms(

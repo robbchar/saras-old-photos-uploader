@@ -303,6 +303,7 @@ def test_status_reports_page_run_active_state(tmp_path, monkeypatch):
             "started_at": "20260101T000000Z",
             "done": 3,
             "planned": 10,
+            "current": None,
         }
 
 
@@ -1120,6 +1121,30 @@ def test_sse_streams_lines_progress_and_finished(tmp_path, monkeypatch):
     assert any(e.event == "progress" for e in events)
     fin = [e for e in events if e.event == "finished"][-1]
     assert json.loads(fin.data)["ending"]["kind"] == "completed"
+
+
+def test_sse_progress_event_includes_the_in_flight_item(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    _write_jsonl(run_dir, [
+        {"record": "run_header", "planned": 2},
+        {"identifier": "a", "status": "success"},
+        {"record": "item_start", "identifier": "b", "file": "photos/b.jpg", "index": 2},
+    ])
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(base + "/api/runs/current/output", stop_on="finished")
+
+    progress = [json.loads(e.data) for e in events if e.event == "progress"]
+    assert any(
+        p["done"] == 1 and p["planned"] == 2 and p["current"] == {"index": 2, "file": "photos/b.jpg"}
+        for p in progress
+    )
 
 
 def test_sse_line_event_id_is_the_byte_offset_after_its_newline(tmp_path, monkeypatch):

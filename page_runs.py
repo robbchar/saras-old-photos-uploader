@@ -193,6 +193,48 @@ def read_progress(jsonl: Path | None) -> tuple[int, int | None]:
     return done, planned
 
 
+# The record kind for the "an item's upload has started" marker (see
+# ia_bulk.log_item_start). It carries a "record" key so read_progress's
+# per-item (record-less) count never mistakes it for a completed item.
+ITEM_START_RECORD = "item_start"
+
+
+@dataclass(frozen=True)
+class CurrentItem:
+    """The item an in-progress run is uploading right now.
+
+    Written as an item_start record just before the blocking upload call, so
+    the page can name the photo in flight even though the underlying library
+    reports no per-byte progress. `index` is the run's 1-based position; `file`
+    is the row's file value, the human-readable handle on the photo."""
+
+    index: int
+    file: str
+
+    def to_json(self) -> dict[str, object]:
+        return {"index": self.index, "file": self.file}
+
+
+def read_current_item(jsonl: Path | None) -> CurrentItem | None:
+    """The item the run is uploading right now, or None when nothing is in flight.
+
+    Uploads run one at a time, so the in-flight item is the last item_start
+    record whose identifier has not yet appeared in a completion record. Once
+    that item's success/failure record lands the marker resolves to None, until
+    the next item starts."""
+    if jsonl is None:
+        return None
+    records = _read_jsonl_records(jsonl)
+    starts = [record for record in records if record.get("record") == ITEM_START_RECORD]
+    if not starts:
+        return None
+    last = starts[-1]
+    completed_ids = {record.get("identifier") for record in records if "record" not in record}
+    if last.get("identifier") in completed_ids:
+        return None
+    return CurrentItem(index=int(last["index"]), file=str(last["file"]))  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True)
 class Refused:
     """No JSONL at all: the run never got as far as writing run_header."""
@@ -299,6 +341,7 @@ class PageRunActive:
     started_at: str
     done: int
     planned: int | None
+    current: CurrentItem | None = None
     kind: Literal["page_run_active"] = "page_run_active"
 
     def to_json(self) -> dict[str, object]:
@@ -309,6 +352,7 @@ class PageRunActive:
             "started_at": self.started_at,
             "done": self.done,
             "planned": self.planned,
+            "current": None if self.current is None else self.current.to_json(),
         }
 
 
@@ -366,13 +410,15 @@ def compute_run_state(lock_path: Path, logs_base: Path) -> RunState:
         if newest is not None:
             page_run = read_page_run(newest)
             if holder is not None and page_run is not None and holder.pid == page_run.pid:
-                done, planned = read_progress(find_jsonl(newest))
+                jsonl = find_jsonl(newest)
+                done, planned = read_progress(jsonl)
                 return PageRunActive(
                     batch=page_run.batch,
                     live=page_run.live,
                     started_at=page_run.started_at,
                     done=done,
                     planned=planned,
+                    current=read_current_item(jsonl),
                 )
         return TerminalRunActive(holder=holder)
 

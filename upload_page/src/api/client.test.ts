@@ -186,9 +186,13 @@ describe("openOutput", () => {
     openOutput({ onLine: vi.fn(), onProgress, onFinished: vi.fn(), onError: vi.fn() });
     const source = FakeEventSource.instances[0];
 
-    source.dispatchEvent(new MessageEvent("progress", { data: JSON.stringify({ done: 3, planned: 10 }) }));
+    source.dispatchEvent(
+      new MessageEvent("progress", {
+        data: JSON.stringify({ done: 3, planned: 10, current: { index: 4, file: "b.jpg" } }),
+      }),
+    );
 
-    expect(onProgress).toHaveBeenCalledWith({ done: 3, planned: 10 });
+    expect(onProgress).toHaveBeenCalledWith({ done: 3, planned: 10, current: { index: 4, file: "b.jpg" } });
   });
 
   it("parses a finished event and forwards the unwrapped Ending to onFinished", () => {

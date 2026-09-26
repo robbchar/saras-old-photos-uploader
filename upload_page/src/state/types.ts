@@ -8,7 +8,7 @@
 // respectively) so a `switch` over either narrows exhaustively - see
 // reducer.ts's `never` checks.
 
-import type { Ending, RunState, SseProgressEvent, ValidateDoc } from "../api/schemas";
+import type { CurrentItem, Ending, RunState, SseProgressEvent, ValidateDoc } from "../api/schemas";
 
 /** The `holder` a `terminal_run_active` RunState carries - someone else
  * (a terminal `ia_bulk.py upload` run, not this page) holds the run lock.
@@ -55,12 +55,14 @@ export interface ConfirmingState {
 }
 
 /** A run is in progress. `planned` is null until the server reports a
- * total (mirrors RunState's `page_run_active.planned`). */
+ * total (mirrors RunState's `page_run_active.planned`). `current` is the
+ * photo uploading right now, or null when nothing is in flight. */
 export interface RunningState {
   kind: "running";
   batch: string;
   done: number;
   planned: number | null;
+  current: CurrentItem | null;
 }
 
 /** Stop was requested; the run is winding down but hasn't finished yet. */
@@ -69,6 +71,7 @@ export interface StoppingState {
   batch: string;
   done: number;
   planned: number | null;
+  current: CurrentItem | null;
 }
 
 /** The run ended, one way or another - see Ending's five kinds. */

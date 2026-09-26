@@ -60,6 +60,38 @@ describe("RunningOutput", () => {
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
   });
 
+  it("names the image currently uploading with its position and file", () => {
+    render(
+      <RunningOutput
+        lines={[]}
+        done={2}
+        planned={40}
+        current={{ index: 3, file: "photos/CD1_0472.jpg" }}
+        stopping={false}
+        onStop={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/Uploading image 3 of 40/)).toBeInTheDocument();
+    expect(screen.getByText("photos/CD1_0472.jpg")).toBeInTheDocument();
+  });
+
+  it("shows no current-image line when nothing is in flight", () => {
+    render(
+      <RunningOutput lines={[]} done={2} planned={40} current={null} stopping={false} onStop={vi.fn()} />,
+    );
+    expect(screen.queryByText(/Uploading image/)).not.toBeInTheDocument();
+  });
+
+  it("renders an overall progress bar reflecting done of planned", () => {
+    render(
+      <RunningOutput lines={[]} done={12} planned={42} current={null} stopping={false} onStop={vi.fn()} />,
+    );
+    const bar = screen.getByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-valuenow", "12");
+    expect(bar).toHaveAttribute("aria-valuemin", "0");
+    expect(bar).toHaveAttribute("aria-valuemax", "42");
+  });
+
   it("auto-scrolls to the bottom when new lines arrive and the reader was already there", () => {
     const { rerender } = render(
       <RunningOutput lines={["one"]} done={0} planned={null} stopping={false} onStop={vi.fn()} />,

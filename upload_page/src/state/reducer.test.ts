@@ -66,8 +66,8 @@ const sampleStates: { [K in AppState["kind"]]: Extract<AppState, { kind: K }> } 
   checking: { kind: "checking", batch: "Fishing" },
   previewed: { kind: "previewed", batch: "Fishing", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
   confirming: { kind: "confirming", batch: "Fishing", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
-  running: { kind: "running", batch: "Fishing", done: 2, planned: 7 },
-  stopping: { kind: "stopping", batch: "Fishing", done: 2, planned: 7 },
+  running: { kind: "running", batch: "Fishing", done: 2, planned: 7, current: null },
+  stopping: { kind: "stopping", batch: "Fishing", done: 2, planned: 7, current: null },
   finished: { kind: "finished", ending: SAMPLE_ENDING },
   "terminal-run": { kind: "terminal-run", holder: SAMPLE_HOLDER },
   error: { kind: "error", message: "boom" },
@@ -86,7 +86,7 @@ const sampleActions: { [T in Action["type"]]: Extract<Action, { type: T }> } = {
   "start/clicked": { type: "start/clicked" },
   "confirm/cancel": { type: "confirm/cancel" },
   "confirm/yes": { type: "confirm/yes" },
-  "sse/progress": { type: "sse/progress", done: 3, planned: 7 },
+  "sse/progress": { type: "sse/progress", done: 3, planned: 7, current: null },
   "stop/clicked": { type: "stop/clicked" },
   "sse/finished": { type: "sse/finished", ending: SAMPLE_ENDING },
   "choose-another/clicked": { type: "choose-another/clicked" },
@@ -161,7 +161,7 @@ describe("status/received routes by run.kind (only from loading)", () => {
     expect(result).toEqual({ kind: "choosing", themes: null });
   });
 
-  test("page_run_active -> running, carrying the run's batch/done/planned", () => {
+  test("page_run_active -> running, carrying the run's batch/done/planned/current", () => {
     const run: RunState = {
       kind: "page_run_active",
       batch: "Logging",
@@ -169,9 +169,16 @@ describe("status/received routes by run.kind (only from loading)", () => {
       started_at: CHECKED_AT,
       done: 4,
       planned: 12,
+      current: { index: 5, file: "e.jpg" },
     };
     const result = reducer(sampleStates.loading, { type: "status/received", run });
-    expect(result).toEqual({ kind: "running", batch: "Logging", done: 4, planned: 12 });
+    expect(result).toEqual({
+      kind: "running",
+      batch: "Logging",
+      done: 4,
+      planned: 12,
+      current: { index: 5, file: "e.jpg" },
+    });
   });
 
   test("terminal_run_active -> terminal-run, carrying the holder", () => {
@@ -214,25 +221,54 @@ describe("other data-carrying transitions", () => {
       checkedAt: CHECKED_AT,
     };
     const result = reducer(confirming, { type: "confirm/yes" });
-    expect(result).toEqual({ kind: "running", batch: "Fishing", done: 0, planned: SAMPLE_PREVIEW.ready_to_upload });
+    expect(result).toEqual({
+      kind: "running",
+      batch: "Fishing",
+      done: 0,
+      planned: SAMPLE_PREVIEW.ready_to_upload,
+      current: null,
+    });
   });
 
-  test("sse/progress updates done/planned while running", () => {
-    const running: AppState = { kind: "running", batch: "Fishing", done: 1, planned: 7 };
-    const result = reducer(running, { type: "sse/progress", done: 5, planned: 7 });
-    expect(result).toEqual({ kind: "running", batch: "Fishing", done: 5, planned: 7 });
+  test("sse/progress updates done/planned/current while running", () => {
+    const running: AppState = { kind: "running", batch: "Fishing", done: 1, planned: 7, current: null };
+    const result = reducer(running, {
+      type: "sse/progress",
+      done: 5,
+      planned: 7,
+      current: { index: 6, file: "f.jpg" },
+    });
+    expect(result).toEqual({
+      kind: "running",
+      batch: "Fishing",
+      done: 5,
+      planned: 7,
+      current: { index: 6, file: "f.jpg" },
+    });
   });
 
-  test("sse/progress updates done/planned while stopping", () => {
-    const stopping: AppState = { kind: "stopping", batch: "Fishing", done: 1, planned: 7 };
-    const result = reducer(stopping, { type: "sse/progress", done: 6, planned: 7 });
-    expect(result).toEqual({ kind: "stopping", batch: "Fishing", done: 6, planned: 7 });
+  test("sse/progress updates done/planned/current while stopping", () => {
+    const stopping: AppState = { kind: "stopping", batch: "Fishing", done: 1, planned: 7, current: null };
+    const result = reducer(stopping, { type: "sse/progress", done: 6, planned: 7, current: null });
+    expect(result).toEqual({ kind: "stopping", batch: "Fishing", done: 6, planned: 7, current: null });
   });
 
-  test("stop/clicked carries the current batch/done/planned into stopping", () => {
-    const running: AppState = { kind: "running", batch: "Fishing", done: 3, planned: 7 };
+  test("stop/clicked carries the current batch/done/planned/current into stopping", () => {
+    const running: AppState = {
+      kind: "running",
+      batch: "Fishing",
+      done: 3,
+      planned: 7,
+      current: { index: 4, file: "d.jpg" },
+    };
     const result = reducer(running, { type: "stop/clicked" });
-    expect(result).toEqual({ kind: "stopping", batch: "Fishing", done: 3, planned: 7 });
+    expect(result).toEqual({
+      kind: "stopping",
+      batch: "Fishing",
+      done: 3,
+      planned: 7,
+      current: { index: 4, file: "d.jpg" },
+    });
   });
 
   test("recheck/clicked returns to checking with the same batch", () => {

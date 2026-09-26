@@ -32,7 +32,7 @@ function fromLoading(state: LoadingState, action: Action): AppState {
     case "terminal_run_active":
       return { kind: "terminal-run", holder: run.holder };
     case "page_run_active":
-      return { kind: "running", batch: run.batch, done: run.done, planned: run.planned };
+      return { kind: "running", batch: run.batch, done: run.done, planned: run.planned, current: run.current };
     case "finished":
       return { kind: "finished", ending: run.ending };
     default: {
@@ -80,7 +80,7 @@ function fromConfirming(state: ConfirmingState, action: Action): AppState {
     case "confirm/cancel":
       return { kind: "previewed", batch: state.batch, preview: state.preview, checkedAt: state.checkedAt };
     case "confirm/yes":
-      return { kind: "running", batch: state.batch, done: 0, planned: state.preview.ready_to_upload };
+      return { kind: "running", batch: state.batch, done: 0, planned: state.preview.ready_to_upload, current: null };
     default:
       return state;
   }
@@ -89,9 +89,9 @@ function fromConfirming(state: ConfirmingState, action: Action): AppState {
 function fromRunning(state: RunningState, action: Action): AppState {
   switch (action.type) {
     case "sse/progress":
-      return { kind: "running", batch: state.batch, done: action.done, planned: action.planned };
+      return { kind: "running", batch: state.batch, done: action.done, planned: action.planned, current: action.current };
     case "stop/clicked":
-      return { kind: "stopping", batch: state.batch, done: state.done, planned: state.planned };
+      return { kind: "stopping", batch: state.batch, done: state.done, planned: state.planned, current: state.current };
     case "sse/finished":
       return { kind: "finished", ending: action.ending };
     default:
@@ -102,7 +102,7 @@ function fromRunning(state: RunningState, action: Action): AppState {
 function fromStopping(state: StoppingState, action: Action): AppState {
   switch (action.type) {
     case "sse/progress":
-      return { kind: "stopping", batch: state.batch, done: action.done, planned: action.planned };
+      return { kind: "stopping", batch: state.batch, done: action.done, planned: action.planned, current: action.current };
     case "sse/finished":
       return { kind: "finished", ending: action.ending };
     default:

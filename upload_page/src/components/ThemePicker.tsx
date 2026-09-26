@@ -1,6 +1,7 @@
 // The theme (batch) picker on the "choose" screen. Purely presentational:
-// App owns which theme is selected and reacts to onSelect - this
-// component only knows how to label and gray out an option.
+// App owns which theme is selected and reacts to onSelect - this component
+// only renders the inline instruction, labels each option, and grays out the
+// ones that have nothing ready to upload.
 
 import { Select } from "radix-ui";
 import type { ValidateBatch, ValidateCounts } from "../api/schemas";
@@ -34,36 +35,41 @@ function labelFor(batch: ValidateBatch): string {
 
 export function ThemePicker({ batches, value, onSelect }: ThemePickerProps) {
   return (
-    <Select.Root value={value} onValueChange={onSelect}>
-      <Select.Trigger
-        aria-label="Choose a theme"
-        className="flex min-w-64 items-center justify-between gap-2 rounded border border-border-strong bg-raised px-3 py-2 text-text"
-      >
-        <Select.Value placeholder="Choose a theme" />
-      </Select.Trigger>
-      <Select.Portal>
-        <Select.Content className="overflow-hidden rounded border border-border bg-raised text-text shadow-none">
-          <Select.Viewport className="p-1">
-            {batches.map((batch) => {
-              const disabled = batch.ready_to_upload === 0;
-              return (
-                <Select.Item
-                  key={batch.value}
-                  value={batch.value}
-                  disabled={disabled}
-                  className={
-                    disabled
-                      ? "cursor-default select-none rounded px-3 py-2 text-faint"
-                      : "cursor-default select-none rounded px-3 py-2 text-text data-[highlighted]:bg-surface data-[highlighted]:outline-none"
-                  }
-                >
-                  <Select.ItemText>{labelFor(batch)}</Select.ItemText>
-                </Select.Item>
-              );
-            })}
-          </Select.Viewport>
-        </Select.Content>
-      </Select.Portal>
-    </Select.Root>
+    <div className="flex flex-wrap items-center gap-3">
+      <span id="theme-picker-label" className="text-text">
+        Choose a theme to upload images for:
+      </span>
+      <Select.Root value={value} onValueChange={onSelect}>
+        <Select.Trigger
+          aria-labelledby="theme-picker-label"
+          className="flex min-w-64 items-center justify-between gap-2 rounded border border-border-strong bg-raised px-3 py-2 text-text"
+        >
+          <Select.Value placeholder="Choose a theme" />
+        </Select.Trigger>
+        <Select.Portal>
+          <Select.Content className="overflow-hidden rounded border border-border bg-raised text-text shadow-none">
+            <Select.Viewport className="p-1">
+              {batches.map((batch) => {
+                const disabled = batch.ready_to_upload === 0;
+                return (
+                  <Select.Item
+                    key={batch.value}
+                    value={batch.value}
+                    disabled={disabled}
+                    className={
+                      disabled
+                        ? "cursor-default select-none rounded px-3 py-2 text-muted"
+                        : "cursor-default select-none rounded px-3 py-2 text-text data-[highlighted]:bg-surface data-[highlighted]:outline-none"
+                    }
+                  >
+                    <Select.ItemText>{labelFor(batch)}</Select.ItemText>
+                  </Select.Item>
+                );
+              })}
+            </Select.Viewport>
+          </Select.Content>
+        </Select.Portal>
+      </Select.Root>
+    </div>
   );
 }

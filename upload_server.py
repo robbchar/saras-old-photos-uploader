@@ -733,7 +733,7 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        last_progress: tuple[int, int | None] | None = None
+        last_progress: tuple[int, int | None, page_runs.CurrentItem | None] | None = None
         try:
             while True:
                 offset = self._drain_output_lines(run_dir, offset)
@@ -788,13 +788,24 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         return position
 
     def _emit_progress_if_changed(
-        self, run_dir: Path, last_progress: tuple[int, int | None] | None
-    ) -> tuple[int, int | None]:
-        current = page_runs.read_progress(page_runs.find_jsonl(run_dir))
-        if current != last_progress:
-            done, planned = current
-            self._write_sse_event("progress", json.dumps({"done": done, "planned": planned}))
-        return current
+        self,
+        run_dir: Path,
+        last_progress: tuple[int, int | None, page_runs.CurrentItem | None] | None,
+    ) -> tuple[int, int | None, page_runs.CurrentItem | None]:
+        jsonl = page_runs.find_jsonl(run_dir)
+        done, planned = page_runs.read_progress(jsonl)
+        current_item = page_runs.read_current_item(jsonl)
+        state = (done, planned, current_item)
+        if state != last_progress:
+            self._write_sse_event(
+                "progress",
+                json.dumps({
+                    "done": done,
+                    "planned": planned,
+                    "current": None if current_item is None else current_item.to_json(),
+                }),
+            )
+        return state
 
     def _run_is_over(self, run_dir: Path) -> bool:
         """A tracked Popen -- one this same server process spawned -- answers

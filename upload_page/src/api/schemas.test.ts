@@ -89,8 +89,23 @@ describe("RunState", () => {
       started_at: "2026-09-25T12:00:00Z",
       done: 3,
       planned: 10,
+      current: null,
     });
-    expect(state).toMatchObject({ kind: "page_run_active", done: 3, planned: 10 });
+    expect(state).toMatchObject({ kind: "page_run_active", done: 3, planned: 10, current: null });
+  });
+
+  test("parses page_run_active carrying the in-flight item", () => {
+    const state = RunState.parse({
+      kind: "page_run_active",
+      batch: "Fishing",
+      live: false,
+      started_at: "2026-09-25T12:00:00Z",
+      done: 3,
+      planned: 10,
+      current: { index: 4, file: "photos/CD1_0472.jpg" },
+    });
+    if (state.kind !== "page_run_active") throw new Error("unreachable");
+    expect(state.current).toEqual({ index: 4, file: "photos/CD1_0472.jpg" });
   });
 
   test("parses the terminal_run_active kind with a holder", () => {
@@ -189,11 +204,25 @@ describe("Status", () => {
 
 describe("SSE event payloads", () => {
   test("parses a progress event", () => {
-    expect(SseProgressEvent.parse({ done: 3, planned: 10 })).toEqual({ done: 3, planned: 10 });
+    expect(SseProgressEvent.parse({ done: 3, planned: 10, current: null })).toEqual({
+      done: 3,
+      planned: 10,
+      current: null,
+    });
   });
 
   test("parses a progress event with an unknown planned total", () => {
-    expect(SseProgressEvent.parse({ done: 3, planned: null })).toEqual({ done: 3, planned: null });
+    expect(SseProgressEvent.parse({ done: 3, planned: null, current: null })).toEqual({
+      done: 3,
+      planned: null,
+      current: null,
+    });
+  });
+
+  test("parses a progress event carrying the in-flight item", () => {
+    expect(
+      SseProgressEvent.parse({ done: 3, planned: 10, current: { index: 4, file: "b.jpg" } }),
+    ).toEqual({ done: 3, planned: 10, current: { index: 4, file: "b.jpg" } });
   });
 
   test("parses a finished event, unwrapping to its Ending", () => {

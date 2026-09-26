@@ -32,3 +32,11 @@
   --font-sans:var(--font-ui); --font-mono:var(--font-mono);
 }
 body { background:var(--bg); color:var(--text); font-family:var(--font-ui); }
+
+/* The per-image indeterminate bar in RunningOutput: a short fill sweeps
+   across while the current photo uploads. Honest about there being no
+   per-byte progress from the library, while still signalling live work. */
+@keyframes indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

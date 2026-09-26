@@ -164,6 +164,15 @@ const Idle = z.object({
   kind: z.literal("idle"),
 });
 
+// The item a run is uploading right now (mirrors page_runs.py's CurrentItem).
+// Both PageRunActive and the SSE progress event carry it; null when nothing is
+// in flight - between items, or before the first has started.
+const CurrentItem = z.object({
+  index: z.number(),
+  file: z.string(),
+});
+export type CurrentItem = z.infer<typeof CurrentItem>;
+
 const PageRunActive = z.object({
   kind: z.literal("page_run_active"),
   batch: z.string(),
@@ -171,6 +180,7 @@ const PageRunActive = z.object({
   started_at: z.string(),
   done: z.number(),
   planned: z.number().nullable(),
+  current: CurrentItem.nullable(),
 });
 
 const TerminalRunActive = z.object({
@@ -235,6 +245,7 @@ export type StartRunResponse = z.infer<typeof StartRunResponse>;
 export const SseProgressEvent = z.object({
   done: z.number(),
   planned: z.number().nullable(),
+  current: CurrentItem.nullable(),
 });
 export type SseProgressEvent = z.infer<typeof SseProgressEvent>;
 

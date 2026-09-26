@@ -63,6 +63,7 @@ const STATUS_RUNNING_MID_UPLOAD: Status = {
     started_at: "2026-09-25T12:00:00Z",
     done: 2,
     planned: 5,
+    current: null,
   },
 };
 
@@ -294,11 +295,13 @@ describe("App", () => {
     expect(await screen.findByRole("log")).toBeInTheDocument();
     expect(screen.getByText("2 of 5")).toBeInTheDocument();
 
-    // A progress event reaching this fresh subscription updates the UI.
+    // A progress event reaching this fresh subscription updates the UI,
+    // including naming the image now in flight.
     act(() => {
-      capturedHandlers?.onProgress({ done: 3, planned: 5 });
+      capturedHandlers?.onProgress({ done: 3, planned: 5, current: { index: 4, file: "photos/x.jpg" } });
     });
     expect(await screen.findByText("3 of 5")).toBeInTheDocument();
+    expect(screen.getByText(/Uploading image 4 of 5/)).toBeInTheDocument();
 
     // Stop still works on a run this page never itself started.
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));

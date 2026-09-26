@@ -9,11 +9,15 @@
 // simpler and more testable here than a scroll-anchoring library.
 
 import { useEffect, useRef, useState } from "react";
+import type { CurrentItem } from "../api/schemas";
 
 export interface RunningOutputProps {
   lines: string[];
   done: number;
   planned: number | null;
+  /** The photo uploading right now, or null/undefined when nothing is in
+   * flight (between items, or before the first has started). */
+  current?: CurrentItem | null;
   stopping: boolean;
   onStop: () => void;
 }
@@ -35,12 +39,18 @@ function progressLabel(done: number, planned: number | null): string {
   return planned === null ? `${done} so far` : `${done} of ${planned}`;
 }
 
+/** Overall completion as a whole-number percent, clamped to 0-100. */
+function overallPercent(done: number, planned: number): number {
+  if (planned <= 0) return 0;
+  return Math.min(100, Math.round((done / planned) * 100));
+}
+
 function isNearBottom(element: HTMLElement): boolean {
   const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
   return distanceFromBottom <= NEAR_BOTTOM_THRESHOLD_PX;
 }
 
-export function RunningOutput({ lines, done, planned, stopping, onStop }: RunningOutputProps) {
+export function RunningOutput({ lines, done, planned, current, stopping, onStop }: RunningOutputProps) {
   const [confirmingStop, setConfirmingStop] = useState(false);
   const logRef = useRef<HTMLDivElement | null>(null);
   // Whether the reader was at the bottom just before this update - a ref,
@@ -114,6 +124,35 @@ export function RunningOutput({ lines, done, planned, stopping, onStop }: Runnin
           </button>
         )}
       </header>
+
+      {planned !== null && (
+        <div
+          className="mt-3 h-1.5 w-full overflow-hidden rounded bg-bg"
+          role="progressbar"
+          aria-label="Overall upload progress"
+          aria-valuenow={done}
+          aria-valuemin={0}
+          aria-valuemax={planned}
+        >
+          <div
+            className="h-full rounded bg-accent transition-[width] duration-200 ease-out"
+            style={{ width: `${overallPercent(done, planned)}%` }}
+          />
+        </div>
+      )}
+
+      {current && (
+        <div className="mt-3">
+          <p className="text-sm text-text">
+            Uploading image {current.index}
+            {planned !== null ? ` of ${planned}` : ""} —{" "}
+            <span className="font-mono text-muted">{current.file}</span>
+          </p>
+          <div className="mt-1 h-1 w-full overflow-hidden rounded bg-bg" aria-hidden="true">
+            <div className="h-full w-1/3 rounded bg-accent motion-reduce:animate-none animate-[indeterminate_1.2s_ease-in-out_infinite]" />
+          </div>
+        </div>
+      )}
 
       <div
         ref={logRef}

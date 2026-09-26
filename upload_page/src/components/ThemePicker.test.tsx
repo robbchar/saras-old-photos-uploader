@@ -95,4 +95,20 @@ describe("ThemePicker", () => {
     fireEvent.click(screen.getByRole("option", { name: "Waterfront — 3 need fixing" }));
     expect(onSelect).not.toHaveBeenCalled();
   });
+
+  it("shows the instruction inline and uses it as the picker's accessible name", () => {
+    render(<ThemePicker batches={[READY_BATCH]} onSelect={vi.fn()} />);
+    expect(screen.getByText("Choose a theme to upload images for:")).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: /choose a theme to upload images for/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders disabled themes with a legible token, not the near-invisible faint one", () => {
+    render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
+    openPicker();
+    const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });
+    expect(option.className).toContain("text-muted");
+    expect(option.className).not.toContain("text-faint");
+  });
 });

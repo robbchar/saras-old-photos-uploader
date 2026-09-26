@@ -369,6 +369,7 @@ export default function App() {
             lines={lines}
             done={state.done}
             planned={state.planned}
+            current={state.current}
             stopping={state.kind === "stopping"}
             onStop={handleStop}
           />

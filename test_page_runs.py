@@ -64,6 +64,59 @@ def test_read_progress_tolerates_a_truncated_final_line(tmp_path):
     assert page_runs.read_progress(jsonl) == (1, 3)
 
 
+# --- read_current_item -----------------------------------------------------
+
+
+def test_read_current_item_names_the_in_flight_item(tmp_path):
+    # An item_start with no matching completion yet is the item uploading now.
+    _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"identifier": "a", "status": "success"},
+        {"record": "item_start", "identifier": "b", "file": "photos/b.jpg", "index": 2},
+    ])
+    current = page_runs.read_current_item(page_runs.find_jsonl(tmp_path))
+    assert current == page_runs.CurrentItem(index=2, file="photos/b.jpg")
+
+
+def test_read_current_item_is_none_once_the_started_item_completes(tmp_path):
+    _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"record": "item_start", "identifier": "a", "file": "a.jpg", "index": 1},
+        {"identifier": "a", "status": "success"},
+    ])
+    assert page_runs.read_current_item(page_runs.find_jsonl(tmp_path)) is None
+
+
+def test_read_current_item_is_none_without_any_item_start(tmp_path):
+    _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"identifier": "a", "status": "success"},
+    ])
+    assert page_runs.read_current_item(page_runs.find_jsonl(tmp_path)) is None
+
+
+def test_read_current_item_is_none_when_no_jsonl(tmp_path):
+    assert page_runs.read_current_item(page_runs.find_jsonl(tmp_path)) is None
+
+
+def test_item_start_marker_is_not_counted_as_done(tmp_path):
+    # The in-flight marker carries a "record" key so read_progress's per-item
+    # (record-less) count never mistakes it for a completed item.
+    _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"identifier": "a", "status": "success"},
+        {"record": "item_start", "identifier": "b", "file": "b.jpg", "index": 2},
+    ])
+    assert page_runs.read_progress(page_runs.find_jsonl(tmp_path)) == (1, 3)
+
+
+def test_current_item_to_json():
+    assert page_runs.CurrentItem(index=2, file="b.jpg").to_json() == {
+        "index": 2,
+        "file": "b.jpg",
+    }
+
+
 # --- find_jsonl --------------------------------------------------------------
 
 
@@ -319,6 +372,22 @@ def test_page_run_active_when_holder_pid_matches(tmp_path, monkeypatch):
     assert st.kind == "page_run_active" and (st.done, st.planned) == (1, 2)
 
 
+def test_page_run_active_includes_the_in_flight_item(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T120000Z")
+    page_runs.write_page_run(page_runs.PageRun(pid=999, project="p", batch="Logging",
+                                               live=False, started_at="t", dir=run_dir))
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 3},
+                           {"identifier": "a", "status": "success"},
+                           {"record": "item_start", "identifier": "b", "file": "b.jpg", "index": 2}])
+    monkeypatch.setattr(upload_lock, "running_upload",
+        lambda p: RunningUpload(LockHolder(pid=999, started_at="t", project="p",
+                                           batch="Logging", live=False)))
+    st = page_runs.compute_run_state(tmp_path / ".lock", logs)
+    assert st.kind == "page_run_active"
+    assert st.current == page_runs.CurrentItem(index=2, file="b.jpg")
+
+
 def test_terminal_run_when_holder_pid_differs(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     run_dir = page_runs.new_run_dir(logs, "20260925T120000Z")
@@ -388,7 +457,16 @@ def test_page_run_active_to_json():
         "started_at": "t",
         "done": 1,
         "planned": 2,
+        "current": None,
     }
+
+
+def test_page_run_active_to_json_with_current_item():
+    state = page_runs.PageRunActive(
+        batch="Logging", live=False, started_at="t", done=1, planned=2,
+        current=page_runs.CurrentItem(index=2, file="b.jpg"),
+    )
+    assert state.to_json()["current"] == {"index": 2, "file": "b.jpg"}
 
 
 def test_terminal_run_active_to_json_with_holder():
