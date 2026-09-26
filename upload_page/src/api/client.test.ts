@@ -129,16 +129,12 @@ describe("REST client methods", () => {
 // server events at it.
 class FakeEventSource extends EventTarget {
   static instances: FakeEventSource[] = [];
-  // Mirrors the real EventSource readyState constants (0/1/2) so
-  // client.ts's `source.readyState === EventSource.CONNECTING` check works
-  // identically against this stub as it would against the real global.
+  // Mirrors the real EventSource readyState constants used by client.ts.
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static readonly CLOSED = 2;
   readonly url: string;
-  // Defaults to OPEN, same as a real EventSource once connected - tests
-  // that don't care about reconnect behavior get the "genuine failure"
-  // path (anything other than CONNECTING escalates to onError).
+  // OPEN by default, like a real connected EventSource.
   readyState: number = FakeEventSource.OPEN;
 
   constructor(url: string) {

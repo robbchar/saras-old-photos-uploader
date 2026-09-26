@@ -38,9 +38,10 @@ export const HEALTH_POLL_INTERVAL_MS = 10_000;
  * into bounded, without changing what the reader sees at the bottom. */
 const MAX_BUFFERED_LINES = 2000;
 
-function appendLineCapped(previous: string[], line: string): string[] {
-  const next = previous.length < MAX_BUFFERED_LINES ? [...previous, line] : [...previous.slice(1), line];
-  return next;
+/** Appends `line`, dropping the oldest line once already at the cap so the
+ * buffer never grows past MAX_BUFFERED_LINES. Exported for direct testing. */
+export function appendLineCapped(previous: string[], line: string): string[] {
+  return previous.length < MAX_BUFFERED_LINES ? [...previous, line] : [...previous.slice(1), line];
 }
 
 interface PageIdentity {
@@ -49,11 +50,8 @@ interface PageIdentity {
   live: boolean;
 }
 
-// Resuming the output stream across a reload (see the resubscribe effect
-// below) needs to remember, per run, the last byte offset already shown -
-// sessionStorage survives a reload but not a closed tab, which matches a
-// run's own lifetime. Keyed by batch so a stale offset from a finished run
-// is never mistaken for the current one's.
+// Last byte offset shown per batch, so a reload can resume the output
+// stream instead of replaying it from the start.
 const OUTPUT_OFFSET_STORAGE_KEY = "upload-page:output-offset";
 
 interface StoredOutputOffset {
@@ -105,7 +103,7 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
-function announcementFor(state: AppState): string {
+function announcementFor(state: AppState, starting: boolean): string {
   switch (state.kind) {
     case "loading":
       return "Loading";
@@ -116,7 +114,7 @@ function announcementFor(state: AppState): string {
     case "previewed":
       return "Preview ready";
     case "confirming":
-      return "Preview ready";
+      return starting ? "Starting upload" : "Preview ready";
     case "running":
       return "Upload running";
     case "stopping":
@@ -155,16 +153,11 @@ export default function App() {
   const [lines, setLines] = useState<string[]>([]);
   const eventSourceRef = useRef<ReturnType<typeof openOutput> | null>(null);
   const rememberedBundleStampRef = useRef<string | null>(null);
-  // Guards against a double Confirm click re-entering handleConfirmStart
-  // while its startRun call is still in flight (state sits in "confirming"
-  // for that whole window now - see handleConfirmStart below).
-  const startInFlightRef = useRef(false);
+  // True while startRun is in flight - see handleConfirmStart.
+  const [starting, setStarting] = useState(false);
 
-  // Mount, and every return trip through "loading" (Choose-another routes
-  // back here too - see the choose-another handler below) - fetch status
-  // and route to the matching screen. The reducer returns the *same*
-  // AppState reference for a no-op action, so this only re-fires when we
-  // are genuinely (re)entering "loading", not on every unrelated render.
+  // Mount, and every return trip through "loading" (Choose-another) - fetch
+  // status and route to the matching screen.
   useEffect(() => {
     if (state.kind !== "loading") return;
     let cancelled = false;
@@ -199,9 +192,7 @@ export default function App() {
     };
   }, [state]);
 
-  // "checking" is entered both by picking a theme and by Re-check - one
-  // effect covers both, since both just mean "fetch a fresh preview for
-  // this batch".
+  // Covers both a theme selection and Re-check - both land on "checking".
   useEffect(() => {
     if (state.kind !== "checking") return;
     let cancelled = false;
@@ -219,11 +210,7 @@ export default function App() {
     };
   }, [state]);
 
-  // Close the output stream once a run is no longer active, and on
-  // unmount - never leave a dangling EventSource open. This only ever
-  // closes; it can never fire in the same render as the resubscribe
-  // effect below, since that one only opens while state IS running or
-  // stopping, and this one only closes when it is neither.
+  // Close the output stream once a run is no longer active, and on unmount.
   useEffect(() => {
     if (state.kind !== "running" && state.kind !== "stopping") {
       eventSourceRef.current?.close();
@@ -234,26 +221,15 @@ export default function App() {
     return () => eventSourceRef.current?.close();
   }, []);
 
-  // (Re)subscribe to the output stream for every path that lands on
-  // "running"/"stopping" - not just a fresh Confirm click. A page reload
-  // mid-run (including one this task's own health-reload effect triggers
-  // mid-upload), a second tab, or simply mounting while a run is already
-  // active (getStatus() -> page_run_active) all route straight into
-  // "running" with no EventSource of their own - without this effect,
-  // RunningOutput would render frozen (no lines, stale done/planned) and
-  // Stop would appear to do nothing. Guarded on eventSourceRef.current
-  // being null so a run already streaming is never resubscribed, and
-  // resumes from the last byte offset this browser saw for this batch
-  // (0 for a run this tab has never seen output from).
+  // (Re)subscribe on every entry into "running"/"stopping", not just a
+  // fresh Confirm - covers a mid-run mount/reload/second tab too.
   useEffect(() => {
     if (state.kind !== "running" && state.kind !== "stopping") return;
     if (eventSourceRef.current !== null) return;
     ensureSubscribed(state.batch, readStoredOffset(state.batch));
   }, [state]);
 
-  // Poll /api/health for a changed bundle_stamp - a new deploy - and hard
-  // reload when it changes. Independent of AppState: a stale bundle needs
-  // reloading no matter what screen is showing.
+  // Poll /api/health and hard-reload once bundle_stamp changes (a deploy).
   useEffect(() => {
     let cancelled = false;
     async function checkHealth() {
@@ -286,9 +262,8 @@ export default function App() {
     dispatch({ type: "recheck/clicked" });
   }
 
-  // The single place an EventSource is ever opened - called from the
-  // resubscribe effect above for every entry into "running"/"stopping".
-  // Guarded so a run already streaming is never given a second connection.
+  // The single place an EventSource is ever opened; guarded so a run
+  // already streaming is never given a second connection.
   function ensureSubscribed(batch: string, fromOffset: number) {
     if (eventSourceRef.current !== null) return;
     const handlers: OutputHandlers = {
@@ -309,47 +284,24 @@ export default function App() {
     eventSourceRef.current = openOutput(handlers, fromOffset);
   }
 
-  // StartDialog's own Trigger opens/closes the confirmation UI entirely on
-  // its own (it is an uncontrolled Radix dialog - see StartDialog.tsx) -
-  // there is no moment for this component to observe separately from
-  // Confirm/Cancel themselves firing, so both handlers dispatch
-  // "start/clicked" first: the reducer only accepts confirm/yes and
-  // confirm/cancel from "confirming", never from "previewed" directly (see
-  // reducer.test.ts's impossible-transition coverage). The Radix dialog IS
-  // the "confirming" screen - it renders identically to "previewed" (see
-  // renderBody below) - so the reducer's confirming state, whether it's
-  // painted for one tick or the width of a network call, is never a
-  // visually distinct screen of its own.
-  //
-  // Unlike Cancel, Confirm must NOT dispatch confirm/yes in the same tick:
-  // the resubscribe effect opens the output stream the instant state
-  // becomes "running", so doing that before startRun's POST has actually
-  // created the run server-side raced the server's own "current run"
-  // lookup - landing on nothing (a 204) or, worse, the *previous* finished
-  // run's output. So confirm/yes is deferred until startRun resolves,
-  // which also means "confirming" can now genuinely be on screen for the
-  // length of that request - startInFlightRef guards against a second
-  // Confirm click (the trigger button is technically clickable again once
-  // Radix's own dialog closes) re-entering this function mid-flight.
+  // Both handlers dispatch "start/clicked" first since the reducer only
+  // accepts confirm/yes|cancel from "confirming" - the Radix dialog itself
+  // is the "confirming" UI (see StartDialog.tsx). confirm/yes waits for
+  // startRun to resolve, so the output stream is never opened before the
+  // run exists server-side; `starting` blanks out Cancel/Confirm for that
+  // window so the run can't be orphaned by a Cancel that arrives mid-flight.
   function handleConfirmStart(batch: string) {
-    if (startInFlightRef.current) return;
-    startInFlightRef.current = true;
     dispatch({ type: "start/clicked" });
+    setStarting(true);
     setLines([]);
     clearStoredOffset();
     startRun(batch)
       .then(() => {
-        startInFlightRef.current = false;
-        // Only now does a run actually exist server-side for the
-        // resubscribe effect to attach to.
+        setStarting(false);
         dispatch({ type: "confirm/yes" });
       })
       .catch((error: unknown) => {
-        startInFlightRef.current = false;
-        // Stay out of "running" - e.g. a 409 because a run was already
-        // started elsewhere. Surfacing this as an error (rather than
-        // silently reopening the dialog) matches how every other fetch
-        // failure on this page is handled.
+        setStarting(false);
         dispatch({ type: "error", message: describeError(error) });
       });
   }
@@ -387,7 +339,13 @@ export default function App() {
 
       case "previewed":
       case "confirming":
-        return (
+        // While starting, no Cancel/Confirm is rendered at all - closes
+        // the window for a Cancel to orphan a run startRun already began.
+        return starting ? (
+          <p className="text-muted" role="status">
+            Starting upload…
+          </p>
+        ) : (
           <>
             <Preview doc={state.preview} checkedAt={state.checkedAt} onRecheck={handleRecheck} />
             <div className="mt-4">
@@ -438,7 +396,7 @@ export default function App() {
     <main className="min-h-screen bg-bg p-4">
       {identity && <Header project={identity.project} collection={identity.collection} live={identity.live} />}
       <div className="mt-4">{renderBody()}</div>
-      <LiveRegion message={announcementFor(state)} />
+      <LiveRegion message={announcementFor(state, starting)} />
     </main>
   );
 }

@@ -6,7 +6,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { OutputHandlers } from "./api/client";
 import type { Ending, Health, Status, ValidateDoc, ValidateRow } from "./api/schemas";
-import App, { HEALTH_POLL_INTERVAL_MS } from "./App";
+import App, { HEALTH_POLL_INTERVAL_MS, appendLineCapped } from "./App";
 
 // vi.mock's factory is hoisted above every other statement in this file,
 // so the mocks it returns must themselves come from vi.hoisted - a plain
@@ -157,6 +157,37 @@ async function selectFishingTheme() {
   await screen.findByText("5 ready to upload");
 }
 
+describe("appendLineCapped", () => {
+  it("appends normally while under the cap", () => {
+    const result = appendLineCapped(["a", "b"], "c");
+    expect(result).toEqual(["a", "b", "c"]);
+  });
+
+  it("keeps exactly the newest 2000 lines, dropping the oldest, once over the cap", () => {
+    const lines = Array.from({ length: 2000 }, (_, i) => `line-${i}`);
+    let buffer: string[] = [];
+    for (const line of lines) {
+      buffer = appendLineCapped(buffer, line);
+    }
+    buffer = appendLineCapped(buffer, "line-2000");
+
+    expect(buffer).toHaveLength(2000);
+    expect(buffer[0]).toBe("line-1");
+    expect(buffer.at(-1)).toBe("line-2000");
+  });
+
+  it("stays bounded at 2000 across many more appends than the cap", () => {
+    let buffer: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      buffer = appendLineCapped(buffer, `line-${i}`);
+    }
+
+    expect(buffer).toHaveLength(2000);
+    expect(buffer[0]).toBe("line-3000");
+    expect(buffer.at(-1)).toBe("line-4999");
+  });
+});
+
 describe("App", () => {
   it("shows the theme picker once status is idle and themes have loaded", async () => {
     render(<App />);
@@ -205,6 +236,35 @@ describe("App", () => {
     await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
     expect(callOrder).toEqual(["startRun:Fishing", "openOutput"]);
     expect(await screen.findByRole("log")).toBeInTheDocument();
+  });
+
+  it("shows no Cancel/Confirm affordance while starting, so a run already created can't be orphaned", async () => {
+    let resolveStartRun: (value: { started_at: string }) => void = () => {};
+    mockStartRun.mockImplementation(
+      () => new Promise((resolve) => { resolveStartRun = resolve; }),
+    );
+
+    await selectFishingTheme();
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+
+    // No Cancel, no re-Confirm, no picker - nothing can interleave with
+    // the in-flight startRun and revert state while the run it started
+    // goes on existing server-side.
+    expect(await screen.findByText("Starting upload…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /choose a theme/i })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveStartRun({ started_at: "2026-09-25T12:00:00Z" });
+      await Promise.resolve();
+    });
+
+    // The run that now exists server-side is not orphaned: the page lands
+    // on "running", never back on the picker.
+    expect(await screen.findByRole("log")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /choose a theme/i })).not.toBeInTheDocument();
   });
 
   it("shows an error instead of a stuck running screen when startRun is refused (e.g. a 409)", async () => {

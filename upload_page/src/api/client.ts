@@ -151,15 +151,8 @@ export function openOutput(handlers: OutputHandlers, fromOffset?: number): Event
   });
 
   source.addEventListener("error", (event) => {
-    // EventSource auto-reconnects on its own (readyState goes back to
-    // CONNECTING) after a dropped connection - e.g. a server restart
-    // mid-run - and the spec has the browser resend its own Last-Event-ID
-    // on that reconnect, so the stream picks up where it left off with no
-    // action needed here. Only a fully CLOSED connection (one the browser
-    // has given up retrying) is a genuine, unrecoverable failure worth
-    // surfacing as an app-level error - treating every transient blip as
-    // fatal would otherwise stop a run that the server never actually
-    // stopped.
+    // CONNECTING means the browser is auto-reconnecting on its own (e.g. a
+    // server restart) - not a fatal failure, so don't surface it as one.
     if (source.readyState === EventSource.CONNECTING) {
       return;
     }
