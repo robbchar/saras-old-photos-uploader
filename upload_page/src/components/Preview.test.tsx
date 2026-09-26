@@ -65,6 +65,14 @@ describe("Preview", () => {
     expect(screen.getByText("row 11: error B")).toBeInTheDocument();
   });
 
+  it("falls back to a plain label when an invalid row carries no errors", () => {
+    const doc = docWithRows([
+      { row: 15, state: "unassigned", verdict: "invalid", identifier: "", errors: [], missing_fields: [] },
+    ]);
+    render(<Preview doc={doc} checkedAt="2026-01-01T09:07:00" onRecheck={vi.fn()} />);
+    expect(screen.getByText("row 15: invalid")).toBeInTheDocument();
+  });
+
   it("shows a not-ready row with its missing field", () => {
     const doc = docWithRows([
       { row: 20, state: "unassigned", verdict: "not_ready", identifier: "", errors: [], missing_fields: ["title"] },

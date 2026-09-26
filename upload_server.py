@@ -264,7 +264,7 @@ def _test_collection() -> str:
 
 
 def _check_startup(config: ServerConfig) -> project_config.ProjectConfig:
-    """The three refusals a restart can't fix, checked in order.
+    """The four refusals a restart can't fix, checked in order.
 
     Returns the resolved ProjectConfig (reused for /api/status's
     `collection`, so it isn't parsed twice) when none of them apply.
@@ -276,13 +276,26 @@ def _check_startup(config: ServerConfig) -> project_config.ProjectConfig:
 
     try:
         resolved = project_config.load_project_config(registry, config.project)
-    except (project_config.ConfigError, KeyError) as error:
-        raise _StartupRefusal(str(error)) from error
+    except (project_config.ConfigError, KeyError, TypeError, AttributeError) as error:
+        # TypeError/AttributeError catch a registry.json that parsed as valid
+        # JSON but isn't the expected object shape (a bare scalar like `5` or
+        # `null`, or a list) -- load_project_config assumes dict-like access
+        # (`"x" in registry`, `registry.get(...)`) and raises those raw rather
+        # than ConfigError for a shape that wrong. Left uncaught, that's a
+        # non-zero exit -- a launchd restart loop over a registry a restart
+        # can never fix.
+        raise _StartupRefusal(f"cannot load project config for '{config.project}': {error}") from error
 
     if build_stamp.read_committed_stamp(config.page_dir) is None:
         raise _StartupRefusal(
-            f"no committed bundle stamp under {config.page_dir / 'dist'} "
+            f"bundle missing: no committed bundle stamp under {config.page_dir / 'dist'} "
             "- build the upload page (yarn build) before serving"
+        )
+
+    if not build_stamp.bundle_is_current(config.page_dir):
+        raise _StartupRefusal(
+            f"bundle is stale under {config.page_dir / 'dist'} "
+            "- run yarn build and commit dist/ before serving"
         )
 
     return resolved
@@ -346,6 +359,16 @@ class _UploadServer(ThreadingHTTPServer):
         # call send_stop -- turning stop_request's graceful first signal /
         # hard-stop second signal contract into an unintended hard stop.
         self.stop_lock = threading.Lock()
+        # Guards _handle_start_run's whole critical section (the
+        # compute_run_state gate -> new_run_dir -> spawn_upload ->
+        # write_page_run sequence) the same way stop_lock guards
+        # _handle_stop_run's -- without it, two near-simultaneous POST
+        # /api/runs (a double-click, a retried fetch) could both pass the
+        # gate before either's page-run.json exists, spawning two uploads
+        # at once. A separate lock from stop_lock: starting and stopping
+        # are independent operations, and there's no reason a slow spawn
+        # should make Stop wait.
+        self.start_lock = threading.Lock()
 
 
 def make_handler(config: ServerConfig, deps: ServerDeps) -> type[BaseHTTPRequestHandler]:
@@ -581,29 +604,33 @@ class UploadPageHandler(BaseHTTPRequestHandler):
 
         server = self.app_server
         config = server.config
-        state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
-        # Only refuse when the lock is actually held (a run is going right
-        # now). Idle and Finished both leave the lock free -- Finished is a
-        # *past* run's ending, not a current one -- so a new run is allowed
-        # to start over either of them.
-        if isinstance(state, (page_runs.PageRunActive, page_runs.TerminalRunActive)):
-            self._send_error(409, _describe_run_state(state))
-            return
+        # Locked so two near-simultaneous starts can't both observe the gate
+        # as clear before either's page-run.json exists -- see
+        # _UploadServer.start_lock's comment.
+        with server.start_lock:
+            state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
+            # Only refuse when the lock is actually held (a run is going right
+            # now). Idle and Finished both leave the lock free -- Finished is a
+            # *past* run's ending, not a current one -- so a new run is allowed
+            # to start over either of them.
+            if isinstance(state, (page_runs.PageRunActive, page_runs.TerminalRunActive)):
+                self._send_error(409, _describe_run_state(state))
+                return
 
-        now = server.deps.now_utc()
-        run_dir = page_runs.new_run_dir(config.logs_base, now)
-        out_path = run_dir / page_runs.OUTPUT_FILENAME
-        pid = server.deps.spawn_upload(self._upload_argv(batch, run_dir), out_path, config.repo_root)
-        page_runs.write_page_run(
-            page_runs.PageRun(
-                pid=pid,
-                project=config.project,
-                batch=batch,
-                live=config.live,
-                started_at=now,
-                dir=run_dir,
+            now = server.deps.now_utc()
+            run_dir = page_runs.new_run_dir(config.logs_base, now)
+            out_path = run_dir / page_runs.OUTPUT_FILENAME
+            pid = server.deps.spawn_upload(self._upload_argv(batch, run_dir), out_path, config.repo_root)
+            page_runs.write_page_run(
+                page_runs.PageRun(
+                    pid=pid,
+                    project=config.project,
+                    batch=batch,
+                    live=config.live,
+                    started_at=now,
+                    dir=run_dir,
+                )
             )
-        )
         self._send_json(202, {"started_at": now})
 
     def _handle_stop_run(self) -> None:

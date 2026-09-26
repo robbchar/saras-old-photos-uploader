@@ -31,8 +31,8 @@ function RowFailureList({
         <p className="text-muted">None</p>
       ) : (
         <ul className="mt-1 space-y-1">
-          {items.map((item) => (
-            <li key={item.identifier} className={itemClassName}>
+          {items.map((item, index) => (
+            <li key={`${item.identifier}-${index}`} className={itemClassName}>
               <span className="font-mono">{item.identifier}</span>
               <span className="ml-2">{item.error}</span>
             </li>
@@ -41,6 +41,15 @@ function RowFailureList({
       )}
     </div>
   );
+}
+
+/** The stopped ending's headline: "Stopped after N of M" when the run's
+ * planned total was learned (a run_header was written), or just
+ * "Stopped after N" when it wasn't - stopping before the total is known is
+ * itself possible (see page_runs.Stopped), and "of planned" read as a
+ * literal, confusing word in that case rather than a placeholder. */
+function stoppedHeadline(succeeded: number, planned: number | null): string {
+  return planned === null ? `Stopped after ${succeeded}` : `Stopped after ${succeeded} of ${planned}`;
 }
 
 /** The failures/unconfirmed/skipped/not_attempted breakdown shared by
@@ -71,7 +80,7 @@ function FinishedBody({ ending }: { ending: Ending }) {
       return (
         <>
           <p className="font-semibold text-text">
-            {`Stopped after ${ending.summary.succeeded} of ${ending.planned ?? "planned"}`}
+            {stoppedHeadline(ending.summary.succeeded, ending.planned)}
           </p>
           <SummaryBreakdown summary={ending.summary} />
         </>

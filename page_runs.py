@@ -61,11 +61,48 @@ class PageRun:
         )
 
 
+# How many `-NNN` suffixes new_run_dir will try before giving up on a
+# colliding timestamp. Three digits comfortably covers any realistic burst
+# of same-second starts (the upload lock limits this to one run at a time
+# in practice); if every one of these is somehow taken, something is
+# seriously wrong and raising is more honest than silently reusing a dir.
+_MAX_RUN_DIR_SUFFIX = 999
+
+
 def new_run_dir(logs_base: Path, now: str) -> Path:
-    """Create and return `<logs_base>/page-runs/<now>/`."""
-    run_dir = logs_base / PAGE_RUNS_SUBDIR / now
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
+    """Create and return a unique `<logs_base>/page-runs/<now>[-NNN]/`.
+
+    `now` is second-resolution (see upload_server._default_now_utc), so two
+    runs started within the same second would otherwise collide on the same
+    folder -- silently overwriting one run's page-run.json and truncating
+    its output.txt. When `<now>` is already taken, a zero-padded `-002`,
+    `-003`, ... suffix is appended until an unused name is found.
+
+    The suffix is fixed-width and always longer than the bare timestamp, so
+    newest_run_dir's lexicographic-max sort still picks the right folder: a
+    suffixed name shares the bare timestamp as a prefix (so it always sorts
+    after it), and two suffixed names of the same width compare the same way
+    their suffix numbers do.
+
+    Uses `mkdir(exist_ok=False)` in a loop (not a check-then-create) so a
+    single process's own collision handling is itself race-free; a second
+    server process spawning in the same instant is a separate, accepted
+    residual window -- the upload lock backs that one.
+    """
+    base = logs_base / PAGE_RUNS_SUBDIR
+    base.mkdir(parents=True, exist_ok=True)
+
+    candidate = base / now
+    suffix = 2
+    while True:
+        try:
+            candidate.mkdir()
+            return candidate
+        except FileExistsError:
+            if suffix > _MAX_RUN_DIR_SUFFIX:
+                raise
+            candidate = base / f"{now}-{suffix:03d}"
+            suffix += 1
 
 
 def newest_run_dir(logs_base: Path) -> Path | None:
@@ -95,9 +132,16 @@ def read_page_run(run_dir: Path) -> PageRun | None:
 
 
 def find_jsonl(run_dir: Path) -> Path | None:
-    """The run's `upload-*.jsonl` log, if the run has gotten far enough to write one."""
+    """The run's `upload-*.jsonl` log, if the run has gotten far enough to write one.
+
+    A run dir normally holds exactly one. When it somehow holds more than
+    one (a reused/edge-case dir), the newest by name wins -- the filenames
+    embed a sortable UTC stamp (see ia_bulk.open_log), so the lexicographic
+    max is also the chronological max, consistent with newest_run_dir's own
+    "pick by name" rule.
+    """
     matches = sorted(run_dir.glob("upload-*.jsonl"))
-    return matches[0] if matches else None
+    return matches[-1] if matches else None
 
 
 def _read_jsonl_records(jsonl: Path) -> list[dict[str, object]]:

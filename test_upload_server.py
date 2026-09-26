@@ -15,6 +15,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import build_stamp
 import page_runs
 import upload_lock
 import upload_server
@@ -66,10 +67,23 @@ def _write_registry(tmp_path: Path, project: str = PROJECT) -> Path:
     return path
 
 
-def _write_dist(page_dir: Path, stamp: str = "abc123", index_html: str = "<!doctype html><title>t</title>") -> None:
+def _write_dist(
+    page_dir: Path, stamp: str | None = None, index_html: str = "<!doctype html><title>t</title>"
+) -> None:
+    """Writes a fake dist/ with a build-stamp.json and an index.html to serve.
+
+    stamp=None (the default) computes the REAL current stamp for page_dir's
+    source tree via build_stamp.compute_build_stamp -- so build_stamp.
+    bundle_is_current reports this bundle as current, which is what every
+    test other than the staleness ones wants (see _check_startup's stale-
+    bundle refusal). Pass an explicit stamp to simulate a stale bundle: any
+    fixed string mismatches the real (empty, since these fixtures write no
+    src/ files) computed stamp.
+    """
     dist = page_dir / "dist"
     dist.mkdir(parents=True, exist_ok=True)
-    (dist / "build-stamp.json").write_text(json.dumps({"stamp": stamp}), encoding="utf-8")
+    actual_stamp = stamp if stamp is not None else build_stamp.compute_build_stamp(page_dir)
+    (dist / "build-stamp.json").write_text(json.dumps({"stamp": actual_stamp}), encoding="utf-8")
     (dist / "index.html").write_text(index_html, encoding="utf-8")
 
 
@@ -134,7 +148,7 @@ def test_health_reports_stamp_mode_project(tmp_path):
         assert status == 200
         assert json.loads(body) == {
             "commit": "deadbeef",
-            "bundle_stamp": "abc123",
+            "bundle_stamp": build_stamp.compute_build_stamp(cfg.page_dir),
             "live": False,
             "project": PROJECT,
         }
@@ -611,6 +625,94 @@ def test_post_runs_oversized_body_is_400_not_buffered(tmp_path):
     assert status == 400
 
 
+def test_post_runs_same_second_starts_get_distinct_run_dirs(tmp_path, monkeypatch):
+    # now_utc is second-resolution and new_run_dir used to reuse the exact
+    # same folder for two starts in the same second -- overwriting the
+    # first run's page-run.json and truncating its output.txt. Both starts
+    # here share one fixed `now`, so this only passes if new_run_dir itself
+    # gives the second one a distinct folder.
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: page_runs.Idle())
+    pids = iter([1111, 2222])
+    deps = _fake_deps(spawn_upload=lambda argv, out_path, cwd: next(pids), now_utc=lambda: "20260925T130000Z")
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, deps) as base:
+        status1, _body1 = _post_json(base + "/api/runs", {"batch": "Logging"})
+        status2, _body2 = _post_json(base + "/api/runs", {"batch": "Waterfront"})
+    assert status1 == 202
+    assert status2 == 202
+
+    runs_base = tmp_path / "logs" / page_runs.PAGE_RUNS_SUBDIR
+    children = sorted(child.name for child in runs_base.iterdir())
+    assert len(children) == 2, "the second start must not have reused the first's folder"
+    assert children[0] == "20260925T130000Z"
+    assert children[1] != children[0] and children[1].startswith("20260925T130000Z")
+
+    saved = [page_runs.read_page_run(runs_base / name) for name in children]
+    assert all(run is not None for run in saved)
+    assert {run.batch for run in saved if run} == {"Logging", "Waterfront"}
+    assert {run.pid for run in saved if run} == {1111, 2222}
+
+
+def test_start_lock_serializes_concurrent_requests(tmp_path, monkeypatch):
+    """Two near-simultaneous start POSTs must not interleave the
+    compute_run_state-gate -> new_run_dir -> spawn_upload -> write_page_run
+    critical section -- otherwise both could pass the gate before either's
+    page-run.json exists. Forces the race deterministically, the same way
+    test_stop_lock_serializes_concurrent_requests does: the first call to
+    spawn_upload blocks (holding _UploadServer.start_lock) until this test
+    releases it, giving a concurrent second POST every chance to race past
+    the gate if the lock were missing.
+    """
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: page_runs.Idle())
+
+    call_count_lock = threading.Lock()
+    calls: list[str] = []
+    first_call_entered = threading.Event()
+    release_first_call = threading.Event()
+
+    def fake_spawn(argv: list[str], out_path: Path, cwd: Path) -> int:
+        with call_count_lock:
+            calls.append(str(out_path))
+            is_first_call = len(calls) == 1
+        if is_first_call:
+            first_call_entered.set()
+            released = release_first_call.wait(timeout=5)
+            assert released, "test setup: release_first_call was never signaled"
+        return len(calls)
+
+    deps = _fake_deps(spawn_upload=fake_spawn, now_utc=lambda: "20260925T130000Z")
+    cfg = _make_config(tmp_path)
+    results: list[tuple[int, bytes]] = []
+
+    with upload_server.serve_in_thread(cfg, deps) as base:
+
+        def post_start(batch: str) -> None:
+            results.append(_post_json(base + "/api/runs", {"batch": batch}))
+
+        first = threading.Thread(target=post_start, args=("Logging",))
+        first.start()
+        assert first_call_entered.wait(timeout=5), "first start request never reached spawn_upload"
+
+        second = threading.Thread(target=post_start, args=("Waterfront",))
+        second.start()
+        # If start_lock weren't held across the whole critical section,
+        # `second` could reach spawn_upload right now (`calls` still has
+        # only the first entry). Give it a real chance to, then prove it
+        # didn't: still blocked behind the lock, not a second spawn call.
+        second.join(timeout=1.0)
+        assert second.is_alive(), "second start request should still be blocked behind start_lock"
+        assert len(calls) == 1
+
+        release_first_call.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        assert not first.is_alive()
+        assert not second.is_alive()
+
+    assert len(calls) == 2
+    assert [status for status, _body in results] == [202, 202]
+
+
 # ---------------------------------------------------------------------------
 # POST /api/runs/current/stop
 # ---------------------------------------------------------------------------
@@ -802,6 +904,29 @@ def test_startup_refuses_when_bundle_missing_returns_0(tmp_path, capsys):
     assert "bundle" in capsys.readouterr().err.lower()
 
 
+def test_startup_accepts_a_current_bundle(tmp_path):
+    # _write_dist's default stamp is the REAL computed stamp for this
+    # (empty) source tree, so this bundle is current -- the server must
+    # actually start and serve, not just avoid a startup refusal.
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, _body = _get(base + "/api/health")
+    assert status == 200
+
+
+def test_startup_refuses_when_bundle_is_stale_returns_0(tmp_path, capsys):
+    # Overwrite the committed stamp with one that can't match the (empty)
+    # source tree under page_dir -- simulates a dist/ built from an older
+    # src/ that was since edited without a rebuild.
+    cfg = _make_config(tmp_path)
+    (cfg.page_dir / "dist" / "build-stamp.json").write_text(
+        json.dumps({"stamp": "not-the-real-stamp"}), encoding="utf-8"
+    )
+    result = upload_server.run_server(cfg, _fake_deps())
+    assert result == 0
+    assert "stale" in capsys.readouterr().err.lower()
+
+
 def test_startup_refuses_when_project_unknown_returns_0(tmp_path, capsys):
     cfg = _make_config(tmp_path, project="not-a-registered-project")
     result = upload_server.run_server(cfg, _fake_deps())
@@ -823,6 +948,26 @@ def test_startup_refuses_when_registry_is_malformed_json_returns_0(tmp_path, cap
     result = upload_server.run_server(cfg, _fake_deps())
     assert result == 0
     assert "registry" in capsys.readouterr().err.lower()
+
+
+def test_startup_refuses_when_registry_is_a_bare_number_returns_0(tmp_path, capsys):
+    # Valid JSON, but not the expected object shape -- load_project_config's
+    # dict-like access (`"x" in registry`) raises TypeError on an int rather
+    # than ConfigError; must still be a clean exit-0 refusal, not an
+    # unhandled exception (a non-zero exit means a launchd restart loop).
+    cfg = _make_config(tmp_path)
+    Path(cfg.registry).write_text("5", encoding="utf-8")
+    result = upload_server.run_server(cfg, _fake_deps())
+    assert result == 0
+    assert "cannot load project config" in capsys.readouterr().err.lower()
+
+
+def test_startup_refuses_when_registry_is_null_returns_0(tmp_path, capsys):
+    cfg = _make_config(tmp_path)
+    Path(cfg.registry).write_text("null", encoding="utf-8")
+    result = upload_server.run_server(cfg, _fake_deps())
+    assert result == 0
+    assert "cannot load project config" in capsys.readouterr().err.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -18,9 +18,12 @@ interface RowRange {
 }
 
 function reasonForInvalidRow(row: ValidateRow): string {
-  // "invalid" rows always carry at least one operator-facing error string
-  // (that is what makes them invalid) - see ia_bulk.py's validate --json.
-  return row.errors[0];
+  // "invalid" rows are supposed to always carry at least one operator-facing
+  // error string (that is what makes them invalid) - see ia_bulk.py's
+  // validate --json - but errors[0] is never guaranteed by the type, so a
+  // malformed row falls back to a plain label instead of rendering
+  // "undefined".
+  return row.errors[0] ?? "invalid";
 }
 
 function reasonForNotReadyRow(row: ValidateRow): string {

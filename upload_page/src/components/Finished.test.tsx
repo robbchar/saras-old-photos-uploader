@@ -37,14 +37,14 @@ describe("Finished", () => {
     expect(screen.getByText("Stopped after 5 of 42")).toBeInTheDocument();
   });
 
-  it("falls back to 'planned' in the stopped headline when the total was never learned", () => {
+  it("drops 'of planned' in the stopped headline when the total was never learned", () => {
     const ending: Ending = {
       kind: "stopped",
       planned: null,
       summary: { ...BASE_SUMMARY, succeeded: 5 },
     };
     render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
-    expect(screen.getByText("Stopped after 5 of planned")).toBeInTheDocument();
+    expect(screen.getByText("Stopped after 5")).toBeInTheDocument();
   });
 
   it("shows the exact rate-limited message", () => {
@@ -91,6 +91,24 @@ describe("Finished", () => {
     render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
     expect(screen.getByText("lcps-photosexample-00007")).toBeInTheDocument();
     expect(screen.getByText("HTTP 500 Internal Server Error")).toBeInTheDocument();
+  });
+
+  it("renders every failure even when identifiers are blank and duplicate", () => {
+    // Skipped/unconfirmed rows can carry an empty identifier; duplicates
+    // must not collapse into one rendered row (see the list-key fix).
+    const ending: Ending = {
+      kind: "completed",
+      summary: {
+        ...BASE_SUMMARY,
+        failures: [
+          { identifier: "", error: "first failure" },
+          { identifier: "", error: "second failure" },
+        ],
+      },
+    };
+    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    expect(screen.getByText("first failure")).toBeInTheDocument();
+    expect(screen.getByText("second failure")).toBeInTheDocument();
   });
 
   it("calls onChooseAnother when 'Choose another theme' is clicked", () => {

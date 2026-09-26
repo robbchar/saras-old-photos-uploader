@@ -86,12 +86,14 @@ the page was never reading that line's text to begin with.
 Piece 6 (deployment — a later PR, not this one) will run the server as a
 LaunchAgent with `KeepAlive: {SuccessfulExit: false}`: launchd restarts it only
 after it exits non-zero. So `run_server()` exits `0`, after printing why, for
-a refusal a restart cannot fix — a registry that will not load, a project the
-registry doesn't have, or no committed bundle stamp under `upload_page/dist/`
-(the page was never built). Anything else that ends the server counts as a
-failure a restart might actually cure. Recorded here, ahead of piece 6,
-because it already constrains what "exit clean" has to mean in
-`upload_server.py` today.
+a refusal a restart cannot fix — a registry that will not load or isn't the
+expected shape, a project the registry doesn't have, or `upload_page/dist/`
+missing a committed bundle stamp *or* holding one that's stale (its stamp no
+longer matches the source under `upload_page/src/` — see `build_stamp.py`).
+Either way the page was never built for what's on disk now, and a restart
+can't build it. Anything else that ends the server counts as a failure a
+restart might actually cure. Recorded here, ahead of piece 6, because it
+already constrains what "exit clean" has to mean in `upload_server.py` today.
 
 ## The server's request guard
 

@@ -76,6 +76,17 @@ def test_find_jsonl_finds_the_upload_file(tmp_path):
     assert page_runs.find_jsonl(tmp_path) == p
 
 
+def test_find_jsonl_picks_the_newest_on_multiple_files(tmp_path):
+    # A run dir normally holds exactly one upload-*.jsonl; on a reused or
+    # edge-case dir holding more than one, the newest by name must win, not
+    # the oldest (find_jsonl used to return sorted(...)[0]).
+    older = _write_jsonl(tmp_path, [{"record": "run_header", "planned": 1}])
+    newer = tmp_path / "upload-20260926T000000Z.jsonl"
+    newer.write_text(json.dumps({"record": "run_header", "planned": 2}) + "\n", encoding="utf-8")
+    assert older.name < newer.name, "test setup: newer must sort after older"
+    assert page_runs.find_jsonl(tmp_path) == newer
+
+
 # --- read_ending: refused (no jsonl) -----------------------------------------
 
 
@@ -250,6 +261,23 @@ def test_new_run_dir_creates_the_folder(tmp_path):
     run_dir = page_runs.new_run_dir(logs_base, "20260925T120000Z")
     assert run_dir == logs_base / "page-runs" / "20260925T120000Z"
     assert run_dir.is_dir()
+
+
+def test_new_run_dir_same_timestamp_gets_a_distinct_suffixed_folder(tmp_path):
+    # now_utc is second-resolution: two runs started in the same second must
+    # not collide on one folder (that would overwrite the first's
+    # page-run.json and truncate its output.txt).
+    logs_base = tmp_path / "logs"
+    first = page_runs.new_run_dir(logs_base, "20260925T120000Z")
+    second = page_runs.new_run_dir(logs_base, "20260925T120000Z")
+    third = page_runs.new_run_dir(logs_base, "20260925T120000Z")
+    assert first.is_dir() and second.is_dir() and third.is_dir()
+    assert len({first, second, third}) == 3
+    assert first == logs_base / "page-runs" / "20260925T120000Z"
+    # The suffixed names must still sort after the bare timestamp, since
+    # newest_run_dir picks the lexicographically greatest child name.
+    assert sorted([first, second, third], key=lambda p: p.name) == [first, second, third]
+    assert page_runs.newest_run_dir(logs_base) == third
 
 
 def test_newest_run_dir_picks_the_lexicographic_max(tmp_path):
