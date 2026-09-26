@@ -31,6 +31,7 @@ import launch_agent
 import log_tab
 import platform_probe
 import upload_lock
+import upload_server
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -2643,6 +2644,17 @@ def cmd_setup(args) -> int:
     if args.enable_agent and deployment.exit_code(results) != 0:
         print(AGENT_ENABLED_DESPITE_FAILS, file=sys.stderr)
     return deployment.exit_code(results)
+
+
+def cmd_serve(args) -> int:
+    """Runs the upload page's local HTTP server until it is stopped.
+
+    repo_root is this file's own directory, so the served bundle
+    (repo_root/upload_page) always matches this checkout regardless of the
+    caller's cwd.
+    """
+    config = upload_server.build_config_from_args(args, REPO_ROOT)
+    return upload_server.run_server(config)
 
 
 def cmd_validate(args) -> int:
@@ -5706,6 +5718,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    serve_parser = subparsers.add_parser(
+        "serve", help="Run the upload page's local HTTP server", allow_abbrev=False
+    )
+    serve_parser.add_argument("--project", required=True, help="Project ID from the registry")
+    serve_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
+    serve_parser.add_argument("--live", action="store_true", help="Serve against the project's real Sheet and collection instead of the test Sheet and test_collection")
+    serve_parser.add_argument("--port", type=int, default=5277, help="Port to listen on (default 5277)")
+
     return parser
 
 
@@ -5740,6 +5760,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.command == "setup":
         return cmd_setup(args)
+    if args.command == "serve":
+        return cmd_serve(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2

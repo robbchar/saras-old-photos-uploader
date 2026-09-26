@@ -12789,3 +12789,49 @@ def test_a_sync_run_with_only_skips_mirrors_the_line_the_operator_saw(
     assert rows[0][4].startswith("nothing to sync")
     assert rows[0][4] in out.splitlines()
     assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00002"]]
+
+
+# ---------------------------------------------------------------------------
+# Task 9: the `serve` subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_serve_parser_defaults():
+    args = ia_bulk.build_parser().parse_args(["serve", "--project", "astoriaphotos"])
+    assert args.command == "serve"
+    assert args.port == 5277
+    assert args.live is False
+    assert args.registry == ia_bulk.DEFAULT_REGISTRY
+    assert args.project == "astoriaphotos"
+
+
+def test_serve_parser_accepts_port_and_live():
+    args = ia_bulk.build_parser().parse_args(
+        ["serve", "--project", "astoriaphotos", "--port", "9", "--live"]
+    )
+    assert args.port == 9
+    assert args.live is True
+
+
+def test_cmd_serve_calls_run_server(monkeypatch):
+    called = {}
+
+    def fake_run_server(config, deps=None):
+        called["cfg"] = config
+        return 0
+
+    monkeypatch.setattr(ia_bulk.upload_server, "run_server", fake_run_server)
+    args = ia_bulk.build_parser().parse_args(["serve", "--project", "p", "--port", "9"])
+    assert ia_bulk.cmd_serve(args) == 0
+    cfg = called["cfg"]
+    assert cfg.project == "p"
+    assert cfg.port == 9
+    assert cfg.repo_root == ia_bulk.REPO_ROOT
+    assert cfg.page_dir == ia_bulk.REPO_ROOT / "upload_page"
+
+
+def test_main_dispatches_to_cmd_serve(monkeypatch):
+    called = []
+    monkeypatch.setattr(ia_bulk, "cmd_serve", lambda args: called.append(args.command) or 0)
+    assert ia_bulk.main(["serve", "--project", "demo"]) == 0
+    assert called == ["serve"]
