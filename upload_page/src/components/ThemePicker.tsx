@@ -27,7 +27,8 @@ function countNeedingFixing(counts: ValidateCounts): number {
 
 function disabledReason(batch: ValidateBatch): string {
   const needFixing = countNeedingFixing(batch.counts);
-  return needFixing > 0 ? `${needFixing} need fixing` : "all uploaded";
+  if (needFixing === 0) return "all uploaded";
+  return `${needFixing} ${needFixing === 1 ? "needs" : "need"} fixing`;
 }
 
 function labelFor(batch: ValidateBatch): string {
@@ -45,7 +46,7 @@ export function ThemePicker({ batches, value, disabled, onSelect }: ThemePickerP
       <Select.Root value={value} onValueChange={onSelect} disabled={disabled}>
         <Select.Trigger
           aria-labelledby="theme-picker-label"
-          className="flex min-w-64 items-center justify-between gap-2 rounded border border-border-strong bg-raised px-3 py-2 text-text"
+          className="flex min-w-64 cursor-pointer items-center justify-between gap-2 rounded border border-border-strong bg-raised px-3 py-2 text-text disabled:cursor-not-allowed"
         >
           <Select.Value placeholder="Choose a theme" />
         </Select.Trigger>

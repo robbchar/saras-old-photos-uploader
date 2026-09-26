@@ -36,6 +36,16 @@ const NEEDS_FIXING_BATCH: ValidateBatch = {
   },
 };
 
+// Exactly one broken row - the verb agrees: "1 needs fixing".
+const ONE_NEEDS_FIXING_BATCH: ValidateBatch = {
+  value: "Harborside",
+  ready_to_upload: 0,
+  counts: {
+    ...ZERO_COUNTS,
+    unassigned: { ready: 0, invalid: 0, not_ready: 1 },
+  },
+};
+
 // Nothing left ready, and nothing broken either - everything already
 // uploaded (done rows carry no invalid/not_ready of their own here).
 const ALL_UPLOADED_BATCH: ValidateBatch = {
@@ -77,6 +87,13 @@ describe("ThemePicker", () => {
     openPicker();
     const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });
     expect(option).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("uses the singular 'needs' when exactly one row needs fixing", () => {
+    render(<ThemePicker batches={[ONE_NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
+
+    openPicker();
+    expect(screen.getByRole("option", { name: "Harborside — 1 needs fixing" })).toBeInTheDocument();
   });
 
   it("disables a zero-ready, fully-done theme as 'all uploaded'", () => {
