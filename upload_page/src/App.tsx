@@ -443,6 +443,7 @@ export default function App() {
                 batches={themes?.batches ?? []}
                 value={currentBatch(state)}
                 disabled={themes === null || starting || state.kind === "running" || state.kind === "stopping"}
+                loading={themes === null}
                 onSelect={handleThemeSelect}
               />
             )}

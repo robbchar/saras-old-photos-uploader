@@ -133,4 +133,10 @@ describe("ThemePicker", () => {
     render(<ThemePicker batches={[READY_BATCH]} disabled onSelect={vi.fn()} />);
     expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeDisabled();
   });
+
+  it("shows a loading label while themes are still being fetched", () => {
+    render(<ThemePicker batches={[]} loading disabled onSelect={vi.fn()} />);
+    expect(screen.getByText("Loading themes…")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toHaveAttribute("aria-busy", "true");
+  });
 });

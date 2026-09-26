@@ -12,6 +12,10 @@ export interface ThemePickerProps {
   /** Disables the whole control - used while a run is uploading, when
    * switching themes would conflict with the one-run-at-a-time lock. */
   disabled?: boolean;
+  /** True while the theme list is still being fetched: the trigger shows a
+   * loading label in place of the placeholder and is marked aria-busy, so it
+   * is clear WHY the control cannot be used yet. */
+  loading?: boolean;
   onSelect: (value: string) => void;
 }
 
@@ -37,7 +41,7 @@ function labelFor(batch: ValidateBatch): string {
   return `${batch.value} — ${detail}`;
 }
 
-export function ThemePicker({ batches, value, disabled, onSelect }: ThemePickerProps) {
+export function ThemePicker({ batches, value, disabled, loading, onSelect }: ThemePickerProps) {
   return (
     <div className="flex flex-wrap items-center gap-3">
       <span id="theme-picker-label" className="text-text">
@@ -46,9 +50,10 @@ export function ThemePicker({ batches, value, disabled, onSelect }: ThemePickerP
       <Select.Root value={value} onValueChange={onSelect} disabled={disabled}>
         <Select.Trigger
           aria-labelledby="theme-picker-label"
+          aria-busy={loading}
           className="flex min-w-64 cursor-pointer items-center justify-between gap-2 rounded border border-border-strong bg-raised px-3 py-2 text-text disabled:cursor-not-allowed"
         >
-          <Select.Value placeholder="Choose a theme" />
+          {loading ? "Loading themes…" : <Select.Value placeholder="Choose a theme" />}
         </Select.Trigger>
         <Select.Portal>
           {/* position="popper" (not the default item-aligned) so the list
