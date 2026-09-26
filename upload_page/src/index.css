@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+:root {
+  --bg:#ffffff; --surface:#f7f7f8; --raised:#ffffff;
+  --border:#d9d9de; --border-strong:#b8b8c0;
+  --text:#1a1a1e; --muted:#5c5c66; --faint:#8a8a94;
+  --accent:#2f6feb; --accent-hover:#285fce; --on-accent:#ffffff;
+  --test:#b45309; --test-bg:#fef3c7; --test-border:#f59e0b;
+  --danger:#b42318; --danger-bg:#fee4e2; --danger-border:#f04438;
+  --radius:6px;
+  --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono","Cascadia Code",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#17171a; --surface:#1e1e22; --raised:#26262b;
+    --border:#34343b; --border-strong:#45454e;
+    --text:#ececf0; --muted:#a0a0aa; --faint:#70707a;
+    --accent:#5b8def; --accent-hover:#6f9bf2; --on-accent:#0e0e10;
+    --test:#fbbf24; --test-bg:#3a2c08; --test-border:#a16207;
+    --danger:#f97066; --danger-bg:#3a1512; --danger-border:#b42318;
+  }
+}
+/* expose the runtime-flipping vars to Tailwind utilities */
+@theme inline {
+  --color-bg:var(--bg); --color-surface:var(--surface); --color-raised:var(--raised);
+  --color-border:var(--border); --color-border-strong:var(--border-strong);
+  --color-text:var(--text); --color-muted:var(--muted); --color-faint:var(--faint);
+  --color-accent:var(--accent); --color-accent-hover:var(--accent-hover); --color-on-accent:var(--on-accent);
+  --color-test:var(--test); --color-test-bg:var(--test-bg); --color-test-border:var(--test-border);
+  --color-danger:var(--danger); --color-danger-bg:var(--danger-bg); --color-danger-border:var(--danger-border);
+  --font-sans:var(--font-ui); --font-mono:var(--font-mono);
+}
+body { background:var(--bg); color:var(--text); font-family:var(--font-ui); }
