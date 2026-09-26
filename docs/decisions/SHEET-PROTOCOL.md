@@ -486,10 +486,18 @@ The rewrite lives in `e2e_sheet.py`, test code only; `ia_bulk.py` has no
 reset command. Every write goes through `check_reset_allowed`, which refuses
 unless the e2e registry's own `sheet_id` is a `REPLACE_WITH…` placeholder and
 its `test_sheet_id` is no project's live `sheet_id` in
-`projects_registry.json`. It compares against live IDs only: sharing the Test
-Sheet with `sarasoldphotos`'s `test_sheet_id` is intended. It also refuses a
+`projects_registry.json`. It compares against live IDs only, so it does not
+object to another project reusing the rehearsal's Test Sheet. It also refuses a
 placeholder `test_sheet_id`, and a log tab named like the data tab, since the
 reset deletes the log tabs.
+
+**Amended 2026-09-26:** the rehearsal's Test Sheet and `sarasoldphotos`'s
+`test_sheet_id` are now deliberately separate. `sarasoldphotos`'s `test_sheet_id`
+is a curated, human-friendly sheet the local upload page reads in test mode
+(no `--live`); the rehearsal keeps its own `test_sheet_id` in
+`e2e_fixtures/registry.json` and rewrites only that one, so a rehearsal can
+never wipe the curated sheet. The guard is unchanged — it still checks live IDs
+only — but the separation, not the sharing, is now the intent.
 
 The live-ID check is empty until a real `sheet_id` is registered, so the reset
 also looks at the Sheet itself: it refuses to clear a data tab with more rows
