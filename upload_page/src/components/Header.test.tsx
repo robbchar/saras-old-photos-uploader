@@ -12,7 +12,7 @@ afterEach(cleanup);
 // screen reader user relies on this text alone, since the amber color is
 // not itself a signal (color-blind users, printouts, etc).
 const TEST_MODE_TEXT =
-  "TEST MODE \u2014 uploads go to test_collection and expire in about 30 days";
+  "TEST MODE — uploads go to test_collection and expire in about 30 days";
 
 describe("Header", () => {
   it("shows the project and collection", () => {

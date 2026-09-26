@@ -29,7 +29,7 @@ function disabledReason(batch: ValidateBatch): string {
 function labelFor(batch: ValidateBatch): string {
   const detail =
     batch.ready_to_upload === 0 ? disabledReason(batch) : `${batch.ready_to_upload} ready`;
-  return `${batch.value} \u2014 ${detail}`;
+  return `${batch.value} — ${detail}`;
 }
 
 export function ThemePicker({ batches, value, onSelect }: ThemePickerProps) {

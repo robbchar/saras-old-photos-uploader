@@ -64,7 +64,7 @@ describe("ThemePicker", () => {
     );
 
     openPicker();
-    const option = screen.getByRole("option", { name: "Fishing \u2014 1 ready" });
+    const option = screen.getByRole("option", { name: "Fishing — 1 ready" });
     expect(option).not.toHaveAttribute("aria-disabled", "true");
 
     fireEvent.click(option);
@@ -75,7 +75,7 @@ describe("ThemePicker", () => {
     render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
 
     openPicker();
-    const option = screen.getByRole("option", { name: "Waterfront \u2014 3 need fixing" });
+    const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });
     expect(option).toHaveAttribute("aria-disabled", "true");
   });
 
@@ -83,7 +83,7 @@ describe("ThemePicker", () => {
     render(<ThemePicker batches={[ALL_UPLOADED_BATCH]} onSelect={vi.fn()} />);
 
     openPicker();
-    const option = screen.getByRole("option", { name: "Harbor \u2014 all uploaded" });
+    const option = screen.getByRole("option", { name: "Harbor — all uploaded" });
     expect(option).toHaveAttribute("aria-disabled", "true");
   });
 
@@ -92,7 +92,7 @@ describe("ThemePicker", () => {
     render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={onSelect} />);
 
     openPicker();
-    fireEvent.click(screen.getByRole("option", { name: "Waterfront \u2014 3 need fixing" }));
+    fireEvent.click(screen.getByRole("option", { name: "Waterfront — 3 need fixing" }));
     expect(onSelect).not.toHaveBeenCalled();
   });
 });

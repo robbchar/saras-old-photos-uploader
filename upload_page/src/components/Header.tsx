@@ -10,7 +10,7 @@ export interface HeaderProps {
 }
 
 const TEST_MODE_MESSAGE =
-  "TEST MODE \u2014 uploads go to test_collection and expire in about 30 days";
+  "TEST MODE — uploads go to test_collection and expire in about 30 days";
 
 export function Header({ project, collection, live }: HeaderProps) {
   return (
