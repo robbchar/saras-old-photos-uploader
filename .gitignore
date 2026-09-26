@@ -6,6 +6,8 @@ data/
 .venv/
 .vscode/
 .ignored/
+# SDD ledgers/briefs/reports; scratch, never part of the tree.
+.superpowers/
 # Worktrees live here; never part of the tree itself.
 .claude/worktrees/
 # Defense in depth: these must never land in a public repo even outside .ignored/.

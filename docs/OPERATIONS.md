@@ -430,6 +430,53 @@ real files in the wrong place under a permanent identifier.
 Identifiers are permanent. An item uploaded under the wrong identifier cannot
 be renamed, only darkened by IA staff on request.
 
+## Running an upload from the page
+
+For a volunteer who shouldn't need a terminal at all. This is not a third way
+to upload — it runs the exact `validate`/`upload` commands above, through a
+browser instead of a command line. Which Sheet and collection it targets
+(test or `--live`) is fixed by how the server was started, not a switch on
+the page — see [`decisions/UPLOAD-PAGE.md`](decisions/UPLOAD-PAGE.md).
+
+```bash
+python ia_bulk.py serve --project sarasoldphotos --live
+```
+
+Leave that running, then open the bookmark:
+`http://127.0.0.1:5277` — not `localhost`; the server listens on IPv4 only.
+Default port is 5277 (`--port` to change it, matched by the URL you open).
+
+On the page:
+
+1. Pick a theme from the picker. Each one shows how many of its rows are
+   ready to upload; a theme with nothing ready is listed but disabled, with
+   the reason ("all uploaded", "3 need fixing").
+2. Read the preview — the same counts and per-row reasons `validate --batch`
+   would print, with **Re-check** if the Sheet has changed since.
+3. Press Start, then confirm in the dialog that restates the theme and count
+   (and, in live mode, that the upload cannot be undone or renamed).
+4. Watch it run: a live output pane streaming the upload's own console
+   output, and a "N of M" progress figure. Stop asks to confirm, then stops
+   after the current photo — the same clean stop a terminal `upload` gets on
+   Ctrl-C (see
+   [`decisions/QUOTA-AND-RUNS.md`, "An interrupt stops a run after the
+   current item"](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)).
+5. Read the result: uploaded/failed/unconfirmed/skipped counts, each with
+   its rows named, exactly as `upload`'s own summary reports them.
+
+Closing the browser tab, or even restarting the server, does not stop the
+upload — the child process outlives both; reopening the page reattaches to
+whatever is still running or shows the last result. See
+[`decisions/UPLOAD-PAGE.md`, "The upload outlives the server"](decisions/UPLOAD-PAGE.md#the-upload-outlives-the-server).
+
+**The page only ever stops its own run.** A run started from a terminal (or
+from another page instance) shows on the page as "an upload is already
+running" with no Stop button — go to the terminal it was started from and
+press Ctrl-C there, same as always ("Stopping a run on purpose" above). The
+one-upload-at-a-time lock is shared, so the page and the terminal can never
+both be uploading at once, but each can only be stopped from where it was
+started.
+
 ## 4. Corrections
 
 The Sheet **is** the correction — edit the cell, then:
@@ -794,6 +841,15 @@ grep -o '"status": "[a-z]*"' logs/upload-*.jsonl | sort | uniq -c
 # just the failures, with their errors
 grep '"status": "failure"' logs/upload-20260712T125326.jsonl
 ```
+
+**A run started from the page logs under `logs/page-runs/<UTC>/` instead of
+directly in `logs/`.** Each page run gets its own timestamped folder holding
+`output.txt` (the child's captured console output), the same
+`upload-*.jsonl` log a terminal run writes, and `page-run.json` (which pid,
+project, batch and mode started it). Everything above still applies once
+you're inside that folder — `grep`/`tail` the JSONL exactly the same way; the
+only difference from a terminal run is where it lives on disk. See
+[`ARCHITECTURE.md`, "`serve` and the upload page"](ARCHITECTURE.md#serve-and-the-upload-page).
 
 Every real run also ends with a `run_summary` line — `tail -1` of its log
 gives the whole run in one record, without the row lines above it. For

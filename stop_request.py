@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -56,3 +57,14 @@ def stop_request_on_interrupt() -> Iterator[StopRequest]:
         for signum, handler in previous.items():
             # None means the old handler wasn't set from Python; the default is the closest match.
             signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+
+
+def request_stop(pid: int) -> None:
+    """Send one graceful-stop signal to a running upload child.
+
+    POSIX: SIGINT. Windows: CTRL_BREAK_EVENT, which the child (spawned in its
+    own process group) receives as SIGBREAK. The receiving side turns the
+    first signal into a stop-after-the-current-item; a second is a hard stop.
+    """
+    sig = signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT
+    os.kill(pid, sig)

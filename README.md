@@ -551,6 +551,23 @@ the first live runs are verified by hand. See
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), "Enabling the hourly sync" and
 "Checking a machine later".
 
+### `serve` — run the local upload page
+
+```bash
+python ia_bulk.py serve --project sarasoldphotos --live
+```
+
+Runs a small local HTTP server, on `http://127.0.0.1:5277` by default
+(`--port` to change it), serving the upload page — a browser-based
+alternative to the `validate`/`upload` commands above for a volunteer who
+shouldn't need a terminal. Bound to `127.0.0.1` only. Which Sheet and
+collection it targets (test, or `--live` as shown above) is fixed by how it
+was started, not a switch on the page. See
+[`docs/OPERATIONS.md`, "Running an upload from the page"](docs/OPERATIONS.md#running-an-upload-from-the-page)
+to actually use it, and
+[`docs/decisions/UPLOAD-PAGE.md`](docs/decisions/UPLOAD-PAGE.md) for why it's
+built this way.
+
 ## Safety rail
 
 By default every command targets IA's `test_collection` sandbox. The Sheet's
