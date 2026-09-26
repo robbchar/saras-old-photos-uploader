@@ -217,6 +217,32 @@ def test_post_with_json_content_type_passes_the_guard(tmp_path):
         assert status == 404
 
 
+def test_post_with_matching_origin_passes_the_guard(tmp_path):
+    # A real browser POST carries an Origin; the Vite dev proxy rewrites it to
+    # the upload server's own (see upload_page/vite.config.ts). The guard must
+    # let a same-origin POST through, not treat every Origin-bearing POST as
+    # cross-site. No test exercised a POST *with* an Origin when the dev-proxy
+    # 403 slipped in - this is that case.
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, _body = _post(
+            base + "/api/anything",
+            headers={"Content-Type": "application/json", "Origin": base},
+        )
+        assert status == 404  # cleared both guards, reached routing
+
+
+def test_post_with_foreign_origin_is_rejected(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _post(
+            base + "/api/anything",
+            headers={"Content-Type": "application/json", "Origin": "http://evil.example"},
+        )
+        assert status == 403
+        assert "error" in json.loads(body)
+
+
 # ---------------------------------------------------------------------------
 # Static serving
 # ---------------------------------------------------------------------------
