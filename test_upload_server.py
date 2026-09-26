@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -596,6 +597,18 @@ def test_post_runs_malformed_json_is_400(tmp_path):
     assert status == 400
 
 
+def test_post_runs_oversized_body_is_400_not_buffered(tmp_path):
+    # A Content-Length past _MAX_JSON_BODY_BYTES is refused outright -- this
+    # pins that the cap is enforced (not a real memory-exhaustion test, which
+    # would be impractical to run in the suite).
+    oversized_batch = "x" * (upload_server._MAX_JSON_BODY_BYTES + 1)
+    body = json.dumps({"batch": oversized_batch}).encode("utf-8")
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, _body = _post(base + "/api/runs", headers={"Content-Type": "application/json"}, body=body)
+    assert status == 400
+
+
 # ---------------------------------------------------------------------------
 # POST /api/runs/current/stop
 # ---------------------------------------------------------------------------
@@ -668,6 +681,69 @@ def test_stop_is_idempotent(tmp_path, monkeypatch):
     assert status1 == 202
     assert status2 == 202
     assert sent == [holder_pid]
+
+
+def test_stop_lock_serializes_concurrent_requests(tmp_path, monkeypatch):
+    """Two near-simultaneous stop POSTs (double-click, a retried fetch, two
+    open tabs) must not both slip past the idempotency check before either
+    records it -- that would fire send_stop twice, and per stop_request's
+    own contract a second signal is a HARD stop, not a no-op. Forces the
+    race deterministically: the first call to send_stop blocks (holding
+    _UploadServer.stop_lock) until this test releases it, giving a second,
+    concurrent POST every chance to race past the check if the lock were
+    missing. Every wait is bounded so a regression fails fast instead of
+    hanging the suite.
+    """
+    holder_pid = 7070
+    _write_matching_page_run(tmp_path, holder_pid)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: _running(holder_pid))
+
+    call_count_lock = threading.Lock()
+    calls: list[int] = []
+    first_call_entered = threading.Event()
+    release_first_call = threading.Event()
+
+    def fake_send_stop(pid: int) -> None:
+        with call_count_lock:
+            calls.append(pid)
+            is_first_call = len(calls) == 1
+        if is_first_call:
+            first_call_entered.set()
+            released = release_first_call.wait(timeout=5)
+            assert released, "test setup: release_first_call was never signaled"
+
+    deps = _fake_deps(send_stop=fake_send_stop)
+    cfg = _make_config(tmp_path)
+    results: list[tuple[int, bytes]] = []
+
+    with upload_server.serve_in_thread(cfg, deps) as base:
+
+        def post_stop() -> None:
+            results.append(_post_json(base + "/api/runs/current/stop", {}))
+
+        first = threading.Thread(target=post_stop)
+        first.start()
+        assert first_call_entered.wait(timeout=5), "first stop request never reached send_stop"
+
+        second = threading.Thread(target=post_stop)
+        second.start()
+        # If stop_lock weren't held across the whole check-then-add-then-signal
+        # section, `second` could reach send_stop right now (`calls` still has
+        # only the first entry). Give it a real chance to do so, then prove it
+        # didn't: still blocked behind the lock, not a second send_stop call.
+        second.join(timeout=1.0)
+        assert second.is_alive(), "second stop request should still be blocked behind stop_lock"
+        assert calls == [holder_pid]
+
+        release_first_call.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        assert not first.is_alive()
+        assert not second.is_alive()
+
+    assert calls == [holder_pid]
+    assert len(results) == 2
+    assert [status for status, _body in results] == [202, 202]
 
 
 # ---------------------------------------------------------------------------

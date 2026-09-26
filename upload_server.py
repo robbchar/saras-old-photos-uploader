@@ -52,6 +52,12 @@ _MODULE_DIR = Path(__file__).resolve().parent
 # reference to the server instance that called it.
 _spawned_upload_processes: dict[Path, subprocess.Popen[bytes]] = {}
 
+# A generous cap for the small {"batch": "<value>"} bodies this API's POST
+# routes actually receive -- guards _read_json_body against a Content-Length
+# claiming something absurd and the server dutifully buffering it all into
+# memory before rejecting it.
+_MAX_JSON_BODY_BYTES = 65536
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -325,6 +331,14 @@ class _UploadServer(ThreadingHTTPServer):
         # makes the stop route idempotent (a second POST acks 202 without
         # sending a second, hard-stop signal). See UploadPageHandler._handle_stop_run.
         self.stopped_runs: set[Path] = set()
+        # Guards the check-then-add-then-signal critical section in
+        # _handle_stop_run: ThreadingHTTPServer runs one thread per
+        # connection, so two near-simultaneous stop POSTs (double-click, a
+        # retried fetch, two open tabs) could otherwise both observe
+        # `page_run.dir not in stopped_runs` before either adds it, and both
+        # call send_stop -- turning stop_request's graceful first signal /
+        # hard-stop second signal contract into an unintended hard stop.
+        self.stop_lock = threading.Lock()
 
 
 def make_handler(config: ServerConfig, deps: ServerDeps) -> type[BaseHTTPRequestHandler]:
@@ -451,6 +465,26 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _base_argv(self, subcommand: str) -> list[str]:
+        """The `[python, ia_bulk.py, <subcommand>, --project P, --registry R,
+        (--live)?]` prefix shared by every real command line this handler
+        builds (`validate`, `upload`) -- each caller appends its own trailing
+        flags (`--batch`, `--json`, `--log-dir`, ...).
+        """
+        config = self.app_server.config
+        argv = [
+            sys.executable,
+            "ia_bulk.py",
+            subcommand,
+            "--project",
+            config.project,
+            "--registry",
+            config.registry,
+        ]
+        if config.live:
+            argv.append("--live")
+        return argv
+
     def _validate_argv(self, batch: str | None = None) -> list[str]:
         """Builds the real `validate --json` command line.
 
@@ -462,18 +496,7 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         `--batch` is passed in equals form so a value starting with `-`
         (e.g. `-weird`) is never mistaken for a flag by argparse.
         """
-        config = self.app_server.config
-        argv = [
-            sys.executable,
-            "ia_bulk.py",
-            "validate",
-            "--project",
-            config.project,
-            "--registry",
-            config.registry,
-        ]
-        if config.live:
-            argv.append("--live")
+        argv = self._base_argv("validate")
         if batch is not None:
             argv.append(f"--batch={batch}")
         argv.append("--json")
@@ -498,30 +521,26 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         convention: `--batch` in equals form so a value starting with `-`
         (e.g. `-weird`) is never mistaken for a flag by argparse.
         """
-        config = self.app_server.config
-        argv = [
-            sys.executable,
-            "ia_bulk.py",
-            "upload",
-            "--project",
-            config.project,
-            "--registry",
-            config.registry,
-        ]
-        if config.live:
-            argv.append("--live")
+        argv = self._base_argv("upload")
         argv.append(f"--batch={batch}")
         argv.extend(["--log-dir", str(run_dir)])
         return argv
 
     def _read_json_body(self) -> object:
         """Parses the POST body as JSON. A missing/empty body parses to `{}`;
-        `None` signals a *present* body that isn't valid JSON, distinct from
-        that empty-body case."""
+        `None` signals a *present* body that isn't valid JSON -- including one
+        whose Content-Length exceeds _MAX_JSON_BODY_BYTES, which is refused
+        without ever reading it -- distinct from that empty-body case.
+        """
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
             length = 0
+        if length > _MAX_JSON_BODY_BYTES:
+            # The body is left unread on the wire, so this connection can't
+            # safely serve another request -- don't keep it alive.
+            self.close_connection = True
+            return None
         raw = self.rfile.read(length) if length > 0 else b""
         if not raw:
             return {}
@@ -588,10 +607,13 @@ class UploadPageHandler(BaseHTTPRequestHandler):
 
         # Idempotent: a second POST acks 202 without signaling again -- a
         # second real signal is stop_request's hard-stop escalation, which
-        # only the operator pressing Stop twice should trigger.
-        if page_run.dir not in server.stopped_runs:
-            server.stopped_runs.add(page_run.dir)
-            server.deps.send_stop(holder.pid)
+        # only the operator pressing Stop twice should trigger. Locked so two
+        # near-simultaneous POSTs can't both observe "not yet signaled" and
+        # both call send_stop -- see _UploadServer.stop_lock's comment.
+        with server.stop_lock:
+            if page_run.dir not in server.stopped_runs:
+                server.stopped_runs.add(page_run.dir)
+                server.deps.send_stop(holder.pid)
         self._send_json(202, {})
 
     def _respond_with_validate_output(self, stdout: str, stderr: str) -> None:
