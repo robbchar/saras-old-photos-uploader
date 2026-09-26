@@ -58,6 +58,13 @@ _spawned_upload_processes: dict[Path, subprocess.Popen[bytes]] = {}
 # memory before rejecting it.
 _MAX_JSON_BODY_BYTES = 65536
 
+# How long GET /api/runs/current/output sleeps between polls of output.txt,
+# the JSONL and the upload lock once a poll finds nothing new to emit --
+# small enough that a client sees new output well under a second after the
+# child writes it, large enough not to spin the CPU on a run that's just
+# sitting there uploading a large file.
+_SSE_POLL_INTERVAL_SECONDS = 0.2
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -368,6 +375,17 @@ class UploadPageHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib signature
         pass
 
+    # wbufsize=0 is already BaseHTTPRequestHandler's default (each write goes
+    # straight to the socket, no Python-level buffering to flush) -- kept
+    # explicit here because GET /api/runs/current/output depends on it: an
+    # SSE event must reach the client the instant it's written, not whenever
+    # some internal buffer happens to fill. disable_nagle_algorithm=True
+    # (TCP_NODELAY) closes the other half of "buffered by the framework" --
+    # without it, the OS itself can hold a small write back for up to ~40ms
+    # waiting to coalesce it with the next one.
+    wbufsize = 0
+    disable_nagle_algorithm = True
+
     @property
     def app_server(self) -> _UploadServer:
         # self.server is typed as socketserver.BaseServer by typeshed; this
@@ -414,6 +432,8 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             self._handle_themes()
         elif path == "/api/preview":
             self._handle_preview()
+        elif path == "/api/runs/current/output":
+            self._handle_output()
         elif path.startswith("/api/"):
             self._send_error(404, f"no such route: {path}")
         else:
@@ -615,6 +635,162 @@ class UploadPageHandler(BaseHTTPRequestHandler):
                 server.stopped_runs.add(page_run.dir)
                 server.deps.send_stop(holder.pid)
         self._send_json(202, {})
+
+    # -- GET /api/runs/current/output (SSE) --------------------------------
+
+    def _handle_output(self) -> None:
+        """The newest run's output.txt/JSONL, streamed as Server-Sent Events.
+
+        204 when there's no run folder yet -- nothing to stream. 409 when the
+        upload lock is held by a pid that isn't this page's newest run: a
+        terminal (CLI, or otherwise unmatched) run is going, and this page
+        has no output of its own to show for it. Otherwise the newest run is
+        streamed regardless of whether it's still running or already
+        finished -- see _stream_output, which the RunningOutput pane relies
+        on to resume after either a closed tab or a server restart.
+        """
+        server = self.app_server
+        run_dir = page_runs.newest_run_dir(server.config.logs_base)
+        if run_dir is None:
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        running = upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH)
+        holder = running.holder if running is not None else None
+        page_run = page_runs.read_page_run(run_dir)
+        if holder is not None and (page_run is None or holder.pid != page_run.pid):
+            self._send_error(409, "a terminal-run upload is in progress")
+            return
+
+        self._stream_output(run_dir)
+
+    def _resume_offset(self) -> int:
+        """Where to resume reading output.txt.
+
+        Last-Event-ID takes precedence when present (an EventSource sets it
+        automatically on its own auto-reconnect); ?from= covers the case
+        EventSource itself can't -- an explicit resume from a client that
+        hasn't received an event yet (e.g. a freshly reopened tab restoring
+        a previously-seen offset from its own state). Either can't-parse
+        falls back to 0 (start over) rather than raising.
+        """
+        last_event_id = self.headers.get("Last-Event-ID")
+        if last_event_id is not None:
+            try:
+                return int(last_event_id)
+            except ValueError:
+                pass
+        query = urllib.parse.urlsplit(self.path).query
+        values = urllib.parse.parse_qs(query).get("from")
+        if values:
+            try:
+                return int(values[0])
+            except ValueError:
+                pass
+        return 0
+
+    def _stream_output(self, run_dir: Path) -> None:
+        """Drain whole lines and progress, check whether the run has ended,
+        and repeat until it has -- then send one `finished` event and close.
+
+        A client disconnect (BrokenPipeError/ConnectionResetError, raised by
+        the socket write inside _write_sse_event) ends the loop quietly;
+        anything else is a real bug and is left to propagate.
+        """
+        offset = self._resume_offset()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        last_progress: tuple[int, int | None] | None = None
+        try:
+            while True:
+                offset = self._drain_output_lines(run_dir, offset)
+                last_progress = self._emit_progress_if_changed(run_dir, last_progress)
+                if self._run_is_over(run_dir):
+                    # One more drain: output/progress written between the
+                    # poll above and the process actually exiting -- most
+                    # importantly the JSONL's run_summary line -- must not
+                    # be lost.
+                    offset = self._drain_output_lines(run_dir, offset)
+                    self._emit_progress_if_changed(run_dir, last_progress)
+                    ending = page_runs.read_ending(run_dir)
+                    self._write_sse_event("finished", json.dumps({"ending": ending.to_json()}))
+                    return
+                time.sleep(_SSE_POLL_INTERVAL_SECONDS)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _drain_output_lines(self, run_dir: Path, offset: int) -> int:
+        """Emits one `line` event per complete (newline-terminated) line
+        found after `offset` in output.txt, and returns the new offset.
+
+        A trailing partial line -- the child hasn't written its closing "\\n"
+        yet -- is left unconsumed; the next poll re-reads it along with
+        whatever's been appended since, so a line is never split across two
+        events.
+
+        "\\r\\n" is treated as the newline (the trailing \\r is stripped as
+        part of it); a bare \\r elsewhere in the line is kept verbatim --
+        that's how the child rewrites an in-place progress line, and the
+        page's terminal rendering depends on seeing it.
+        """
+        output_path = run_dir / page_runs.OUTPUT_FILENAME
+        try:
+            with open(output_path, "rb") as handle:
+                handle.seek(offset)
+                chunk = handle.read()
+        except OSError:
+            return offset
+        if not chunk:
+            return offset
+
+        pieces = chunk.split(b"\n")
+        complete_lines = pieces[:-1]  # the last piece has no trailing \n yet
+        position = offset
+        for raw_line in complete_lines:
+            position += len(raw_line) + 1  # +1 for the \n split() consumed
+            if raw_line.endswith(b"\r"):
+                raw_line = raw_line[:-1]
+            text = raw_line.decode("utf-8", errors="replace")
+            self._write_sse_event("line", text, event_id=str(position))
+        return position
+
+    def _emit_progress_if_changed(
+        self, run_dir: Path, last_progress: tuple[int, int | None] | None
+    ) -> tuple[int, int | None]:
+        current = page_runs.read_progress(page_runs.find_jsonl(run_dir))
+        if current != last_progress:
+            done, planned = current
+            self._write_sse_event("progress", json.dumps({"done": done, "planned": planned}))
+        return current
+
+    def _run_is_over(self, run_dir: Path) -> bool:
+        """A tracked Popen -- one this same server process spawned -- answers
+        directly via poll(). After a server restart there's no tracked Popen
+        for any run still on disk; the upload lock, which the OS drops the
+        instant the holder process dies, is the only way left to tell "still
+        going" from "over".
+        """
+        process = _spawned_upload_processes.get(run_dir)
+        if process is not None:
+            return process.poll() is not None
+        return upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH) is None
+
+    def _write_sse_event(self, event: str, data: str, event_id: str | None = None) -> None:
+        frame_lines = []
+        if event_id is not None:
+            frame_lines.append(f"id: {event_id}")
+        frame_lines.append(f"event: {event}")
+        frame_lines.append(f"data: {data}")
+        frame_lines.append("")
+        frame_lines.append("")
+        self.wfile.write("\n".join(frame_lines).encode("utf-8"))
+        self.wfile.flush()
 
     def _respond_with_validate_output(self, stdout: str, stderr: str) -> None:
         """Empty stdout is the refusal signal -- never the exit code.

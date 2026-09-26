@@ -5,12 +5,14 @@ these exercise the actual HTTP stack, not a mocked one."""
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import page_runs
@@ -821,3 +823,315 @@ def test_startup_refuses_when_registry_is_malformed_json_returns_0(tmp_path, cap
     result = upload_server.run_server(cfg, _fake_deps())
     assert result == 0
     assert "registry" in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/runs/current/output (SSE)
+# ---------------------------------------------------------------------------
+
+
+def _write_jsonl(run_dir: Path, records: list[dict]) -> Path:
+    jsonl = run_dir / "upload-20260925T140000Z.jsonl"
+    jsonl.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return jsonl
+
+
+def _append_jsonl(run_dir: Path, record: dict) -> None:
+    jsonl = page_runs.find_jsonl(run_dir)
+    assert jsonl is not None, "test setup: call _write_jsonl before _append_jsonl"
+    with open(jsonl, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+RUN_SUMMARY = {
+    "record": "run_summary",
+    "attempted": 2,
+    "succeeded": 2,
+    "failures": [],
+    "unconfirmed": [],
+    "not_attempted": 0,
+    "rate_limited": False,
+    "rate_limit_status": None,
+    "stopped_by_request": False,
+    "skipped": [],
+}
+
+
+@dataclass(frozen=True)
+class _SseEvent:
+    event: str
+    data: str
+    id: str | None = None
+
+
+def _parse_sse_block(raw: bytes) -> _SseEvent | None:
+    """One blank-line-terminated SSE block -> its event/data/id.
+
+    None for a stray empty block (e.g. the leading "" a str.split(b"\\n\\n")
+    can produce right after the header/body separator).
+    """
+    event = "message"
+    event_id: str | None = None
+    data_lines: list[str] = []
+    saw_field = False
+    for raw_line in raw.split(b"\n"):
+        line = raw_line.decode("utf-8", errors="replace")
+        if not line:
+            continue
+        if line.startswith("event:"):
+            saw_field = True
+            value = line[len("event:"):]
+            event = value[1:] if value.startswith(" ") else value
+        elif line.startswith("data:"):
+            saw_field = True
+            value = line[len("data:"):]
+            data_lines.append(value[1:] if value.startswith(" ") else value)
+        elif line.startswith("id:"):
+            saw_field = True
+            value = line[len("id:"):]
+            event_id = value[1:] if value.startswith(" ") else value
+    if not saw_field:
+        return None
+    return _SseEvent(event=event, data="\n".join(data_lines), id=event_id)
+
+
+def _read_sse(
+    url: str,
+    headers: dict[str, str] | None = None,
+    stop_on: str = "finished",
+    timeout: float = 5.0,
+) -> list[_SseEvent]:
+    """A minimal SSE client over a raw socket, bounded by `timeout` seconds total.
+
+    Not urllib/http.client: its buffered reader's read(n) blocks until it has
+    n bytes or hits EOF, which would make "no event yet" indistinguishable
+    from "still connecting" for the reattach test below, where the point is
+    to observe the stream sitting open with nothing new to say. A short
+    per-recv socket timeout (0.2s) lets the loop re-check the overall
+    deadline instead.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    assert parsed.hostname is not None and parsed.port is not None
+    target = parsed.path + (("?" + parsed.query) if parsed.query else "")
+    request_headers = {"Host": f"{parsed.hostname}:{parsed.port}", "Connection": "close"}
+    request_headers.update(headers or {})
+    header_text = "".join(f"{key}: {value}\r\n" for key, value in request_headers.items())
+    request = f"GET {target} HTTP/1.1\r\n{header_text}\r\n"
+
+    events: list[_SseEvent] = []
+    sock = socket.create_connection((parsed.hostname, parsed.port), timeout=timeout)
+    sock.settimeout(0.2)
+    try:
+        sock.sendall(request.encode("utf-8"))
+        buffer = b""
+        headers_done = False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            buffer += chunk
+            if not headers_done:
+                sep = buffer.find(b"\r\n\r\n")
+                if sep == -1:
+                    continue
+                buffer = buffer[sep + 4:]
+                headers_done = True
+            while b"\n\n" in buffer:
+                raw_block, buffer = buffer.split(b"\n\n", 1)
+                event = _parse_sse_block(raw_block)
+                if event is None:
+                    continue
+                events.append(event)
+                if event.event == stop_on:
+                    return events
+    finally:
+        sock.close()
+    return events
+
+
+def test_sse_streams_lines_progress_and_finished(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    (run_dir / "output.txt").write_bytes(b"[1/2] uploading a\r\n")
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 2}, {"identifier": "a", "status": "success"}])
+    _append_jsonl(run_dir, RUN_SUMMARY)
+
+    # No tracked Popen for this run_dir (nothing called spawn_upload), and a
+    # free lock -- the run is over from the very first poll.
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(base + "/api/runs/current/output", stop_on="finished")
+
+    assert any(e.event == "line" and e.data == "[1/2] uploading a" for e in events)
+    assert any(e.event == "progress" for e in events)
+    fin = [e for e in events if e.event == "finished"][-1]
+    assert json.loads(fin.data)["ending"]["kind"] == "completed"
+
+
+def test_sse_line_event_id_is_the_byte_offset_after_its_newline(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    line = b"only line\n"
+    (run_dir / "output.txt").write_bytes(line)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(base + "/api/runs/current/output", stop_on="finished")
+
+    line_events = [e for e in events if e.event == "line"]
+    assert len(line_events) == 1
+    assert line_events[0].id == str(len(line))
+
+
+def test_sse_resumes_from_last_event_id_header(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    first_line = b"first line\n"
+    second_line = b"second line\n"
+    (run_dir / "output.txt").write_bytes(first_line + second_line)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(
+            base + "/api/runs/current/output",
+            headers={"Last-Event-ID": str(len(first_line))},
+            stop_on="finished",
+        )
+
+    line_texts = [e.data for e in events if e.event == "line"]
+    assert line_texts == ["second line"]
+
+
+def test_sse_resumes_from_from_query_param(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    first_line = b"first line\n"
+    second_line = b"second line\n"
+    (run_dir / "output.txt").write_bytes(first_line + second_line)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(
+            base + f"/api/runs/current/output?from={len(first_line)}",
+            stop_on="finished",
+        )
+
+    line_texts = [e.data for e in events if e.event == "line"]
+    assert line_texts == ["second line"]
+
+
+def test_sse_treats_crlf_as_newline_keeps_bare_cr(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    # "a" terminated by \r\n (the \r is part of the newline, stripped); "b\rc"
+    # terminated by a bare \n (the \r inside it is kept verbatim -- the page
+    # rewrites the current line on \r).
+    (run_dir / "output.txt").write_bytes(b"a\r\nb\rc\n")
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(base + "/api/runs/current/output", stop_on="finished")
+
+    line_texts = [e.data for e in events if e.event == "line"]
+    assert line_texts == ["a", "b\rc"]
+
+
+def test_sse_reattaches_after_restart_when_lock_frees(tmp_path, monkeypatch):
+    """After a server restart, _spawned_upload_processes is empty (in-memory,
+    lost across the restart) -- the only way left to tell the run is still
+    going is the OS-dropped upload lock. Bounded: the monkeypatched holder is
+    flipped to None from the main thread shortly after connecting, so the
+    background reader's wait for "finished" is short either way.
+    """
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T150000Z")
+    holder_pid = 4242
+    page_runs.write_page_run(
+        page_runs.PageRun(
+            pid=holder_pid, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir
+        )
+    )
+    (run_dir / "output.txt").write_bytes(b"")
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 1}])
+    _append_jsonl(run_dir, RUN_SUMMARY)
+
+    lock_state: dict[str, upload_lock.RunningUpload | None] = {"value": _running(holder_pid)}
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: lock_state["value"])
+
+    cfg = _make_config(tmp_path)
+    results: list[list[_SseEvent]] = []
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        reader = threading.Thread(
+            target=lambda: results.append(
+                _read_sse(base + "/api/runs/current/output", stop_on="finished", timeout=3.0)
+            )
+        )
+        reader.start()
+        time.sleep(0.3)
+        assert reader.is_alive(), "stream should still be open while the lock is held"
+
+        lock_state["value"] = None  # the holder process exited; the lock is now free
+        reader.join(timeout=3.0)
+        assert not reader.is_alive(), "stream should have closed once the lock freed"
+
+    assert len(results) == 1
+    assert any(e.event == "finished" for e in results[0])
+
+
+def test_sse_204_when_idle(tmp_path):
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/runs/current/output")
+    assert status == 204
+    assert body == b""
+
+
+def test_sse_409_when_terminal_run_holds_lock(tmp_path, monkeypatch):
+    _write_matching_page_run(tmp_path, pid=111)
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: _running(222))
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/runs/current/output")
+    assert status == 409
+    assert json.loads(body) == {"error": "a terminal-run upload is in progress"}
+
+
+def test_sse_streams_refused_ending_when_run_never_wrote_jsonl(tmp_path):
+    # A run folder exists (so newest_run_dir finds it) but nothing holds the
+    # lock and the run never got as far as writing a JSONL -- still streams
+    # (as a refused run), never a spurious 409.
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T160000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        events = _read_sse(base + "/api/runs/current/output", stop_on="finished", timeout=3.0)
+    fin = [e for e in events if e.event == "finished"][-1]
+    assert json.loads(fin.data)["ending"]["kind"] == "refused"
