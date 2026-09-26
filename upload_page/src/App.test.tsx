@@ -348,4 +348,45 @@ describe("App", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
   });
+
+  it("shows the Finished screen on a fresh mount when the status is already finished (reload behavior)", async () => {
+    mockGetStatus.mockResolvedValue({
+      live: false,
+      project: "astoriaphotos",
+      collection: "sarasoldphotos",
+      run: { kind: "finished", ending: COMPLETED_ENDING, page_run: null },
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose another theme" })).toBeInTheDocument();
+  });
+
+  it("returns to a refreshed theme picker after Choose another theme, instead of looping back to Finished (regression)", async () => {
+    // Reproduces the by-hand bug: /api/status is stateless and keeps
+    // reporting "finished" from the newest page-run folder even after the
+    // volunteer asks to start a new one - so Choose another theme must
+    // never re-fetch it, or the page loops straight back to this screen.
+    mockGetStatus.mockResolvedValue({
+      live: false,
+      project: "astoriaphotos",
+      collection: "sarasoldphotos",
+      run: { kind: "finished", ending: COMPLETED_ENDING, page_run: null },
+    });
+
+    render(<App />);
+    await screen.findByText("5 uploaded, 0 failed");
+    expect(mockGetStatus).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose another theme" }));
+
+    expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
+    expect(mockGetThemes).toHaveBeenCalledTimes(1);
+    // Still just the one mount-time call - the loop bug called getStatus
+    // again here, which kept returning "finished" and bounced right back.
+    expect(mockGetStatus).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("5 uploaded, 0 failed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Choose another theme" })).not.toBeInTheDocument();
+  });
 });

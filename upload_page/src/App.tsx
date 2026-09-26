@@ -156,8 +156,10 @@ export default function App() {
   // True while startRun is in flight - see handleConfirmStart.
   const [starting, setStarting] = useState(false);
 
-  // Mount, and every return trip through "loading" (Choose-another) - fetch
-  // status and route to the matching screen.
+  // Mount only - fetch status once and route to the matching screen. Choose-
+  // another does NOT come back through here: it goes straight from
+  // "finished" to "choosing" (see reducer.ts's fromFinished) so it never
+  // re-fetches this stateless status and loops back to "finished" again.
   useEffect(() => {
     if (state.kind !== "loading") return;
     let cancelled = false;
@@ -176,7 +178,7 @@ export default function App() {
   }, [state]);
 
   // Load the theme list the first time the picker is shown (including
-  // after Choose-another routes back through "loading" -> "choosing").
+  // after Choose-another resets the picker to "choosing" with themes:null).
   useEffect(() => {
     if (state.kind !== "choosing" || state.themes !== null) return;
     let cancelled = false;

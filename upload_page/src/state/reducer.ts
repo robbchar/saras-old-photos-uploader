@@ -112,8 +112,11 @@ function fromStopping(state: StoppingState, action: Action): AppState {
 
 function fromFinished(state: FinishedState, action: Action): AppState {
   switch (action.type) {
+    // Straight to "choosing", not "loading" - "loading" re-fetches
+    // /api/status, which would just report "finished" again (it's derived
+    // from the newest page-run folder) and bounce right back here.
     case "choose-another/clicked":
-      return { kind: "loading" };
+      return { kind: "choosing", themes: null };
     default:
       return state;
   }

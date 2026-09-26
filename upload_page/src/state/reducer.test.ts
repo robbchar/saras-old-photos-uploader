@@ -116,7 +116,7 @@ const definedTransitions: ReadonlyArray<[AppState["kind"], Action["type"], AppSt
   ["running", "sse/finished", "finished"],
   ["stopping", "sse/progress", "stopping"],
   ["stopping", "sse/finished", "finished"],
-  ["finished", "choose-another/clicked", "loading"],
+  ["finished", "choose-another/clicked", "choosing"],
   // "error" is accepted from every state, including "error" itself.
   ...allKinds.map((kind): [AppState["kind"], Action["type"], AppState["kind"]] => [kind, "error", "error"]),
 ];
@@ -274,10 +274,10 @@ describe("other data-carrying transitions", () => {
     expect(result).toEqual({ kind: "error", message: "sheet unreadable" });
   });
 
-  test("choose-another/clicked resets a finished run back to loading", () => {
+  test("choose-another/clicked resets a finished run to a refreshed picker (themes not yet loaded)", () => {
     const finished: AppState = { kind: "finished", ending: SAMPLE_ENDING };
     const result = reducer(finished, { type: "choose-another/clicked" });
-    expect(result).toEqual({ kind: "loading" });
+    expect(result).toEqual({ kind: "choosing", themes: null });
   });
 
   test("error is accepted from any state, carrying the message", () => {
