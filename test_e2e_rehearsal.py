@@ -41,6 +41,14 @@ from sheet_client import SheetClient
 from test_e2e_lock import OTHER_RUN, FakeSheets
 from test_e2e_lock import TARGET as LOCK_TARGET
 
+# For test_upload_page_drives_a_real_run_end_to_end: a real upload_server,
+# reusing test_upload_server.py's own HTTP/SSE helpers rather than
+# reinventing an SSE client here.
+import page_runs
+import stop_request
+import upload_server
+from test_upload_server import _post_json, _read_sse
+
 REPO_ROOT = Path(__file__).resolve().parent
 E2E_REGISTRY = REPO_ROOT / "e2e_fixtures" / "registry.json"
 LIVE_REGISTRY = REPO_ROOT / "projects_registry.json"
@@ -247,6 +255,60 @@ def restore_broken_filename(sheet: RehearsalSheet, lock: RehearsalLock, filename
     expect(STEP_12, sheet.cell(sheet.grid(), BROKEN_ROW, "File Name") == filename, "the broken filename was not restored")
 
 
+# ---------------------------------------------------------------------------
+# test_upload_page_drives_a_real_run_end_to_end: the same Test Sheet and
+# test_collection, but driven through a real upload_server over HTTP -
+# proving the server -> subprocess -> real IA -> SSE chain, not just the CLI
+# test_rehearsal already exercises directly.
+# ---------------------------------------------------------------------------
+
+# e2e_fixtures/sheet.json's Theme value for rows 1-4; e2e_fixtures/registry.json
+# names "theme" as this project's batch_column. Row 5 has no Theme, so it is
+# out of scope for this batch - see e2e_fixtures/sheet.json.
+UPLOAD_PAGE_BATCH = "E2E"
+
+STEP_UPLOAD_PAGE_PREDICT = "upload page e2e - predict via validate --json (Task 16)"
+STEP_UPLOAD_PAGE_RUN = "upload page e2e - drive a real run through the server (Task 16)"
+
+
+def _restore_real_ia_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """conftest's autouse fixtures poison IA_CONFIG_FILE/IA_ACCESS_KEY_* for
+    every test, in this process, so no test reaches real IA by accident.
+    upload_server's default spawn_upload starts the upload child with a copy
+    of THIS process's environment (see _default_spawn_upload), so that child
+    needs the real values restored here before POSTing /api/runs - undone
+    automatically at teardown like everything else monkeypatch touches."""
+    for name, value in REAL_IA_ENVIRONMENT.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def _reap_spawned_upload_child(run_dir: Path) -> None:
+    """Safety net for a timed-out SSE wait: reaps ONLY the specific Popen this
+    test's own run spawned - tracked by upload_server itself, keyed by
+    run_dir (see upload_server._spawned_upload_processes) - never anything
+    found by pid guesswork or image name. A graceful stop, then a second
+    (hard-stop) request, then a direct kill of this exact handle; each step
+    bounded, so teardown itself can never hang."""
+    process = upload_server._spawned_upload_processes.get(run_dir)
+    if process is None or process.poll() is not None:
+        return
+    for patience_seconds in (60, 30):
+        stop_request.request_stop(process.pid)
+        try:
+            process.wait(timeout=patience_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"teardown: the spawned upload child (pid {process.pid}) survived a kill of its own handle")
+
+
 @pytest.mark.e2e
 def test_rehearsal(tmp_path, request):
     log_dir = tmp_path / "logs"
@@ -378,6 +440,101 @@ def test_rehearsal(tmp_path, request):
     ]
     expect(STEP_11, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
     # Step 12 runs as the finalizer registered at step 4.
+
+
+@pytest.mark.e2e
+def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch):
+    """A real upload_server (test mode), driven over HTTP exactly as the
+    page's frontend would drive it: POST /api/runs, then stream
+    /api/runs/current/output to `finished`. The page's own reported result
+    must equal what validate --json independently predicts for the same
+    batch - i.e. the page's result equals reality, not just its own say-so.
+    """
+    fixture = load_fixture_grid(FIXTURE_SHEET)
+    header = fixture[0]
+
+    preflight()
+    _restore_real_ia_environment(monkeypatch)
+    target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRY)
+    service = build_sheets_service(REAL_KEY_PATH)
+    sheet = RehearsalSheet(service, target, header)
+    lock = take_lock(service, target, tmp_path / "logs")
+    request.addfinalizer(lambda: release_lock(lock))
+
+    reset_test_sheet(service, target, fixture)
+    expect(STEP_UPLOAD_PAGE_PREDICT, sheet.grid() == fixture, "the data tab does not match the fixture after the reset")
+
+    check_in(lock, STEP_UPLOAD_PAGE_PREDICT)
+    prediction = run_cli(STEP_UPLOAD_PAGE_PREDICT, "validate", f"--batch={UPLOAD_PAGE_BATCH}", "--json")
+    expect(STEP_UPLOAD_PAGE_PREDICT, prediction.returncode == 0, f"validate --json refused:\n{output_of(prediction)}")
+    expected_succeeded = json.loads(prediction.stdout)["ready_to_upload"]
+    expect(
+        STEP_UPLOAD_PAGE_PREDICT,
+        expected_succeeded > 0,
+        f"validate --json predicts 0 rows ready for batch {UPLOAD_PAGE_BATCH!r}; the fixture may have changed",
+    )
+
+    check_in(lock, STEP_UPLOAD_PAGE_RUN)
+    config = upload_server.ServerConfig(
+        project=E2E_PROJECT,
+        registry=str(E2E_REGISTRY),
+        live=False,
+        port=0,
+        repo_root=REPO_ROOT,
+        page_dir=REPO_ROOT / "upload_page",
+    )
+    with upload_server.serve_in_thread(config) as base_url:
+        status, body = _post_json(f"{base_url}/api/runs", {"batch": UPLOAD_PAGE_BATCH})
+        expect(STEP_UPLOAD_PAGE_RUN, status == 202, f"POST /api/runs: expected 202, got {status}: {body!r}")
+
+        run_dir = page_runs.newest_run_dir(config.logs_base)
+        if run_dir is None:
+            pytest.fail(f"{STEP_UPLOAD_PAGE_RUN}: no run folder was created after POST /api/runs")
+        request.addfinalizer(lambda: _reap_spawned_upload_child(run_dir))
+
+        # IA queue delays during the real upload are not defects, hence the
+        # generous overall budget - never an assertion on how long it took.
+        events = _read_sse(f"{base_url}/api/runs/current/output", stop_on="finished", timeout=CLI_TIMEOUT_SECONDS)
+
+    finished = [event for event in events if event.event == "finished"]
+    expect(STEP_UPLOAD_PAGE_RUN, bool(finished), f"no 'finished' event within {CLI_TIMEOUT_SECONDS}s")
+    ending = json.loads(finished[-1].data)["ending"]
+
+    if ending["kind"] == "rate_limited":
+        pytest.fail(f"{STEP_UPLOAD_PAGE_RUN}: Internet Archive is throttling uploads, not a defect in the tool; re-run later")
+    expect(
+        STEP_UPLOAD_PAGE_RUN,
+        ending["kind"] == "completed",
+        f"the run ended as {ending['kind']!r}, not 'completed': {ending}",
+    )
+    summary = ending["summary"]
+    failed = len(summary.get("failures", []))
+    expect(
+        STEP_UPLOAD_PAGE_RUN,
+        summary.get("succeeded") == expected_succeeded and failed == 0,
+        f"the page reports {summary.get('succeeded')} succeeded / {failed} failed; "
+        f"validate --json predicted {expected_succeeded} ready to upload, 0 failed",
+    )
+
+    # write_back (ia_bulk.py's upload_from_sheet) is only true for --live or
+    # --write-identifier; the page's own _upload_argv passes neither in test
+    # mode, so a test-mode page run must leave the data tab untouched - only
+    # the Upload Log tab (telemetry, always mirrored) records it.
+    expect(
+        STEP_UPLOAD_PAGE_RUN,
+        sheet.grid() == fixture,
+        "a test-mode page run wrote to the data tab, but write-back needs --live or --write-identifier",
+    )
+
+    check_in(lock, STEP_UPLOAD_PAGE_RUN)
+    upload_log = sheet.log_rows(target.upload_log_tab)
+    expect(STEP_UPLOAD_PAGE_RUN, upload_log[:1] == [LOG_TAB_HEADER], f"Upload Log header is {upload_log[:1]}")
+    expect(STEP_UPLOAD_PAGE_RUN, [row[2] for row in upload_log[1:]] == ["summary"], f"Upload Log rows: {upload_log[1:]}")
+    expect(
+        STEP_UPLOAD_PAGE_RUN,
+        f"{expected_succeeded} file(s) uploaded successfully, 0 error(s)" in upload_log[1][4],
+        f"Upload Log summary detail is {upload_log[1][4]!r}",
+    )
 
 
 def test_print_for_console_survives_a_non_utf8_console(monkeypatch):
