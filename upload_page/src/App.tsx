@@ -16,6 +16,7 @@ import {
   type OutputHandlers,
 } from "./api/client";
 import type { AppState, TerminalRunHolder } from "./state/types";
+import type { ValidateDoc } from "./api/schemas";
 import { reducer } from "./state/reducer";
 import { Header } from "./components/Header";
 import { ThemePicker } from "./components/ThemePicker";
@@ -103,12 +104,34 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+/** The persistent theme picker shows in every state except the ones with
+ * nothing to pick from: still booting, another run holds the lock, or a
+ * terminal error. */
+function themePickerVisible(state: AppState): boolean {
+  return state.kind !== "loading" && state.kind !== "terminal-run" && state.kind !== "error";
+}
+
+/** The theme the dropdown shows as selected - the batch of whatever the
+ * current state is working on, or undefined when nothing is picked yet. */
+function currentBatch(state: AppState): string | undefined {
+  switch (state.kind) {
+    case "checking":
+    case "previewed":
+    case "confirming":
+    case "running":
+    case "stopping":
+      return state.batch;
+    default:
+      return undefined;
+  }
+}
+
 function announcementFor(state: AppState, starting: boolean): string {
   switch (state.kind) {
     case "loading":
       return "Loading";
     case "choosing":
-      return state.themes === null ? "Loading themes" : "Choose a theme";
+      return "Choose a theme";
     case "checking":
       return "Checking preview";
     case "previewed":
@@ -151,6 +174,10 @@ export default function App() {
   const [state, dispatch] = useReducer(reducer, { kind: "loading" });
   const [identity, setIdentity] = useState<PageIdentity | null>(null);
   const [lines, setLines] = useState<string[]>([]);
+  // The theme list for the persistent picker. App-level (not in the reducer)
+  // so the dropdown is populated in every state, not only "choosing". Fetched
+  // once identity is known and refreshed after a run finishes.
+  const [themes, setThemes] = useState<ValidateDoc | null>(null);
   const eventSourceRef = useRef<ReturnType<typeof openOutput> | null>(null);
   const rememberedBundleStampRef = useRef<string | null>(null);
   // True while startRun is in flight - see handleConfirmStart.
@@ -177,14 +204,14 @@ export default function App() {
     };
   }, [state]);
 
-  // Load the theme list the first time the picker is shown (including
-  // after Choose-another resets the picker to "choosing" with themes:null).
+  // Load the theme list once identity is known, and again whenever `themes`
+  // is cleared to null - initially, and after a run finishes (see below).
   useEffect(() => {
-    if (state.kind !== "choosing" || state.themes !== null) return;
+    if (identity === null || themes !== null) return;
     let cancelled = false;
     getThemes()
-      .then((themes) => {
-        if (!cancelled) dispatch({ type: "themes/loaded", themes });
+      .then((loaded) => {
+        if (!cancelled) setThemes(loaded);
       })
       .catch((error: unknown) => {
         if (!cancelled) dispatch({ type: "error", message: describeError(error) });
@@ -192,7 +219,18 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [state]);
+  }, [identity, themes]);
+
+  // When a run this page was watching finishes, its theme's readiness has
+  // changed - drop the cached list to trigger the refetch above. Tracked via
+  // the previous kind so a fresh mount that lands straight on "finished" (a
+  // run that ended before load) doesn't refetch what mount already fetched.
+  const previousKindRef = useRef(state.kind);
+  useEffect(() => {
+    const wasRunning = previousKindRef.current === "running" || previousKindRef.current === "stopping";
+    previousKindRef.current = state.kind;
+    if (state.kind === "finished" && wasRunning) setThemes(null);
+  }, [state.kind]);
 
   // Covers both a theme selection and Re-check - both land on "checking".
   useEffect(() => {
@@ -257,6 +295,11 @@ export default function App() {
   }, []);
 
   function handleThemeSelect(batch: string) {
+    // Picking a theme abandons any prior run's console output and stored
+    // offset - the cleanup Choose-another used to do, now that the persistent
+    // dropdown is how you move on to the next theme.
+    setLines([]);
+    clearStoredOffset();
     dispatch({ type: "theme/selected", batch });
   }
 
@@ -318,11 +361,6 @@ export default function App() {
     stopRun().catch((error: unknown) => dispatch({ type: "error", message: describeError(error) }));
   }
 
-  function handleChooseAnother() {
-    setLines([]);
-    clearStoredOffset();
-    dispatch({ type: "choose-another/clicked" });
-  }
 
   function renderBody() {
     switch (state.kind) {
@@ -330,10 +368,10 @@ export default function App() {
         return <p className="text-muted">Loading…</p>;
 
       case "choosing":
-        return state.themes === null ? (
+        return themes === null ? (
           <p className="text-muted">Loading themes…</p>
         ) : (
-          <ThemePicker batches={state.themes.batches ?? []} onSelect={handleThemeSelect} />
+          <p className="text-muted">Pick a theme above to get started.</p>
         );
 
       case "checking":
@@ -376,7 +414,7 @@ export default function App() {
         );
 
       case "finished":
-        return <Finished ending={state.ending} onChooseAnother={handleChooseAnother} />;
+        return <Finished ending={state.ending} />;
 
       case "terminal-run":
         return <TerminalRunView holder={state.holder} />;
@@ -398,7 +436,18 @@ export default function App() {
   return (
     <main className="min-h-screen bg-bg p-4">
       <div className="mx-auto w-full max-w-[1000px]">
-        {identity && <Header project={identity.project} collection={identity.collection} live={identity.live} />}
+        {identity && (
+          <Header project={identity.project} collection={identity.collection} live={identity.live}>
+            {themePickerVisible(state) && (
+              <ThemePicker
+                batches={themes?.batches ?? []}
+                value={currentBatch(state)}
+                disabled={themes === null || starting || state.kind === "running" || state.kind === "stopping"}
+                onSelect={handleThemeSelect}
+              />
+            )}
+          </Header>
+        )}
         <div className="mt-4">{renderBody()}</div>
         <LiveRegion message={announcementFor(state, starting)} />
       </div>

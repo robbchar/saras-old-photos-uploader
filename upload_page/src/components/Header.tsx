@@ -3,16 +3,21 @@
 // is conveyed by text, never by color alone, so the amber styling below
 // is a reinforcement, not the signal itself.
 
+import type { ReactNode } from "react";
+
 export interface HeaderProps {
   project: string;
   collection: string;
   live: boolean;
+  /** The persistent theme picker lives in the header; App passes it here so
+   * this component stays presentational and owns no picker state. */
+  children?: ReactNode;
 }
 
 const TEST_MODE_MESSAGE =
   "TEST MODE — uploads go to test_collection and expire in about 30 days";
 
-export function Header({ project, collection, live }: HeaderProps) {
+export function Header({ project, collection, live, children }: HeaderProps) {
   return (
     <header className="border-b border-border bg-surface px-4 py-3">
       <div className="flex items-baseline gap-2 font-sans">
@@ -27,6 +32,7 @@ export function Header({ project, collection, live }: HeaderProps) {
           {TEST_MODE_MESSAGE}
         </p>
       )}
+      {children && <div className="mt-3">{children}</div>}
     </header>
   );
 }

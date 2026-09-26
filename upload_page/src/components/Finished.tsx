@@ -8,7 +8,6 @@ import type { Ending, RowFailure, Summary } from "../api/schemas";
 
 export interface FinishedProps {
   ending: Ending;
-  onChooseAnother: () => void;
 }
 
 function RowFailureList({
@@ -115,17 +114,10 @@ function FinishedBody({ ending }: { ending: Ending }) {
   }
 }
 
-export function Finished({ ending, onChooseAnother }: FinishedProps) {
+export function Finished({ ending }: FinishedProps) {
   return (
     <section className="rounded border border-border bg-surface p-4 text-text">
       <FinishedBody ending={ending} />
-      <button
-        type="button"
-        onClick={onChooseAnother}
-        className="mt-6 rounded bg-accent px-4 py-2 text-on-accent hover:bg-accent-hover"
-      >
-        Choose another theme
-      </button>
     </section>
   );
 }

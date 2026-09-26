@@ -24,11 +24,11 @@ export interface LoadingState {
   kind: "loading";
 }
 
-/** The theme picker. `themes` is null until `GET /api/themes` resolves;
- * the picker can render its loading state without leaving `choosing`. */
+/** No theme is chosen yet. The theme picker is a persistent, App-level
+ * control (not part of this state), so `choosing` only means "nothing picked
+ * so far" - its body is a prompt to pick one from the dropdown above. */
 export interface ChoosingState {
   kind: "choosing";
-  themes: ValidateDoc | null;
 }
 
 /** A theme was picked; its preview (`GET /api/preview`) is in flight. */
@@ -120,11 +120,9 @@ export interface StatusReceivedAction {
   run: RunState;
 }
 
-export interface ThemesLoadedAction {
-  type: "themes/loaded";
-  themes: ValidateDoc;
-}
-
+/** A theme was picked from the persistent dropdown. Valid from any state
+ * where the picker is enabled (choosing, checking, previewed, confirming,
+ * finished); a no-op during a run or an error. Always lands on "checking". */
 export interface ThemeSelectedAction {
   type: "theme/selected";
   batch: string;
@@ -173,10 +171,6 @@ export interface SseFinishedAction {
   ending: Ending;
 }
 
-export interface ChooseAnotherClickedAction {
-  type: "choose-another/clicked";
-}
-
 /** A terminal, unrecoverable problem - valid from any state. */
 export interface ErrorAction {
   type: "error";
@@ -185,7 +179,6 @@ export interface ErrorAction {
 
 export type Action =
   | StatusReceivedAction
-  | ThemesLoadedAction
   | ThemeSelectedAction
   | PreviewLoadedAction
   | PreviewFailedAction
@@ -196,5 +189,4 @@ export type Action =
   | SseProgressAction
   | StopClickedAction
   | SseFinishedAction
-  | ChooseAnotherClickedAction
   | ErrorAction;

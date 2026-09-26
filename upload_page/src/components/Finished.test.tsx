@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { Ending, Summary } from "../api/schemas";
 import { Finished } from "./Finished";
 
@@ -23,7 +23,7 @@ describe("Finished", () => {
       kind: "completed",
       summary: { ...BASE_SUMMARY, succeeded: 8, failures: [{ identifier: "lcps-photosexample-00001", error: "HTTP 500" }] },
     };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(screen.getByText("8 uploaded, 1 failed")).toBeInTheDocument();
   });
 
@@ -33,7 +33,7 @@ describe("Finished", () => {
       planned: 42,
       summary: { ...BASE_SUMMARY, succeeded: 5 },
     };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(screen.getByText("Stopped after 5 of 42")).toBeInTheDocument();
   });
 
@@ -43,13 +43,13 @@ describe("Finished", () => {
       planned: null,
       summary: { ...BASE_SUMMARY, succeeded: 5 },
     };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(screen.getByText("Stopped after 5")).toBeInTheDocument();
   });
 
   it("shows the exact rate-limited message", () => {
     const ending: Ending = { kind: "rate_limited", summary: BASE_SUMMARY };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(
       screen.getByText("Internet Archive asked us to slow down — try again later"),
     ).toBeInTheDocument();
@@ -57,7 +57,7 @@ describe("Finished", () => {
 
   it("uses the real em dash (U+2014) in the rate-limited message, not a hyphen or double-hyphen", () => {
     const ending: Ending = { kind: "rate_limited", summary: BASE_SUMMARY };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     const message = screen.getByText(/Internet Archive asked us to slow down/);
     expect(message.textContent).toContain("—");
   });
@@ -67,14 +67,14 @@ describe("Finished", () => {
       kind: "refused",
       reason_lines: ["Sheet is locked by another run.", "Ask an admin to clear the lock."],
     };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(screen.getByText("Sheet is locked by another run.")).toBeInTheDocument();
     expect(screen.getByText("Ask an admin to clear the lock.")).toBeInTheDocument();
   });
 
   it("shows the ended-without-summary message", () => {
     const ending: Ending = { kind: "ended_without_summary" };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(
       screen.getByText("ended without a summary; run the same theme again to pick up where it stopped"),
     ).toBeInTheDocument();
@@ -88,7 +88,7 @@ describe("Finished", () => {
         failures: [{ identifier: "lcps-photosexample-00007", error: "HTTP 500 Internal Server Error" }],
       },
     };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(screen.getByText("lcps-photosexample-00007")).toBeInTheDocument();
     expect(screen.getByText("HTTP 500 Internal Server Error")).toBeInTheDocument();
   });
@@ -106,16 +106,8 @@ describe("Finished", () => {
         ],
       },
     };
-    render(<Finished ending={ending} onChooseAnother={vi.fn()} />);
+    render(<Finished ending={ending} />);
     expect(screen.getByText("first failure")).toBeInTheDocument();
     expect(screen.getByText("second failure")).toBeInTheDocument();
-  });
-
-  it("calls onChooseAnother when 'Choose another theme' is clicked", () => {
-    const onChooseAnother = vi.fn();
-    const ending: Ending = { kind: "ended_without_summary" };
-    render(<Finished ending={ending} onChooseAnother={onChooseAnother} />);
-    fireEvent.click(screen.getByRole("button", { name: "Choose another theme" }));
-    expect(onChooseAnother).toHaveBeenCalledTimes(1);
   });
 });

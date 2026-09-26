@@ -30,4 +30,13 @@ describe("Header", () => {
     render(<Header project="astoriaphotos" collection="lcps_astoria" live />);
     expect(screen.queryByText(/TEST MODE/)).not.toBeInTheDocument();
   });
+
+  it("renders children (the persistent theme picker) inside the header", () => {
+    render(
+      <Header project="astoriaphotos" collection="test_collection" live={false}>
+        <button type="button">theme picker slot</button>
+      </Header>,
+    );
+    expect(screen.getByRole("button", { name: "theme picker slot" })).toBeInTheDocument();
+  });
 });

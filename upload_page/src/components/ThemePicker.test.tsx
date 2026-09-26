@@ -111,4 +111,9 @@ describe("ThemePicker", () => {
     expect(option.className).toContain("text-muted");
     expect(option.className).not.toContain("text-faint");
   });
+
+  it("disables the whole control when `disabled` is set", () => {
+    render(<ThemePicker batches={[READY_BATCH]} disabled onSelect={vi.fn()} />);
+    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeDisabled();
+  });
 });

@@ -27,13 +27,6 @@ const SAMPLE_PREVIEW: ValidateDoc = {
   rows: [],
 };
 
-const SAMPLE_THEMES: ValidateDoc = {
-  ...SAMPLE_PREVIEW,
-  batch: null,
-  batches: [],
-  rows: null,
-};
-
 const SAMPLE_SUMMARY = {
   attempted: 5,
   succeeded: 5,
@@ -62,7 +55,7 @@ const CHECKED_AT = "2026-09-25T12:00:00Z";
 // row here is a compile error, not a silently-skipped test case.
 const sampleStates: { [K in AppState["kind"]]: Extract<AppState, { kind: K }> } = {
   loading: { kind: "loading" },
-  choosing: { kind: "choosing", themes: SAMPLE_THEMES },
+  choosing: { kind: "choosing" },
   checking: { kind: "checking", batch: "Fishing" },
   previewed: { kind: "previewed", batch: "Fishing", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
   confirming: { kind: "confirming", batch: "Fishing", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
@@ -78,7 +71,6 @@ const sampleStates: { [K in AppState["kind"]]: Extract<AppState, { kind: K }> } 
 // the "idle" case; the other routes get their own targeted tests below.
 const sampleActions: { [T in Action["type"]]: Extract<Action, { type: T }> } = {
   "status/received": { type: "status/received", run: { kind: "idle" } },
-  "themes/loaded": { type: "themes/loaded", themes: SAMPLE_THEMES },
   "theme/selected": { type: "theme/selected", batch: "Fishing" },
   "preview/loaded": { type: "preview/loaded", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
   "preview/failed": { type: "preview/failed", message: "preview refused" },
@@ -89,7 +81,6 @@ const sampleActions: { [T in Action["type"]]: Extract<Action, { type: T }> } = {
   "sse/progress": { type: "sse/progress", done: 3, planned: 7, current: null },
   "stop/clicked": { type: "stop/clicked" },
   "sse/finished": { type: "sse/finished", ending: SAMPLE_ENDING },
-  "choose-another/clicked": { type: "choose-another/clicked" },
   error: { type: "error", message: "boom" },
 };
 
@@ -103,8 +94,6 @@ const allActionTypes = Object.keys(sampleActions) as Array<Action["type"]>;
 // so they get their own targeted tests instead of a row here.
 const definedTransitions: ReadonlyArray<[AppState["kind"], Action["type"], AppState["kind"]]> = [
   ["loading", "status/received", "choosing"],
-  ["choosing", "themes/loaded", "choosing"],
-  ["choosing", "theme/selected", "checking"],
   ["checking", "preview/loaded", "previewed"],
   ["checking", "preview/failed", "error"],
   ["previewed", "recheck/clicked", "checking"],
@@ -116,7 +105,13 @@ const definedTransitions: ReadonlyArray<[AppState["kind"], Action["type"], AppSt
   ["running", "sse/finished", "finished"],
   ["stopping", "sse/progress", "stopping"],
   ["stopping", "sse/finished", "finished"],
-  ["finished", "choose-another/clicked", "choosing"],
+  // The persistent picker's theme/selected (re)starts a check from anywhere it
+  // is enabled - never from an active run, terminal-run, error, or loading.
+  ["choosing", "theme/selected", "checking"],
+  ["checking", "theme/selected", "checking"],
+  ["previewed", "theme/selected", "checking"],
+  ["confirming", "theme/selected", "checking"],
+  ["finished", "theme/selected", "checking"],
   // "error" is accepted from every state, including "error" itself.
   ...allKinds.map((kind): [AppState["kind"], Action["type"], AppState["kind"]] => [kind, "error", "error"]),
 ];
@@ -155,10 +150,10 @@ describe("reducer - impossible transitions leave state unchanged", () => {
 });
 
 describe("status/received routes by run.kind (only from loading)", () => {
-  test("idle -> choosing with themes not yet loaded", () => {
+  test("idle -> choosing (no theme picked yet)", () => {
     const action: Action = { type: "status/received", run: { kind: "idle" } };
     const result = reducer(sampleStates.loading, action);
-    expect(result).toEqual({ kind: "choosing", themes: null });
+    expect(result).toEqual({ kind: "choosing" });
   });
 
   test("page_run_active -> running, carrying the run's batch/done/planned/current", () => {
@@ -207,10 +202,10 @@ describe("status/received routes by run.kind (only from loading)", () => {
 });
 
 describe("other data-carrying transitions", () => {
-  test("themes/loaded sets themes on the choosing state", () => {
-    const loading: AppState = { kind: "choosing", themes: null };
-    const result = reducer(loading, { type: "themes/loaded", themes: SAMPLE_THEMES });
-    expect(result).toEqual({ kind: "choosing", themes: SAMPLE_THEMES });
+  test("theme/selected from a finished run starts a check for the newly picked theme", () => {
+    const finished: AppState = { kind: "finished", ending: SAMPLE_ENDING };
+    const result = reducer(finished, { type: "theme/selected", batch: "Waterfront" });
+    expect(result).toEqual({ kind: "checking", batch: "Waterfront" });
   });
 
   test("confirm/yes starts running at done:0, planned from the preview's ready_to_upload", () => {
@@ -308,12 +303,6 @@ describe("other data-carrying transitions", () => {
     const checking: AppState = { kind: "checking", batch: "Fishing" };
     const result = reducer(checking, { type: "preview/failed", message: "sheet unreadable" });
     expect(result).toEqual({ kind: "error", message: "sheet unreadable" });
-  });
-
-  test("choose-another/clicked resets a finished run to a refreshed picker (themes not yet loaded)", () => {
-    const finished: AppState = { kind: "finished", ending: SAMPLE_ENDING };
-    const result = reducer(finished, { type: "choose-another/clicked" });
-    expect(result).toEqual({ kind: "choosing", themes: null });
   });
 
   test("error is accepted from any state, carrying the message", () => {

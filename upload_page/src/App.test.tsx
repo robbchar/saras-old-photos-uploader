@@ -249,13 +249,13 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
 
-    // No Cancel, no re-Confirm, no picker - nothing can interleave with
-    // the in-flight startRun and revert state while the run it started
-    // goes on existing server-side.
+    // No Cancel, no re-Confirm, and the theme picker is disabled - nothing
+    // can interleave with the in-flight startRun and revert state while the
+    // run it started goes on existing server-side.
     expect(await screen.findByText("Starting upload…")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /choose a theme/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeDisabled();
 
     await act(async () => {
       resolveStartRun({ started_at: "2026-09-25T12:00:00Z" });
@@ -263,9 +263,10 @@ describe("App", () => {
     });
 
     // The run that now exists server-side is not orphaned: the page lands
-    // on "running", never back on the picker.
+    // on "running", with the picker disabled so no theme switch can start a
+    // second run.
     expect(await screen.findByRole("log")).toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /choose a theme/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeDisabled();
   });
 
   it("shows an error instead of a stuck running screen when startRun is refused (e.g. a 409)", async () => {
@@ -331,7 +332,7 @@ describe("App", () => {
     });
 
     expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Choose another theme" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
   });
 
   it("reloads the page once the health bundle stamp changes", async () => {
@@ -363,14 +364,13 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Choose another theme" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
   });
 
-  it("returns to a refreshed theme picker after Choose another theme, instead of looping back to Finished (regression)", async () => {
-    // Reproduces the by-hand bug: /api/status is stateless and keeps
-    // reporting "finished" from the newest page-run folder even after the
-    // volunteer asks to start a new one - so Choose another theme must
-    // never re-fetch it, or the page loops straight back to this screen.
+  it("picks another theme from the persistent picker without re-fetching the stateless status (regression)", async () => {
+    // /api/status is stateless and keeps reporting "finished" from the newest
+    // page-run folder even after the volunteer moves on - so picking a new
+    // theme must never re-fetch it, or the page loops straight back here.
     mockGetStatus.mockResolvedValue({
       live: false,
       project: "astoriaphotos",
@@ -382,14 +382,16 @@ describe("App", () => {
     await screen.findByText("5 uploaded, 0 failed");
     expect(mockGetStatus).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Choose another theme" }));
+    // The persistent dropdown is right there on the finished screen; wait for
+    // its themes to load (it enables), then pick one.
+    const trigger = await screen.findByRole("combobox", { name: /choose a theme/i });
+    await waitFor(() => expect(trigger).toBeEnabled());
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("option", { name: /Fishing/ }));
 
-    expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
-    expect(mockGetThemes).toHaveBeenCalledTimes(1);
-    // Still just the one mount-time call - the loop bug called getStatus
-    // again here, which kept returning "finished" and bounced right back.
+    // Straight to that theme's preview - never back through the status fetch.
+    await screen.findByText("5 ready to upload");
     expect(mockGetStatus).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("5 uploaded, 0 failed")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Choose another theme" })).not.toBeInTheDocument();
   });
 });

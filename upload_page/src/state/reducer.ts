@@ -11,10 +11,8 @@
 import type {
   Action,
   AppState,
-  ChoosingState,
   CheckingState,
   ConfirmingState,
-  FinishedState,
   LoadingState,
   PreviewedState,
   RunningState,
@@ -28,7 +26,7 @@ function fromLoading(state: LoadingState, action: Action): AppState {
   const run: RunState = action.run;
   switch (run.kind) {
     case "idle":
-      return { kind: "choosing", themes: null };
+      return { kind: "choosing" };
     case "terminal_run_active":
       return { kind: "terminal-run", holder: run.holder };
     case "page_run_active":
@@ -39,17 +37,6 @@ function fromLoading(state: LoadingState, action: Action): AppState {
       const exhaustiveCheck: never = run;
       return exhaustiveCheck;
     }
-  }
-}
-
-function fromChoosing(state: ChoosingState, action: Action): AppState {
-  switch (action.type) {
-    case "themes/loaded":
-      return { kind: "choosing", themes: action.themes };
-    case "theme/selected":
-      return { kind: "checking", batch: action.batch };
-    default:
-      return state;
   }
 }
 
@@ -110,29 +97,29 @@ function fromStopping(state: StoppingState, action: Action): AppState {
   }
 }
 
-function fromFinished(state: FinishedState, action: Action): AppState {
-  switch (action.type) {
-    // Straight to "choosing", not "loading" - "loading" re-fetches
-    // /api/status, which would just report "finished" again (it's derived
-    // from the newest page-run folder) and bounce right back here.
-    case "choose-another/clicked":
-      return { kind: "choosing", themes: null };
-    default:
-      return state;
-  }
-}
-
 export function reducer(state: AppState, action: Action): AppState {
   // Accepted from every state, including "error" itself.
   if (action.type === "error") {
     return { kind: "error", message: action.message };
   }
 
+  // Picking a theme from the persistent dropdown (re)starts its readiness
+  // check. Enabled wherever the dropdown is enabled; a no-op where it is
+  // absent or disabled - loading, an active run (running/stopping),
+  // terminal-run, error.
+  if (action.type === "theme/selected") {
+    const pickerEnabled =
+      state.kind === "choosing" ||
+      state.kind === "checking" ||
+      state.kind === "previewed" ||
+      state.kind === "confirming" ||
+      state.kind === "finished";
+    return pickerEnabled ? { kind: "checking", batch: action.batch } : state;
+  }
+
   switch (state.kind) {
     case "loading":
       return fromLoading(state, action);
-    case "choosing":
-      return fromChoosing(state, action);
     case "checking":
       return fromChecking(state, action);
     case "previewed":
@@ -143,11 +130,11 @@ export function reducer(state: AppState, action: Action): AppState {
       return fromRunning(state, action);
     case "stopping":
       return fromStopping(state, action);
+    // No transitions of their own: "choosing" and "finished" advance only via
+    // the global theme/selected above (the persistent picker), and
+    // "terminal-run"/"error" via the global error already handled above.
+    case "choosing":
     case "finished":
-      return fromFinished(state, action);
-    // "terminal-run" and "error" have no outgoing transitions besides the
-    // "error" action already handled above - every other action is a
-    // no-op from here.
     case "terminal-run":
     case "error":
       return state;

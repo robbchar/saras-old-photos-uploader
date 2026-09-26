@@ -9,6 +9,9 @@ import type { ValidateBatch, ValidateCounts } from "../api/schemas";
 export interface ThemePickerProps {
   batches: ValidateBatch[];
   value?: string;
+  /** Disables the whole control - used while a run is uploading, when
+   * switching themes would conflict with the one-run-at-a-time lock. */
+  disabled?: boolean;
   onSelect: (value: string) => void;
 }
 
@@ -33,13 +36,13 @@ function labelFor(batch: ValidateBatch): string {
   return `${batch.value} — ${detail}`;
 }
 
-export function ThemePicker({ batches, value, onSelect }: ThemePickerProps) {
+export function ThemePicker({ batches, value, disabled, onSelect }: ThemePickerProps) {
   return (
     <div className="flex flex-wrap items-center gap-3">
       <span id="theme-picker-label" className="text-text">
         Choose a theme to upload images for:
       </span>
-      <Select.Root value={value} onValueChange={onSelect}>
+      <Select.Root value={value} onValueChange={onSelect} disabled={disabled}>
         <Select.Trigger
           aria-labelledby="theme-picker-label"
           className="flex min-w-64 items-center justify-between gap-2 rounded border border-border-strong bg-raised px-3 py-2 text-text"
@@ -47,7 +50,15 @@ export function ThemePicker({ batches, value, onSelect }: ThemePickerProps) {
           <Select.Value placeholder="Choose a theme" />
         </Select.Trigger>
         <Select.Portal>
-          <Select.Content className="overflow-hidden rounded border border-border bg-raised text-text shadow-none">
+          {/* position="popper" (not the default item-aligned) so the list
+              still renders when every theme is disabled - item-aligned has no
+              selectable item to anchor to then, and the popover comes up
+              invisible (the "empty dropdown" bug). */}
+          <Select.Content
+            position="popper"
+            sideOffset={4}
+            className="min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded border border-border bg-raised text-text shadow-none"
+          >
             <Select.Viewport className="p-1">
               {batches.map((batch) => {
                 const disabled = batch.ready_to_upload === 0;
