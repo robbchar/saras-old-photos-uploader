@@ -47,6 +47,9 @@ const Row = z.object({
   state: z.enum(["unassigned", "done", "reserved"]),
   verdict: z.enum(["ready", "invalid", "not_ready"]),
   identifier: z.string(),
+  // The row's templated file path (folder/file_name), from validate --json.
+  // Empty when the Sheet cell is blank or the file could not be resolved.
+  file: z.string(),
   errors: z.array(z.string()),
   missing_fields: z.array(z.string()),
 });

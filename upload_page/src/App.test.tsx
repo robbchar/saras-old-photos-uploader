@@ -92,6 +92,7 @@ const READY_ROWS: ValidateRow[] = Array.from({ length: 5 }, (_, index) => ({
   state: "unassigned",
   verdict: "ready",
   identifier: `lcps-photosexample-${String(index + 1).padStart(5, "0")}`,
+  file: `photo${index + 1}.jpg`,
   errors: [],
   missing_fields: [],
 }));
@@ -353,7 +354,11 @@ describe("App", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the Finished screen on a fresh mount when the status is already finished (reload behavior)", async () => {
+  it("a finished leftover at load shows the picker, not a stale run summary", async () => {
+    // /api/status is stateless and reports the newest page-run folder as
+    // "finished" even on a fresh visit; that stale summary must not show -
+    // start on the picker instead (a run started this session still shows its
+    // own result when it completes).
     mockGetStatus.mockResolvedValue({
       live: false,
       project: "astoriaphotos",
@@ -363,14 +368,14 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
+    expect(screen.queryByText("5 uploaded, 0 failed")).not.toBeInTheDocument();
   });
 
-  it("picks another theme from the persistent picker without re-fetching the stateless status (regression)", async () => {
-    // /api/status is stateless and keeps reporting "finished" from the newest
-    // page-run folder even after the volunteer moves on - so picking a new
-    // theme must never re-fetch it, or the page loops straight back here.
+  it("picks a theme at load without re-fetching the stateless status (regression)", async () => {
+    // A finished leftover at load starts on the picker (its stale summary is
+    // suppressed); picking a theme must go straight to that theme's preview and
+    // never re-fetch /api/status, which would keep reporting "finished".
     mockGetStatus.mockResolvedValue({
       live: false,
       project: "astoriaphotos",
@@ -379,11 +384,6 @@ describe("App", () => {
     });
 
     render(<App />);
-    await screen.findByText("5 uploaded, 0 failed");
-    expect(mockGetStatus).toHaveBeenCalledTimes(1);
-
-    // The persistent dropdown is right there on the finished screen; wait for
-    // its themes to load (it enables), then pick one.
     const trigger = await screen.findByRole("combobox", { name: /choose a theme/i });
     await waitFor(() => expect(trigger).toBeEnabled());
     fireEvent.click(trigger);
@@ -392,6 +392,5 @@ describe("App", () => {
     // Straight to that theme's preview - never back through the status fetch.
     await screen.findByText("5 ready to upload");
     expect(mockGetStatus).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("5 uploaded, 0 failed")).not.toBeInTheDocument();
   });
 });

@@ -62,7 +62,11 @@ function formatCheckedAt(checkedAt: string): string {
 
 export function Preview({ doc, checkedAt, onRecheck }: PreviewProps) {
   const rows = doc.rows ?? [];
-  const readyCount = rows.filter((row) => row.verdict === "ready").length;
+  // Already-uploaded rows. `doc.ready_to_upload` is the authoritative
+  // ready-to-upload count (it excludes done rows via is_upload_target), so it
+  // is used directly rather than recounting "ready" verdicts, which would
+  // wrongly include rows that are ready but already sent.
+  const uploaded = rows.filter((row) => row.state === "done");
   const needsFixing = compressToRanges(
     rows.filter((row) => row.verdict === "invalid"),
     reasonForInvalidRow,
@@ -85,7 +89,27 @@ export function Preview({ doc, checkedAt, onRecheck }: PreviewProps) {
         </button>
       </header>
 
-      <p className="mt-4 font-semibold text-text">{`${readyCount} ready to upload`}</p>
+      <p className="mt-4 font-semibold text-text">{`${doc.ready_to_upload} ready to upload`}</p>
+
+      <details className="mt-4">
+        <summary className="cursor-pointer text-sm font-semibold text-muted">
+          {`Uploaded (${uploaded.length})`}
+        </summary>
+        {uploaded.length === 0 ? (
+          <p className="mt-1 text-muted">None</p>
+        ) : (
+          <ul className="mt-1 space-y-1">
+            {uploaded.map((row) => (
+              <li
+                key={row.row}
+                className="rounded border border-border px-2 py-1 font-mono text-sm text-text"
+              >
+                {row.file || row.identifier || `row ${row.row}`}
+              </li>
+            ))}
+          </ul>
+        )}
+      </details>
 
       <div className="mt-4">
         <h3 className="text-sm font-semibold text-muted">Needs fixing</h3>

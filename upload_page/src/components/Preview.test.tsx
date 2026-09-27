@@ -8,7 +8,10 @@ afterEach(cleanup);
 const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0 };
 const ZERO_COUNTS = { unassigned: ZERO_VERDICTS, done: ZERO_VERDICTS, reserved: ZERO_VERDICTS };
 
-function docWithRows(rows: ValidateRow[]): ValidateDoc {
+// `file` defaults to "" so existing rows need not spell it out; ready_to_upload
+// mirrors the backend's is_upload_target (ready AND not already done).
+function docWithRows(rows: Array<Omit<ValidateRow, "file"> & { file?: string }>): ValidateDoc {
+  const fullRows: ValidateRow[] = rows.map((row) => ({ file: "", ...row }));
   return {
     format: 1,
     project: "astoriaphotos",
@@ -17,23 +20,34 @@ function docWithRows(rows: ValidateRow[]): ValidateDoc {
     valid: false,
     sheet_errors: [],
     rows_with_errors: [],
-    ready_to_upload: rows.filter((row) => row.verdict === "ready").length,
+    ready_to_upload: fullRows.filter((row) => row.verdict === "ready" && row.state !== "done").length,
     counts: ZERO_COUNTS,
     batches: null,
-    rows,
+    rows: fullRows,
   };
 }
 
 const MISSING_FILE_ERROR = "no file found in '<files_dir>' matching 'photo3.jpg'";
 
 describe("Preview", () => {
-  it("shows the ready count", () => {
+  it("shows the ready count, excluding rows that are already uploaded", () => {
     const doc = docWithRows([
       { row: 2, state: "unassigned", verdict: "ready", identifier: "", errors: [], missing_fields: [] },
-      { row: 7, state: "done", verdict: "ready", identifier: "lcps-astoriaphotos-00001", errors: [], missing_fields: [] },
+      { row: 7, state: "done", verdict: "ready", identifier: "lcps-astoriaphotos-00001", file: "photo6.jpg", errors: [], missing_fields: [] },
     ]);
     render(<Preview doc={doc} checkedAt="2026-01-01T09:07:00" onRecheck={vi.fn()} />);
-    expect(screen.getByText("2 ready to upload")).toBeInTheDocument();
+    // The done row is not "ready to upload" - it is already uploaded.
+    expect(screen.getByText("1 ready to upload")).toBeInTheDocument();
+  });
+
+  it("lists already-uploaded rows by filename in a collapsible Uploaded section", () => {
+    const doc = docWithRows([
+      { row: 7, state: "done", verdict: "ready", identifier: "lcps-astoriaphotos-00001", file: "SOP CD 1/photo6.jpg", errors: [], missing_fields: [] },
+      { row: 2, state: "unassigned", verdict: "ready", identifier: "", errors: [], missing_fields: [] },
+    ]);
+    render(<Preview doc={doc} checkedAt="2026-01-01T09:07:00" onRecheck={vi.fn()} />);
+    expect(screen.getByText("Uploaded (1)")).toBeInTheDocument();
+    expect(screen.getByText("SOP CD 1/photo6.jpg")).toBeInTheDocument();
   });
 
   it("compresses two contiguous invalid rows sharing the same reason into a range", () => {

@@ -39,6 +39,7 @@ describe("ValidateDoc", () => {
   test("parses validate-batch.json (rows present, batches null)", () => {
     const doc = ValidateDoc.parse(batch);
     expect(doc.rows?.[0].state).toBe("unassigned");
+    expect(doc.rows?.[0].file).toBe("photo1.jpg");
     expect(doc.batches).toBeNull();
   });
 

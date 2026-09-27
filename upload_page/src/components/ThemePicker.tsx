@@ -67,17 +67,17 @@ export function ThemePicker({ batches, value, disabled, loading, onSelect }: The
           >
             <Select.Viewport className="p-1">
               {batches.map((batch) => {
-                const disabled = batch.ready_to_upload === 0;
+                // Every theme is selectable, even with nothing ready: you pick
+                // it to see its detail (what's uploaded, what needs fixing). A
+                // zero-ready theme is only de-emphasized, never disabled.
+                const nothingReady = batch.ready_to_upload === 0;
                 return (
                   <Select.Item
                     key={batch.value}
                     value={batch.value}
-                    disabled={disabled}
-                    className={
-                      disabled
-                        ? "cursor-default select-none rounded px-3 py-2 text-muted"
-                        : "cursor-default select-none rounded px-3 py-2 text-text data-[highlighted]:bg-surface data-[highlighted]:outline-none"
-                    }
+                    className={`cursor-pointer select-none rounded px-3 py-2 data-[highlighted]:bg-surface data-[highlighted]:outline-none ${
+                      nothingReady ? "text-muted" : "text-text"
+                    }`}
                   >
                     <Select.ItemText>{labelFor(batch)}</Select.ItemText>
                   </Select.Item>

@@ -388,15 +388,17 @@ export default function App() {
         ) : (
           <>
             <Preview doc={state.preview} checkedAt={state.checkedAt} onRecheck={handleRecheck} />
-            <div className="mt-4">
-              <StartDialog
-                count={state.preview.ready_to_upload}
-                batch={state.batch}
-                live={identity?.live ?? false}
-                onConfirm={() => handleConfirmStart(state.batch)}
-                onCancel={handleCancelStart}
-              />
-            </div>
+            {state.preview.ready_to_upload > 0 && (
+              <div className="mt-4">
+                <StartDialog
+                  count={state.preview.ready_to_upload}
+                  batch={state.batch}
+                  live={identity?.live ?? false}
+                  onConfirm={() => handleConfirmStart(state.batch)}
+                  onCancel={handleCancelStart}
+                />
+              </div>
+            )}
           </>
         );
 

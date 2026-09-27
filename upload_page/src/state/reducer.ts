@@ -32,7 +32,12 @@ function fromLoading(state: LoadingState, action: Action): AppState {
     case "page_run_active":
       return { kind: "running", batch: run.batch, done: run.done, planned: run.planned, current: run.current };
     case "finished":
-      return { kind: "finished", ending: run.ending };
+      // A finished run reported at page load is a stale leftover of the newest
+      // page-run folder (status is stateless), not this session's own work, and
+      // showing its summary confused operators ("why does it say 4 uploaded?").
+      // Start at the picker instead; a run started this session still shows its
+      // result via the SSE "finished" event (fromRunning/fromStopping).
+      return { kind: "choosing" };
     default: {
       const exhaustiveCheck: never = run;
       return exhaustiveCheck;

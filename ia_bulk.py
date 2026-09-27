@@ -534,6 +534,11 @@ class LifecycleEntry:
 
     state: RowState
     result: RowValidation
+    # The row's templated file path (folder/file_name), from the RAW Sheet cells
+    # so it survives even when the file is not on this machine - what the upload
+    # page shows an operator for an already-uploaded row. compare=False: it is
+    # descriptive, not identity, so it never disturbs report/entry equality.
+    file: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -561,9 +566,17 @@ class LifecycleReport:
 
 
 def build_lifecycle_report(
-    rows: list[dict[str, str]], row_results: list[RowValidation]
+    rows: list[dict[str, str]],
+    row_results: list[RowValidation],
+    file_template: str | None = None,
 ) -> LifecycleReport:
-    """row_results must be validate_rows()'s own output for these rows, in the same order."""
+    """row_results must be validate_rows()'s own output for these rows, in the same order.
+
+    With `file_template`, each entry records the row's templated file path from the
+    raw Sheet cells (candidate_path, not the disk-resolved name), so an
+    already-uploaded row still shows what it uploaded even when the file is gone
+    from this machine. Without it, entries carry no file (the text summary and the
+    per-batch count reports do not need one)."""
     if len(rows) != len(row_results):
         raise ValueError(
             f"build_lifecycle_report: got {len(rows)} row(s) but {len(row_results)} "
@@ -573,7 +586,11 @@ def build_lifecycle_report(
         )
     return LifecycleReport(
         tuple(
-            LifecycleEntry(state=classify_row(row), result=result)
+            LifecycleEntry(
+                state=classify_row(row),
+                result=result,
+                file=candidate_path(file_template, row) if file_template else "",
+            )
             for row, result in zip(rows, row_results)
         )
     )
@@ -753,6 +770,7 @@ def validate_json(
                 "state": entry.state.value,
                 "verdict": entry.result.verdict.value,
                 "identifier": entry.result.identifier,
+                "file": entry.file,
                 "errors": list(entry.result.errors),
                 "missing_fields": list(entry.result.missing_fields),
             }
@@ -2734,7 +2752,7 @@ def run_validate(args, json_out: TextIO | None) -> int:
 
     results = header_results + row_results
     exit_code = 0 if all(r.is_valid for r in results) else 1
-    report = build_lifecycle_report(rows, row_results)
+    report = build_lifecycle_report(rows, row_results, config.file_template)
 
     if json_out is not None:
         try:

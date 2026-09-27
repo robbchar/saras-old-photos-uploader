@@ -188,10 +188,10 @@ describe("status/received routes by run.kind (only from loading)", () => {
     expect(result).toEqual({ kind: "terminal-run", holder: null });
   });
 
-  test("finished -> finished, carrying the run's ending", () => {
+  test("finished at load -> choosing (a stale leftover summary is not shown)", () => {
     const run: RunState = { kind: "finished", ending: SAMPLE_ENDING, page_run: null };
     const result = reducer(sampleStates.loading, { type: "status/received", run });
-    expect(result).toEqual({ kind: "finished", ending: SAMPLE_ENDING });
+    expect(result).toEqual({ kind: "choosing" });
   });
 
   test("from a non-loading state, status/received is ignored", () => {

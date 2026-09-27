@@ -81,12 +81,15 @@ describe("ThemePicker", () => {
     expect(onSelect).toHaveBeenCalledWith("Fishing");
   });
 
-  it("disables a zero-ready theme with broken rows, showing how many need fixing", () => {
-    render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
+  it("still lets you select a zero-ready theme with broken rows, labeled 'N need fixing'", () => {
+    const onSelect = vi.fn();
+    render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={onSelect} />);
 
     openPicker();
     const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });
-    expect(option).toHaveAttribute("aria-disabled", "true");
+    expect(option).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(option);
+    expect(onSelect).toHaveBeenCalledWith("Waterfront");
   });
 
   it("uses the singular 'needs' when exactly one row needs fixing", () => {
@@ -96,21 +99,15 @@ describe("ThemePicker", () => {
     expect(screen.getByRole("option", { name: "Harborside — 1 needs fixing" })).toBeInTheDocument();
   });
 
-  it("disables a zero-ready, fully-done theme as 'all uploaded'", () => {
-    render(<ThemePicker batches={[ALL_UPLOADED_BATCH]} onSelect={vi.fn()} />);
+  it("still lets you select an all-uploaded theme, labeled 'all uploaded'", () => {
+    const onSelect = vi.fn();
+    render(<ThemePicker batches={[ALL_UPLOADED_BATCH]} onSelect={onSelect} />);
 
     openPicker();
     const option = screen.getByRole("option", { name: "Harbor — all uploaded" });
-    expect(option).toHaveAttribute("aria-disabled", "true");
-  });
-
-  it("never calls onSelect for a disabled theme", () => {
-    const onSelect = vi.fn();
-    render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={onSelect} />);
-
-    openPicker();
-    fireEvent.click(screen.getByRole("option", { name: "Waterfront — 3 need fixing" }));
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(option).not.toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(option);
+    expect(onSelect).toHaveBeenCalledWith("Harbor");
   });
 
   it("shows the instruction inline and uses it as the picker's accessible name", () => {
@@ -121,7 +118,7 @@ describe("ThemePicker", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders disabled themes with a legible token, not the near-invisible faint one", () => {
+  it("renders zero-ready themes de-emphasized with a legible token, not the near-invisible faint one", () => {
     render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
     openPicker();
     const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });

@@ -1021,6 +1021,29 @@ def test_build_lifecycle_report_pairs_each_row_with_its_state():
     )
 
 
+def test_build_lifecycle_report_records_each_rows_templated_file_from_raw_cells():
+    from ia_bulk import RowValidation, build_lifecycle_report
+
+    # The file comes from the RAW Sheet cells via the template, not the
+    # disk-resolved name - so an already-uploaded row still shows what it
+    # uploaded even when the photo is no longer on this machine.
+    rows = [
+        {
+            "folder_on_lacie_drive": "SOP CD 1",
+            "file_name": "a.jpg",
+            "ia_identifier": "lcps-x-00001",
+            "ia_uploaded": "2026-01-01T00:00:00Z",
+        }
+    ]
+    results = [RowValidation(row_number=2, identifier="lcps-x-00001")]
+
+    report = build_lifecycle_report(
+        rows, results, file_template="{folder_on_lacie_drive}/{file_name}"
+    )
+
+    assert report.entries[0].file == "SOP CD 1/a.jpg"
+
+
 def test_a_lifecycle_report_returns_each_buckets_results():
     from ia_bulk import RowValidation, UploadVerdict, build_lifecycle_report
     from identifiers import RowState
@@ -2211,10 +2234,10 @@ def test_cmd_validate_passes_only_the_row_results_to_the_lifecycle_summary_not_t
 
     captured = {}
 
-    def fake_build_lifecycle_report(rows, row_results):
+    def fake_build_lifecycle_report(rows, row_results, file_template=None):
         captured["rows"] = rows
         captured["row_results"] = row_results
-        return build_lifecycle_report(rows, row_results)
+        return build_lifecycle_report(rows, row_results, file_template)
 
     monkeypatch.setattr("ia_bulk.build_lifecycle_report", fake_build_lifecycle_report)
 
@@ -11785,6 +11808,8 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
     ]
     assert document["rows"][1]["errors"] != []
     assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
+    # A done row carries the file it uploaded, for the page's Uploaded list.
+    assert document["rows"][2]["file"] == "photo6.jpg"
     assert document["rows"][4]["missing_fields"] == ["title"]
     assert document["rows"][5]["errors"] != []
     # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
