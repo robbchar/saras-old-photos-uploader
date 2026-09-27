@@ -531,6 +531,9 @@ def test_post_runs_spawns_and_writes_page_run(tmp_path, monkeypatch):
     assert "--batch=Logging" in spawned["argv"]
     assert "--log-dir" in spawned["argv"]
     assert "--live" not in spawned["argv"]
+    # Test mode still records to the (test) Sheet, so the row is marked uploaded
+    # and the page reflects it (write_back = live or write_identifier).
+    assert "--write-identifier" in spawned["argv"]
     assert spawned["cwd"] == cfg.repo_root
 
     run_dir = page_runs.newest_run_dir(tmp_path / "logs")
@@ -558,6 +561,9 @@ def test_post_runs_adds_live_flag_when_configured_live(tmp_path, monkeypatch):
     with upload_server.serve_in_thread(cfg, deps) as base:
         _post_json(base + "/api/runs", {"batch": "Logging"})
     assert "--live" in spawned["argv"]
+    # --live already records; --write-identifier would be redundant, so it is
+    # only added in test mode (never paired with --live).
+    assert "--write-identifier" not in spawned["argv"]
 
 
 def test_post_runs_409_when_a_run_is_going(tmp_path, monkeypatch):

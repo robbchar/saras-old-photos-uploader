@@ -563,9 +563,18 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         """Builds the real `upload` command line, mirroring _validate_argv's
         convention: `--batch` in equals form so a value starting with `-`
         (e.g. `-weird`) is never mistaken for a flag by argparse.
+
+        `--write-identifier` in test mode so the run records to the (test)
+        Sheet: without it upload's `write_back` is False, the row is never
+        marked uploaded, and the page keeps showing the theme as ready. In live
+        mode `_base_argv` adds `--live`, which always records, so
+        `--write-identifier` is redundant there and is not added (it is never
+        paired with `--live`).
         """
         argv = self._base_argv("upload")
         argv.append(f"--batch={batch}")
+        if not self.app_server.config.live:
+            argv.append("--write-identifier")
         argv.extend(["--log-dir", str(run_dir)])
         return argv
 
