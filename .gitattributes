@@ -1,0 +1,4 @@
+# Shell scripts run on the Mac; keep LF endings even when edited on Windows,
+# or they fail there with "bad interpreter: bash^M".
+*.sh      text eol=lf
+*.command text eol=lf
