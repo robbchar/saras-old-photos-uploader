@@ -215,6 +215,18 @@ class CurrentItem:
         return {"index": self.index, "file": self.file}
 
 
+def _current_item_from_records(records: list[dict[str, object]]) -> CurrentItem | None:
+    """The in-flight item from already-parsed records (see read_current_item)."""
+    starts = [record for record in records if record.get("record") == ITEM_START_RECORD]
+    if not starts:
+        return None
+    last = starts[-1]
+    completed_ids = {record.get("identifier") for record in records if "record" not in record}
+    if last.get("identifier") in completed_ids:
+        return None
+    return CurrentItem(index=int(last["index"]), file=str(last["file"]))  # type: ignore[arg-type]
+
+
 def read_current_item(jsonl: Path | None) -> CurrentItem | None:
     """The item the run is uploading right now, or None when nothing is in flight.
 
@@ -224,15 +236,24 @@ def read_current_item(jsonl: Path | None) -> CurrentItem | None:
     the next item starts."""
     if jsonl is None:
         return None
+    return _current_item_from_records(_read_jsonl_records(jsonl))
+
+
+def read_progress_and_current(
+    jsonl: Path | None,
+) -> tuple[int, int | None, CurrentItem | None]:
+    """(done, planned, current) from a SINGLE parse of the JSONL.
+
+    Equivalent to (read_progress(jsonl), read_current_item(jsonl)) but reads
+    and parses the file once, not twice -- the SSE poll asks for both every
+    _SSE_POLL_INTERVAL_SECONDS while a run is live, so the log would otherwise
+    be re-read from the start twice per tick."""
+    if jsonl is None:
+        return 0, None, None
     records = _read_jsonl_records(jsonl)
-    starts = [record for record in records if record.get("record") == ITEM_START_RECORD]
-    if not starts:
-        return None
-    last = starts[-1]
-    completed_ids = {record.get("identifier") for record in records if "record" not in record}
-    if last.get("identifier") in completed_ids:
-        return None
-    return CurrentItem(index=int(last["index"]), file=str(last["file"]))  # type: ignore[arg-type]
+    done = sum(1 for record in records if "record" not in record)
+    planned = _find_run_header_planned(records)
+    return done, planned, _current_item_from_records(records)
 
 
 @dataclass(frozen=True)

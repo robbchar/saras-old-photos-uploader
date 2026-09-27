@@ -13,17 +13,18 @@ export interface StartDialogProps {
 }
 
 export function StartDialog({ count, batch, live, onConfirm, onCancel }: StartDialogProps) {
+  const items = count === 1 ? "item" : "items";
   return (
     <Dialog.Root>
       <Dialog.Trigger className="rounded bg-accent px-4 py-2 font-sans text-on-accent hover:bg-accent-hover">
-        {`Upload ${count} photos to Internet Archive`}
+        {`Upload ${count} ${items} to Internet Archive`}
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/40" />
         <Dialog.Content className="fixed left-1/2 top-1/2 w-96 -translate-x-1/2 -translate-y-1/2 rounded border border-border bg-raised p-6 text-text">
           <Dialog.Title className="text-lg font-semibold">Start this upload?</Dialog.Title>
           <Dialog.Description className="mt-2 text-muted">
-            {`This sends ${count} photos from "${batch}" to Internet Archive.`}
+            {`This sends ${count} ${items} from "${batch}" to Internet Archive.`}
           </Dialog.Description>
           {live && (
             <p className="mt-3 rounded border border-danger-border bg-danger-bg px-3 py-2 text-sm text-danger">

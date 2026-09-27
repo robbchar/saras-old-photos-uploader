@@ -48,7 +48,7 @@ finished (or refused) run, whatever it claims about itself.
 Live is the mode a volunteer runs every day; an always-on banner in that mode
 would stop being read within a week. Permanence is instead stated exactly
 where the decision that needs it is made: the Start button's own label
-("Upload 42 photos to Internet Archive") and the confirmation dialog that
+("Upload 42 items to Internet Archive") and the confirmation dialog that
 follows it, which in live mode adds that the upload cannot be undone or
 renamed. Test mode is the unusual one — a volunteer rehearsing, or someone
 testing the page itself — and gets a persistent amber banner ("TEST MODE —
@@ -68,9 +68,12 @@ Start is in the mode where getting it wrong costs nothing.
 
 *Decided 2026-09-24, in the page's design review (#29).*
 
-The running-output pane shows the child's console output verbatim, byte for
-byte from `output.txt` over Server-Sent Events — including the
-`internetarchive` library's own progress bars — but the page never parses it.
+The running-output pane shows the child's console output from `output.txt`
+over Server-Sent Events, a line at a time (byte offsets preserved for resume),
+but the page never parses it. One transport detail: a progress-bar line the
+`internetarchive` library rewrites in place with a bare carriage return is sent
+as only its final visible text (the tail after the last `\r`) — a raw `\r`
+cannot cross an SSE `data:` field, which the browser reads as a line terminator.
 What the page *acts on*, the "N of M" progress figure and the finished
 screen's counts, comes from `page_runs.read_progress()`/`read_ending()`
 reading the run's own `upload-*.jsonl` log: the same structured `run_header`/

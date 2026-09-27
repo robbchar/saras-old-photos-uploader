@@ -284,6 +284,18 @@ def test_static_asset_served_with_content(tmp_path):
         assert body == b"console.log(1)"
 
 
+def test_static_js_served_with_javascript_content_type(tmp_path):
+    # The bundle's module script must carry a JS content type from an explicit
+    # map, not the host MIME registry: on Windows mimetypes can report ".js" as
+    # a non-JS type, and a module served with a wrong MIME will not execute.
+    cfg = _make_config(tmp_path)
+    (cfg.page_dir / "dist" / "assets").mkdir(parents=True, exist_ok=True)
+    (cfg.page_dir / "dist" / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        response = urllib.request.urlopen(urllib.request.Request(base + "/assets/app.js"))
+        assert response.headers.get_content_type() == "text/javascript"
+
+
 # ---------------------------------------------------------------------------
 # /api/status
 # ---------------------------------------------------------------------------
@@ -925,6 +937,30 @@ def test_default_spawn_upload_uses_process_group_and_utf8_env(tmp_path, monkeypa
         assert not (creationflags & no_window)
 
 
+def test_default_run_validate_runs_in_repo_root(monkeypatch):
+    captured = {}
+
+    class _FakeCompleted:
+        stdout = "out"
+        stderr = "err"
+        returncode = 0
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return _FakeCompleted()
+
+    monkeypatch.setattr(upload_server.subprocess, "run", _fake_run)
+
+    stdout, stderr, code = upload_server._default_run_validate(["ia_bulk.py", "validate"])
+
+    assert (stdout, stderr, code) == ("out", "err", 0)
+    # Runs in the repo root regardless of the server's own cwd, so a relative
+    # "ia_bulk.py" in argv resolves (launchd starts the server in "/") -- the
+    # same cwd defense _default_spawn_upload already has.
+    assert captured["kwargs"]["cwd"] == upload_server._MODULE_DIR
+
+
 # ---------------------------------------------------------------------------
 # Startup refusals
 # ---------------------------------------------------------------------------
@@ -1243,15 +1279,16 @@ def test_sse_resumes_from_from_query_param(tmp_path, monkeypatch):
     assert line_texts == ["second line"]
 
 
-def test_sse_treats_crlf_as_newline_keeps_bare_cr(tmp_path, monkeypatch):
+def test_sse_treats_crlf_as_newline_and_sends_only_the_tail_after_a_bare_cr(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     run_dir = page_runs.new_run_dir(logs, "20260925T140000Z")
     page_runs.write_page_run(
         page_runs.PageRun(pid=1, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
     )
     # "a" terminated by \r\n (the \r is part of the newline, stripped); "b\rc"
-    # terminated by a bare \n (the \r inside it is kept verbatim -- the page
-    # rewrites the current line on \r).
+    # terminated by a bare \n. The bare \r is an in-place progress rewrite, so
+    # only the tail after the last \r ("c") is emitted -- a raw \r in an SSE
+    # data field is a line terminator to EventSource and would truncate it.
     (run_dir / "output.txt").write_bytes(b"a\r\nb\rc\n")
     monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
 
@@ -1259,8 +1296,12 @@ def test_sse_treats_crlf_as_newline_keeps_bare_cr(tmp_path, monkeypatch):
     with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
         events = _read_sse(base + "/api/runs/current/output", stop_on="finished")
 
-    line_texts = [e.data for e in events if e.event == "line"]
-    assert line_texts == ["a", "b\rc"]
+    line_events = [e for e in events if e.event == "line"]
+    line_texts = [e.data for e in line_events]
+    assert line_texts == ["a", "c"]
+    # Byte offsets still count the full line, not the trimmed text: "a\r\n" is
+    # 3 bytes, then "b\rc\n" is 4 more, so the second line's id is 7.
+    assert [e.id for e in line_events] == ["3", "7"]
 
 
 def test_sse_reattaches_after_restart_when_lock_frees(tmp_path, monkeypatch):

@@ -51,21 +51,24 @@ interface PageIdentity {
   live: boolean;
 }
 
-// Last byte offset shown per batch, so a reload can resume the output
-// stream instead of replaying it from the start.
+// Last byte offset shown for a run, keyed by the run's `started_at`, so a
+// reload can resume the output stream instead of replaying it from the start.
+// Keyed by the run identity, NOT the batch: output.txt is per-run, so a stale
+// offset left over from an earlier run of the same batch must never be applied
+// to a different run's file.
 const OUTPUT_OFFSET_STORAGE_KEY = "upload-page:output-offset";
 
 interface StoredOutputOffset {
-  batch: string;
+  startedAt: string;
   byteOffset: number;
 }
 
-function readStoredOffset(batch: string): number {
+function readStoredOffset(startedAt: string): number {
   try {
     const raw = window.sessionStorage.getItem(OUTPUT_OFFSET_STORAGE_KEY);
     if (!raw) return 0;
     const stored = JSON.parse(raw) as StoredOutputOffset;
-    return stored.batch === batch ? stored.byteOffset : 0;
+    return stored.startedAt === startedAt ? stored.byteOffset : 0;
   } catch {
     // Private browsing, disabled storage, or a malformed stored value -
     // resuming from 0 (a full replay) is a safe fallback, not a crash.
@@ -73,9 +76,9 @@ function readStoredOffset(batch: string): number {
   }
 }
 
-function writeStoredOffset(batch: string, byteOffset: number): void {
+function writeStoredOffset(startedAt: string, byteOffset: number): void {
   try {
-    const stored: StoredOutputOffset = { batch, byteOffset };
+    const stored: StoredOutputOffset = { startedAt, byteOffset };
     window.sessionStorage.setItem(OUTPUT_OFFSET_STORAGE_KEY, JSON.stringify(stored));
   } catch {
     // If storage isn't available, a reload just can't resume - it still
@@ -266,7 +269,7 @@ export default function App() {
   useEffect(() => {
     if (state.kind !== "running" && state.kind !== "stopping") return;
     if (eventSourceRef.current !== null) return;
-    ensureSubscribed(state.batch, readStoredOffset(state.batch));
+    ensureSubscribed(state.startedAt, readStoredOffset(state.startedAt));
   }, [state]);
 
   // Poll /api/health and hard-reload once bundle_stamp changes (a deploy).
@@ -309,11 +312,11 @@ export default function App() {
 
   // The single place an EventSource is ever opened; guarded so a run
   // already streaming is never given a second connection.
-  function ensureSubscribed(batch: string, fromOffset: number) {
+  function ensureSubscribed(startedAt: string, fromOffset: number) {
     if (eventSourceRef.current !== null) return;
     const handlers: OutputHandlers = {
       onLine: (text, byteOffset) => {
-        writeStoredOffset(batch, byteOffset);
+        writeStoredOffset(startedAt, byteOffset);
         setLines((previous) => appendLineCapped(previous, text));
       },
       onProgress: (progress) => dispatch({ type: "sse/progress", ...progress }),
@@ -341,9 +344,9 @@ export default function App() {
     setLines([]);
     clearStoredOffset();
     startRun(batch)
-      .then(() => {
+      .then((response) => {
         setStarting(false);
-        dispatch({ type: "confirm/yes" });
+        dispatch({ type: "confirm/yes", startedAt: response.started_at });
       })
       .catch((error: unknown) => {
         setStarting(false);

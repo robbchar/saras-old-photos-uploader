@@ -59,8 +59,8 @@ const sampleStates: { [K in AppState["kind"]]: Extract<AppState, { kind: K }> } 
   checking: { kind: "checking", batch: "Fishing" },
   previewed: { kind: "previewed", batch: "Fishing", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
   confirming: { kind: "confirming", batch: "Fishing", preview: SAMPLE_PREVIEW, checkedAt: CHECKED_AT },
-  running: { kind: "running", batch: "Fishing", done: 2, planned: 7, current: null },
-  stopping: { kind: "stopping", batch: "Fishing", done: 2, planned: 7, current: null },
+  running: { kind: "running", batch: "Fishing", startedAt: CHECKED_AT, done: 2, planned: 7, current: null },
+  stopping: { kind: "stopping", batch: "Fishing", startedAt: CHECKED_AT, done: 2, planned: 7, current: null },
   finished: { kind: "finished", ending: SAMPLE_ENDING },
   "terminal-run": { kind: "terminal-run", holder: SAMPLE_HOLDER },
   error: { kind: "error", message: "boom" },
@@ -77,7 +77,7 @@ const sampleActions: { [T in Action["type"]]: Extract<Action, { type: T }> } = {
   "recheck/clicked": { type: "recheck/clicked" },
   "start/clicked": { type: "start/clicked" },
   "confirm/cancel": { type: "confirm/cancel" },
-  "confirm/yes": { type: "confirm/yes" },
+  "confirm/yes": { type: "confirm/yes", startedAt: CHECKED_AT },
   "sse/progress": { type: "sse/progress", done: 3, planned: 7, current: null },
   "stop/clicked": { type: "stop/clicked" },
   "sse/finished": { type: "sse/finished", ending: SAMPLE_ENDING },
@@ -170,6 +170,7 @@ describe("status/received routes by run.kind (only from loading)", () => {
     expect(result).toEqual({
       kind: "running",
       batch: "Logging",
+      startedAt: CHECKED_AT,
       done: 4,
       planned: 12,
       current: { index: 5, file: "e.jpg" },
@@ -215,10 +216,11 @@ describe("other data-carrying transitions", () => {
       preview: SAMPLE_PREVIEW,
       checkedAt: CHECKED_AT,
     };
-    const result = reducer(confirming, { type: "confirm/yes" });
+    const result = reducer(confirming, { type: "confirm/yes", startedAt: CHECKED_AT });
     expect(result).toEqual({
       kind: "running",
       batch: "Fishing",
+      startedAt: CHECKED_AT,
       done: 0,
       planned: SAMPLE_PREVIEW.ready_to_upload,
       current: null,
@@ -226,7 +228,7 @@ describe("other data-carrying transitions", () => {
   });
 
   test("sse/progress updates done/planned/current while running", () => {
-    const running: AppState = { kind: "running", batch: "Fishing", done: 1, planned: 7, current: null };
+    const running: AppState = { kind: "running", batch: "Fishing", startedAt: CHECKED_AT, done: 1, planned: 7, current: null };
     const result = reducer(running, {
       type: "sse/progress",
       done: 5,
@@ -236,6 +238,7 @@ describe("other data-carrying transitions", () => {
     expect(result).toEqual({
       kind: "running",
       batch: "Fishing",
+      startedAt: CHECKED_AT,
       done: 5,
       planned: 7,
       current: { index: 6, file: "f.jpg" },
@@ -243,15 +246,16 @@ describe("other data-carrying transitions", () => {
   });
 
   test("sse/progress updates done/planned/current while stopping", () => {
-    const stopping: AppState = { kind: "stopping", batch: "Fishing", done: 1, planned: 7, current: null };
+    const stopping: AppState = { kind: "stopping", batch: "Fishing", startedAt: CHECKED_AT, done: 1, planned: 7, current: null };
     const result = reducer(stopping, { type: "sse/progress", done: 6, planned: 7, current: null });
-    expect(result).toEqual({ kind: "stopping", batch: "Fishing", done: 6, planned: 7, current: null });
+    expect(result).toEqual({ kind: "stopping", batch: "Fishing", startedAt: CHECKED_AT, done: 6, planned: 7, current: null });
   });
 
-  test("stop/clicked carries the current batch/done/planned/current into stopping", () => {
+  test("stop/clicked carries the current batch/startedAt/done/planned/current into stopping", () => {
     const running: AppState = {
       kind: "running",
       batch: "Fishing",
+      startedAt: CHECKED_AT,
       done: 3,
       planned: 7,
       current: { index: 4, file: "d.jpg" },
@@ -260,6 +264,7 @@ describe("other data-carrying transitions", () => {
     expect(result).toEqual({
       kind: "stopping",
       batch: "Fishing",
+      startedAt: CHECKED_AT,
       done: 3,
       planned: 7,
       current: { index: 4, file: "d.jpg" },

@@ -99,6 +99,29 @@ def test_read_current_item_is_none_when_no_jsonl(tmp_path):
     assert page_runs.read_current_item(page_runs.find_jsonl(tmp_path)) is None
 
 
+# --- read_progress_and_current (single-parse combined read) ----------------
+
+
+def test_read_progress_and_current_matches_the_two_reads(tmp_path):
+    # One parse must return exactly what read_progress + read_current_item do
+    # separately -- the SSE poll calls the combined form to avoid parsing the
+    # growing JSONL twice per tick.
+    _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"identifier": "a", "status": "success"},
+        {"record": "item_start", "identifier": "b", "file": "photos/b.jpg", "index": 2},
+    ])
+    jsonl = page_runs.find_jsonl(tmp_path)
+    done, planned, current = page_runs.read_progress_and_current(jsonl)
+    assert (done, planned) == page_runs.read_progress(jsonl)
+    assert current == page_runs.read_current_item(jsonl)
+    assert (done, planned, current) == (1, 3, page_runs.CurrentItem(index=2, file="photos/b.jpg"))
+
+
+def test_read_progress_and_current_no_jsonl_is_zero_none_none(tmp_path):
+    assert page_runs.read_progress_and_current(page_runs.find_jsonl(tmp_path)) == (0, None, None)
+
+
 def test_item_start_marker_is_not_counted_as_done(tmp_path):
     # The in-flight marker carries a "record" key so read_progress's per-item
     # (record-less) count never mistakes it for a completed item.

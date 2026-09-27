@@ -56,10 +56,13 @@ export interface ConfirmingState {
 
 /** A run is in progress. `planned` is null until the server reports a
  * total (mirrors RunState's `page_run_active.planned`). `current` is the
- * photo uploading right now, or null when nothing is in flight. */
+ * item uploading right now, or null when nothing is in flight. `startedAt`
+ * is the run's identity (its `started_at`), used to key the output-offset
+ * resume so a stale offset from a different run is never applied. */
 export interface RunningState {
   kind: "running";
   batch: string;
+  startedAt: string;
   done: number;
   planned: number | null;
   current: CurrentItem | null;
@@ -69,6 +72,7 @@ export interface RunningState {
 export interface StoppingState {
   kind: "stopping";
   batch: string;
+  startedAt: string;
   done: number;
   planned: number | null;
   current: CurrentItem | null;
@@ -152,8 +156,11 @@ export interface ConfirmCancelAction {
   type: "confirm/cancel";
 }
 
+/** Carries the run's `started_at` (from the POST /api/runs response) so the
+ * running state can key its output-offset resume by run identity. */
 export interface ConfirmYesAction {
   type: "confirm/yes";
+  startedAt: string;
 }
 
 /** Wraps the parsed SSE `progress` event as-is - same done/planned shape

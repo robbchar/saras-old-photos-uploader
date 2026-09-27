@@ -33,7 +33,7 @@ describe("RunningOutput", () => {
     render(<RunningOutput lines={[]} done={0} planned={null} stopping={false} onStop={onStop} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
-    expect(screen.getByText("Stop after the current photo?")).toBeInTheDocument();
+    expect(screen.getByText("Stop after the current item?")).toBeInTheDocument();
     expect(onStop).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -48,19 +48,19 @@ describe("RunningOutput", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(onStop).not.toHaveBeenCalled();
-    expect(screen.queryByText("Stop after the current photo?")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stop after the current item?")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
   });
 
   it("shows the stopping message and disables Stop once stopping is true", () => {
     render(<RunningOutput lines={[]} done={5} planned={10} stopping onStop={vi.fn()} />);
 
-    const stoppingButton = screen.getByRole("button", { name: "Stopping after the current photo…" });
+    const stoppingButton = screen.getByRole("button", { name: "Stopping after the current item…" });
     expect(stoppingButton).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
   });
 
-  it("names the image currently uploading with its position and file", () => {
+  it("names the item currently uploading with its position and file", () => {
     render(
       <RunningOutput
         lines={[]}
@@ -71,15 +71,15 @@ describe("RunningOutput", () => {
         onStop={vi.fn()}
       />,
     );
-    expect(screen.getByText(/Uploading image 3 of 40/)).toBeInTheDocument();
+    expect(screen.getByText(/Uploading item 3 of 40/)).toBeInTheDocument();
     expect(screen.getByText("photos/CD1_0472.jpg")).toBeInTheDocument();
   });
 
-  it("shows no current-image line when nothing is in flight", () => {
+  it("shows no current-item line when nothing is in flight", () => {
     render(
       <RunningOutput lines={[]} done={2} planned={40} current={null} stopping={false} onStop={vi.fn()} />,
     );
-    expect(screen.queryByText(/Uploading image/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Uploading item/)).not.toBeInTheDocument();
   });
 
   it("renders an overall progress bar reflecting done of planned", () => {

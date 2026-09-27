@@ -91,14 +91,14 @@ export function RunningOutput({ lines, done, planned, current, stopping, onStop 
             disabled
             className="rounded border border-border-strong px-3 py-1.5 text-faint"
           >
-            Stopping after the current photo…
+            Stopping after the current item…
           </button>
         ) : confirmingStop ? (
           // A plain labeled group, not a modal - this is an inline
           // two-button confirm with no focus trap or Escape handling, so
           // "alertdialog" would overstate its semantics to assistive tech.
           <span role="group" aria-label="Confirm stop" className="flex items-center gap-2">
-            <span className="text-text">Stop after the current photo?</span>
+            <span className="text-text">Stop after the current item?</span>
             <button
               type="button"
               onClick={handleConfirmStop}
@@ -144,7 +144,7 @@ export function RunningOutput({ lines, done, planned, current, stopping, onStop 
       {current && (
         <div className="mt-3">
           <p className="text-sm text-text">
-            Uploading image {current.index}
+            Uploading item {current.index}
             {planned !== null ? ` of ${planned}` : ""} —{" "}
             <span className="font-mono text-muted">{current.file}</span>
           </p>

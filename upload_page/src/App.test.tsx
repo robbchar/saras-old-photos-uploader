@@ -206,7 +206,7 @@ describe("App", () => {
   it("confirming the start dialog starts the run and shows the output pane", async () => {
     await selectFishingTheme();
 
-    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith("Fishing"));
@@ -226,7 +226,7 @@ describe("App", () => {
     });
 
     await selectFishingTheme();
-    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
 
     // startRun's promise has not resolved yet at this synchronous point -
@@ -247,7 +247,7 @@ describe("App", () => {
     );
 
     await selectFishingTheme();
-    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
 
     // No Cancel, no re-Confirm, and the theme picker is disabled - nothing
@@ -274,7 +274,7 @@ describe("App", () => {
     mockStartRun.mockRejectedValue(new Error("409 a run is already active for this project"));
 
     await selectFishingTheme();
-    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("409 a run is already active for this project");
@@ -303,7 +303,7 @@ describe("App", () => {
       capturedHandlers?.onProgress({ done: 3, planned: 5, current: { index: 4, file: "photos/x.jpg" } });
     });
     expect(await screen.findByText("3 of 5")).toBeInTheDocument();
-    expect(screen.getByText(/Uploading image 4 of 5/)).toBeInTheDocument();
+    expect(screen.getByText(/Uploading item 4 of 5/)).toBeInTheDocument();
 
     // Stop still works on a run this page never itself started.
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
@@ -316,6 +316,38 @@ describe("App", () => {
     expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
   });
 
+  it("ignores a stored offset that belongs to a different run when mounting mid-run", async () => {
+    // A stale offset left over from an earlier run of the same batch must not
+    // be applied to this run's per-run output.txt - the resume key is the
+    // run's started_at, so a mismatch falls back to a full replay (offset 0).
+    window.sessionStorage.setItem(
+      "upload-page:output-offset",
+      JSON.stringify({ startedAt: "2000-01-01T00:00:00Z", byteOffset: 9999 }),
+    );
+    mockOpenOutput.mockImplementation(() => ({ close: vi.fn() }));
+    mockGetStatus.mockResolvedValue(STATUS_RUNNING_MID_UPLOAD);
+
+    render(<App />);
+
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
+    expect(mockOpenOutput).toHaveBeenCalledWith(expect.anything(), 0);
+  });
+
+  it("resumes from a stored offset that belongs to this same run", async () => {
+    // STATUS_RUNNING_MID_UPLOAD's run started at 2026-09-25T12:00:00Z.
+    window.sessionStorage.setItem(
+      "upload-page:output-offset",
+      JSON.stringify({ startedAt: "2026-09-25T12:00:00Z", byteOffset: 4096 }),
+    );
+    mockOpenOutput.mockImplementation(() => ({ close: vi.fn() }));
+    mockGetStatus.mockResolvedValue(STATUS_RUNNING_MID_UPLOAD);
+
+    render(<App />);
+
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
+    expect(mockOpenOutput).toHaveBeenCalledWith(expect.anything(), 4096);
+  });
+
   it("shows the Finished screen once the output stream reports the run ended", async () => {
     let capturedHandlers: OutputHandlers | undefined;
     mockOpenOutput.mockImplementation((handlers: OutputHandlers) => {
@@ -324,7 +356,7 @@ describe("App", () => {
     });
 
     await selectFishingTheme();
-    fireEvent.click(screen.getByRole("button", { name: "Upload 5 photos to Internet Archive" }));
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
     await screen.findByRole("log");
 

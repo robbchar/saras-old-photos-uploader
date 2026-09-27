@@ -45,7 +45,7 @@ export function ThemePicker({ batches, value, disabled, loading, onSelect }: The
   return (
     <div className="flex flex-wrap items-center gap-3">
       <span id="theme-picker-label" className="text-text">
-        Choose a theme to upload images for:
+        Choose a theme to upload items for:
       </span>
       <Select.Root value={value} onValueChange={onSelect} disabled={disabled}>
         <Select.Trigger

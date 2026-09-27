@@ -112,9 +112,9 @@ describe("ThemePicker", () => {
 
   it("shows the instruction inline and uses it as the picker's accessible name", () => {
     render(<ThemePicker batches={[READY_BATCH]} onSelect={vi.fn()} />);
-    expect(screen.getByText("Choose a theme to upload images for:")).toBeInTheDocument();
+    expect(screen.getByText("Choose a theme to upload items for:")).toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: /choose a theme to upload images for/i }),
+      screen.getByRole("combobox", { name: /choose a theme to upload items for/i }),
     ).toBeInTheDocument();
   });
 

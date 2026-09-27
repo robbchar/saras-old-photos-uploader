@@ -65,6 +65,25 @@ _MAX_JSON_BODY_BYTES = 65536
 # sitting there uploading a large file.
 _SSE_POLL_INTERVAL_SECONDS = 0.2
 
+# Content types for the bundle's own asset extensions, served from this
+# explicit map rather than mimetypes.guess_type: on Windows the MIME registry
+# can map ".js" to a non-JS type, and a module script (index.html loads the
+# bundle as <script type="module">) served with a wrong MIME won't execute --
+# a blank page. Anything not listed here falls back to mimetypes.guess_type.
+_STATIC_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".txt": "text/plain; charset=utf-8",
+}
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -131,8 +150,13 @@ def _default_run_validate(argv: list[str]) -> tuple[str, str, int]:
     Generic on purpose: this module doesn't know what argv means (Task 6
     builds the actual `[sys.executable, "ia_bulk.py", "validate", ...]`),
     it just knows how to run *some* command and hand back its output.
+
+    Runs in _MODULE_DIR (the repo root) so a relative `ia_bulk.py` in argv
+    resolves regardless of the server's own cwd -- launchd starts the server
+    in `/`. This mirrors _default_spawn_upload's cwd=repo_root; without it,
+    /api/themes and /api/preview would fail whenever cwd is not the repo root.
     """
-    result = subprocess.run(argv, capture_output=True, text=True)
+    result = subprocess.run(argv, capture_output=True, text=True, cwd=_MODULE_DIR)
     return result.stdout, result.stderr, result.returncode
 
 
@@ -771,9 +795,13 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         events.
 
         "\\r\\n" is treated as the newline (the trailing \\r is stripped as
-        part of it); a bare \\r elsewhere in the line is kept verbatim --
-        that's how the child rewrites an in-place progress line, and the
-        page's terminal rendering depends on seeing it.
+        part of it). A bare \\r elsewhere in the line is an in-place progress
+        rewrite: only the text after the LAST \\r is actually on screen, so
+        just that tail is emitted. A raw \\r cannot survive an SSE `data:`
+        field -- EventSource treats CR as a line terminator and would truncate
+        the event at the first \\r -- so the tail is resolved here rather than
+        by the client. `position` still counts the full line's bytes (computed
+        before this trimming), so resume offsets are unaffected.
         """
         output_path = run_dir / page_runs.OUTPUT_FILENAME
         try:
@@ -792,6 +820,9 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             position += len(raw_line) + 1  # +1 for the \n split() consumed
             if raw_line.endswith(b"\r"):
                 raw_line = raw_line[:-1]
+            last_cr = raw_line.rfind(b"\r")
+            if last_cr != -1:
+                raw_line = raw_line[last_cr + 1:]
             text = raw_line.decode("utf-8", errors="replace")
             self._write_sse_event("line", text, event_id=str(position))
         return position
@@ -802,8 +833,7 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         last_progress: tuple[int, int | None, page_runs.CurrentItem | None] | None,
     ) -> tuple[int, int | None, page_runs.CurrentItem | None]:
         jsonl = page_runs.find_jsonl(run_dir)
-        done, planned = page_runs.read_progress(jsonl)
-        current_item = page_runs.read_current_item(jsonl)
+        done, planned, current_item = page_runs.read_progress_and_current(jsonl)
         state = (done, planned, current_item)
         if state != last_progress:
             self._write_sse_event(
@@ -882,7 +912,9 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             self._send_error(404, "not found")
             return
 
-        content_type, _ = mimetypes.guess_type(str(file_path))
+        content_type = _STATIC_CONTENT_TYPES.get(file_path.suffix.lower())
+        if content_type is None:
+            content_type, _ = mimetypes.guess_type(str(file_path))
         body = file_path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type or "application/octet-stream")

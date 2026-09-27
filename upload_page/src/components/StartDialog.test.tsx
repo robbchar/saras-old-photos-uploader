@@ -5,7 +5,7 @@ import { StartDialog } from "./StartDialog";
 afterEach(cleanup);
 
 function openDialog() {
-  fireEvent.click(screen.getByRole("button", { name: "Upload 3 photos to Internet Archive" }));
+  fireEvent.click(screen.getByRole("button", { name: "Upload 3 items to Internet Archive" }));
 }
 
 describe("StartDialog", () => {
@@ -14,7 +14,16 @@ describe("StartDialog", () => {
       <StartDialog count={3} batch="Fishing" live={false} onConfirm={vi.fn()} onCancel={vi.fn()} />,
     );
     expect(
-      screen.getByRole("button", { name: "Upload 3 photos to Internet Archive" }),
+      screen.getByRole("button", { name: "Upload 3 items to Internet Archive" }),
+    ).toBeInTheDocument();
+  });
+
+  it("uses the singular noun when exactly one item is ready", () => {
+    render(
+      <StartDialog count={1} batch="Fishing" live={false} onConfirm={vi.fn()} onCancel={vi.fn()} />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Upload 1 item to Internet Archive" }),
     ).toBeInTheDocument();
   });
 
