@@ -551,6 +551,16 @@ the first live runs are verified by hand. See
 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md), "Enabling the hourly sync" and
 "Checking a machine later".
 
+`setup --enable-upload-page` installs and loads the upload page as an
+always-on LaunchAgent instead of running `serve` by hand — a test-mode page
+is allowed, so `--live` is optional here, unlike `--enable-agent` above; only
+`--offline` is refused. Run it as `./install.sh --project sarasoldphotos
+--live --enable-upload-page`, from the operating account, once a first live
+terminal upload is verified by hand. A Mac runs this **or** the manual Dock
+launcher, never both — see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#17-enabling-the-upload-page-agent),
+"Enabling the upload page agent".
+
 ### `serve` — run the local upload page
 
 ```bash

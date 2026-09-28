@@ -691,3 +691,94 @@ instead:
 ```bash
 .venv/bin/python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e < /dev/null
 ```
+
+## 17. Enabling the upload page agent
+
+Once — and only once — a first live upload (`upload --live`) has been run
+from the terminal and checked by hand per
+[`docs/OPERATIONS.md`](OPERATIONS.md#3-live-run), log in as **the operating
+account** (§2) and run:
+
+```bash
+./install.sh --project <project> --live --enable-upload-page
+```
+
+**Writing the plist is enabling it** — `--enable-upload-page` writes
+`~/Library/LaunchAgents/org.lcpsociety.iabulk.uploadpage.<project>.plist` and
+loads it in the same step; there is no separate load command. Unlike
+`--enable-agent` (§12), a test-mode page is allowed: leave off `--live` to
+enable a rehearsal page against the test Sheet, or pass `--live` for the real
+one, as shown above. `--offline` is always refused with
+`--enable-upload-page` — the checks it gates on need the network to verify.
+
+The agent runs `serve` under `KeepAlive {SuccessfulExit: false}`, not the
+hourly `StartInterval` schedule the sync agent uses (§12): launchd starts it
+at login and restarts it only if it exits non-zero, so it behaves as an
+always-on server rather than an hourly job. Its own log is
+`logs/launchagent-<project>-upload-page.log`, separate from the sync agent's.
+
+**Bookmark `http://127.0.0.1:5277`, not `http://localhost:5277`.** The
+server binds `127.0.0.1` only — IPv4 loopback — so a browser that resolves
+`localhost` to the IPv6 `::1` first fails to connect.
+
+**Coexistence is a per-Mac choice, not automatic.** A Mac runs this agent
+*or* the manual Dock launcher (`start-upload-page-live.command`) — never
+both. Both bind port 5277 and both run `serve --live`; whichever starts
+second fails to bind the port the first is already holding. Neither one
+detects or refuses the other, so picking one deployment model per Mac is on
+whoever installs it.
+
+### Turning it off
+
+```bash
+launchctl bootout gui/$(id -u)/org.lcpsociety.iabulk.uploadpage.<project>
+rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.uploadpage.<project>.plist
+```
+
+Same shape as §13: run this as the account the agent is loaded for, and
+remove the plist too — a bootout alone leaves it to load again at the next
+login. `doctor` then reports the three upload page agent checks as
+`UNKNOWN`, the same way §13 describes for the sync agent.
+
+### Upgrading
+
+```bash
+git pull
+./install.sh --project <project>
+```
+
+No separate step, and no need to re-run `--enable-upload-page` just to pick
+up new code. `doctor`'s `upload page server running current code` check
+compares the commit the running server reports (`/api/health`) against this
+checkout's `HEAD`; on a mismatch, `setup`'s converge step runs `launchctl
+kickstart -k` to restart the agent on the new code as part of this same
+`./install.sh` run. The plist itself does not change on an ordinary code
+upgrade — unlike §14's plist-mismatch case for the sync agent, which does
+need `--enable-agent` re-run.
+
+## 18. Hand checks unique to the Mac
+
+`doctor` reports what it can from Python, but these four can only be
+confirmed by hand, on the Mac, once §17 is enabled — none of them run on the
+Windows dev box.
+
+- [ ] **An upload the server started survives a `launchctl bootout` of the
+      server.** Start a test-mode upload from the page, bootout the agent
+      while it is running, and confirm the upload keeps going and finishes.
+      Believed true but unverified: launchd kills only the job's own process
+      group, and the upload runs in its own session (see
+      [`decisions/UPLOAD-PAGE.md`, "The upload outlives the
+      server"](decisions/UPLOAD-PAGE.md#the-upload-outlives-the-server)) —
+      that has never been checked against a real `launchctl` on a Mac.
+- [ ] **launchd's restart throttling after a crash**, with `KeepAlive
+      {SuccessfulExit: false}` — kill the server process directly (not
+      `bootout`, which is a deliberate unload) and confirm launchd restarts
+      it, and that repeated crashes don't get throttled into giving up
+      silently.
+- [ ] **Safari at `http://127.0.0.1:5277` passes the Host/Origin checks** —
+      confirm the page loads and can start a test-mode upload from Safari,
+      not only the browser used during development.
+- [ ] **Whether the IA library's progress bar draws** when its output is a
+      file rather than a terminal — check
+      `logs/launchagent-<project>-upload-page.log` for garbled `\r`-driven
+      progress lines during a real upload started from the page.
