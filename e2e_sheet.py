@@ -73,7 +73,9 @@ def check_reset_allowed(
 
     target = E2ESheet(
         sheet_id=_required(block, "test_sheet_id", project),
-        data_tab=_required(block, "sheet_tab", project),
+        # The rehearsal writes only the test document, so its own tab override
+        # wins over the shared sheet_tab default (issue #82).
+        data_tab=str(block.get("test_sheet_tab") or "").strip() or _required(block, "sheet_tab", project),
         upload_log_tab=_required(block, "upload_log_tab", project),
         sync_log_tab=_required(block, "sync_log_tab", project),
     )

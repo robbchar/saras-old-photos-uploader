@@ -60,12 +60,17 @@ def _log_tabs(block: dict, project_id: str) -> dict[str, str | None]:
     onto the canonical columns, one-directionally and permanently, and the
     first anyone knew of it would be a Sheet with run summaries interleaved
     among the photographs."""
+    metadata_tabs = {
+        str(block.get(key) or "").strip()
+        for key in ("sheet_tab", "live_sheet_tab", "test_sheet_tab")
+    }
+    metadata_tabs.discard("")
     tabs: dict[str, str | None] = {}
     for key in ("upload_log_tab", "sync_log_tab"):
         value = str(block.get(key) or "").strip()
-        if value and value == str(block.get("sheet_tab") or "").strip():
+        if value and value in metadata_tabs:
             raise ConfigError(
-                f"project '{project_id}': {key} is '{value}', which is the metadata tab "
+                f"project '{project_id}': {key} is '{value}', which is a metadata tab "
                 "(sheet_tab). A log tab must be its own tab - run summaries appended onto "
                 "the metadata columns cannot be undone"
             )
@@ -98,9 +103,22 @@ class ProjectConfig:
     # "The Sheet's log tabs are telemetry, never an input".
     upload_log_tab: str | None = None
     sync_log_tab: str | None = None
+    # Per-document overrides for the metadata tab name. The live and test
+    # sheet documents may name that tab differently; when an override is
+    # unset, sheet_tab serves as the shared default. See docs/decisions/
+    # SHEET-PROTOCOL.md, "The metadata tab may be named per document".
+    live_sheet_tab: str | None = None
+    test_sheet_tab: str | None = None
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
+
+    def sheet_tab_for(self, live: bool) -> str:
+        """The metadata tab name for the live or test document, falling back to
+        the shared sheet_tab when that document has no override - parallel to
+        sheet_id_for selecting the document itself."""
+        override = self.live_sheet_tab if live else self.test_sheet_tab
+        return override or self.sheet_tab
 
     def sheet_id_is_placeholder(self, live: bool) -> bool:
         return is_placeholder_sheet_id(self.sheet_id_for(live))
@@ -321,6 +339,8 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
         sheet_id=block["sheet_id"].strip(),
         test_sheet_id=block["test_sheet_id"].strip(),
         sheet_tab=block["sheet_tab"].strip(),
+        live_sheet_tab=(str(block.get("live_sheet_tab") or "").strip() or None),
+        test_sheet_tab=(str(block.get("test_sheet_tab") or "").strip() or None),
         files_dir=block["files_dir"].strip(),
         file_template=block["file_template"].strip(),
         required_for_upload=tuple(required_for_upload),
