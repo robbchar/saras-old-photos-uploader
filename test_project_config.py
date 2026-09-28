@@ -113,6 +113,14 @@ def test_a_blank_per_document_sheet_tab_falls_back_to_the_shared_default():
     assert config.sheet_tab_for(live=False) == "Shared"
 
 
+@pytest.mark.parametrize("key", ["live_sheet_tab", "test_sheet_tab"])
+def test_a_non_string_per_document_sheet_tab_is_rejected(key):
+    """Optional, so absent from REQUIRED_KEYS' type check - but still validated,
+    so a number or list fails fast rather than coercing to a garbage tab name."""
+    with pytest.raises(ConfigError, match=f"{key}.*string"):
+        load_project_config(_registry(**{key: 5}), "p")
+
+
 @pytest.mark.parametrize(
     ("sheet_id", "expected"),
     [
@@ -524,17 +532,23 @@ def test_a_log_tab_may_not_collide_with_the_metadata_tab():
     with pytest.raises(ConfigError) as caught:
         load_project_config(registry, "p")
 
-    assert "upload_log_tab" in str(caught.value)
-    assert "Sheet1" in str(caught.value)
+    message = str(caught.value)
+    assert "upload_log_tab" in message
+    assert "Sheet1" in message
+    assert "sheet_tab" in message
 
 
-def test_a_log_tab_may_not_collide_with_a_per_document_metadata_tab():
+@pytest.mark.parametrize("metadata_key", ["live_sheet_tab", "test_sheet_tab"])
+def test_a_log_tab_may_not_collide_with_a_per_document_metadata_tab(metadata_key):
     """The metadata tab a log tab must not overwrite can be a per-document
-    override, not just the shared sheet_tab."""
-    registry = _registry(test_sheet_tab="Test Sheet", upload_log_tab="Test Sheet")
+    override, not just the shared sheet_tab - and the refusal names the exact
+    colliding key so the operator edits the right one."""
+    registry = _registry(**{metadata_key: "Photographs"}, upload_log_tab="Photographs")
 
     with pytest.raises(ConfigError) as caught:
         load_project_config(registry, "p")
 
-    assert "upload_log_tab" in str(caught.value)
-    assert "Test Sheet" in str(caught.value)
+    message = str(caught.value)
+    assert "upload_log_tab" in message
+    assert "Photographs" in message
+    assert metadata_key in message

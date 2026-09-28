@@ -2291,7 +2291,7 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
     except HttpError as exc:
         print(
             f"could not read spreadsheet '{sheet_id}' tab '{config.sheet_tab_for(live)}': {exc}. Check "
-            f"that 'sheet_tab' in {args.registry} names the tab exactly (case-sensitive) as it "
+            f"that '{config.sheet_tab_key_for(live)}' in {args.registry} names the tab exactly (case-sensitive) as it "
             "appears in the Sheet, that the spreadsheet ID is correct, and that the Sheet has "
             f"been shared, as Editor, with {sheet_sharing_target()}.",
             file=sys.stderr,

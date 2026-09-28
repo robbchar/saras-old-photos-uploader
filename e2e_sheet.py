@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from project_config import PLACEHOLDER_SHEET_ID_FORM, is_placeholder_sheet_id
+from project_config import (
+    PLACEHOLDER_SHEET_ID_FORM,
+    is_placeholder_sheet_id,
+    resolve_sheet_tab_override,
+)
 from sheet_client import SheetClient, column_letter, quote_tab
 
 E2E_PROJECT = "e2e"
@@ -74,8 +78,9 @@ def check_reset_allowed(
     target = E2ESheet(
         sheet_id=_required(block, "test_sheet_id", project),
         # The rehearsal writes only the test document, so its own tab override
-        # wins over the shared sheet_tab default (issue #82).
-        data_tab=str(block.get("test_sheet_tab") or "").strip() or _required(block, "sheet_tab", project),
+        # wins over the shared sheet_tab default (issue #82) - resolved by the
+        # one rule ProjectConfig.sheet_tab_for also follows.
+        data_tab=resolve_sheet_tab_override(block.get("test_sheet_tab"), _required(block, "sheet_tab", project)),
         upload_log_tab=_required(block, "upload_log_tab", project),
         sync_log_tab=_required(block, "sync_log_tab", project),
     )
