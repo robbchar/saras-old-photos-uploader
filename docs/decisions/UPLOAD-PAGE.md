@@ -98,9 +98,11 @@ can't build it. Anything else that ends the server counts as a failure a
 restart might actually cure. Recorded here, ahead of piece 6, because it
 already constrains what "exit clean" has to mean in `upload_server.py` today.
 
-Piece 6's *manual* half now exists — a person double-clicking to serve the
-page in LIVE mode; see [`../MAC-LAUNCHER.md`](../MAC-LAUNCHER.md). The
-LaunchAgent that runs the server unattended is still the remaining half.
+Piece 6 now exists in both halves — a person double-clicking to serve the
+page in LIVE mode (see [`../MAC-LAUNCHER.md`](../MAC-LAUNCHER.md)), and a
+LaunchAgent that runs the server unattended (see "The page agent is always-on,
+and one of two mutually exclusive models" below). A Mac uses one or the other,
+never both.
 
 ## The server's request guard
 
@@ -159,3 +161,38 @@ alone, rather than from anything the server remembers, is what lets a
 restarted server or a second browser tab reconstruct the same state a moment
 later — see "The upload outlives the server" and "The lock is the single
 source of truth" above.
+
+## The page agent is always-on, and one of two mutually exclusive models
+
+*Built 2026-09-28 (#29, piece 6).*
+
+On a Mac, `setup --enable-upload-page` writes and loads a per-user
+LaunchAgent (`org.lcpsociety.iabulk.uploadpage.<project>`) that runs `serve`
+under `KeepAlive {SuccessfulExit: false}` — the schedule "KeepAlive restarts
+only on failure" above anticipated, now built: `AgentSpec` gained a typed
+`Schedule` (`IntervalSchedule | KeepAliveSchedule`), and `render_plist` picks
+the plist keys from it; the hourly sync agent's own plist is unchanged.
+Writing the plist *is* enabling it, mirroring `--enable-agent` — there is no
+separate load step. Mode follows `setup`'s own `--live`; unlike the sync
+agent, a test-mode page is a legitimate rehearsal, so `--enable-upload-page`
+allows it. Only `--offline` is refused, since the checks the gate reads need
+the network to verify.
+
+`doctor` reports the agent's health with the same three generic per-agent
+checks the sync agent gets (plist current, log directory, loaded), plus
+three page-specific ones: whether `upload_page/dist/` matches its source
+(`bundle current`, pairing with the server's own stale-bundle startup
+refusal); whether `/api/health` answers on loopback (`server answering`);
+and whether the commit it reports matches the checkout's `HEAD` (`server
+running current code`) — the only one of the six that FAILs rather than
+reports `UNKNOWN` when it cannot be confirmed, because a confirmed mismatch
+is worth restarting over: its fix runs `launchctl kickstart -k`, so an
+ordinary `git pull` + `./install.sh` restarts a stale server without a
+separate `--enable-upload-page` re-run. See
+[`DEPLOYMENT.md`, "Enabling the upload page agent"](../DEPLOYMENT.md#17-enabling-the-upload-page-agent).
+
+**A Mac runs this agent or the manual Dock launcher
+(`start-upload-page-live.command`, #84) — never both.** Both bind the same
+port and both run `serve --live`; whichever starts second fails to bind.
+This is a deployment choice made once per Mac — neither mechanism detects or
+refuses the other on its own.

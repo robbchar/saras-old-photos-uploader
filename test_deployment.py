@@ -1,6 +1,8 @@
 import json
 import re
 import shlex
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -293,6 +295,21 @@ def test_agent_blocking_failures_names_only_fails_the_agent_needs():
     assert deployment.agent_blocking_failures(results) == ["key"]
 
 
+def test_upload_page_blocking_failures_includes_drive_and_bundle():
+    def outcome(status):
+        return CheckOutcome(status, "")
+
+    results = [
+        (Check(deployment.DRIVE_CHECK, lambda: outcome(Status.FAIL), "r",
+               needed_by_agent=False), outcome(Status.FAIL)),
+        (Check(deployment.BUNDLE_CHECK, lambda: outcome(Status.FAIL), "r",
+               needed_by_agent=False), outcome(Status.FAIL)),
+    ]
+    assert set(deployment.upload_page_blocking_failures(results)) == {
+        deployment.DRIVE_CHECK, deployment.BUNDLE_CHECK
+    }
+
+
 def test_python_version_check_fails_below_the_floor():
     assert deployment.python_version_check((3, 9), DEMO_INSTALL).probe().status is Status.FAIL
 
@@ -365,6 +382,13 @@ def test_install_command_for_the_agent_adds_live_and_enable_agent():
     assert (
         deployment.InstallCommand("sarasoldphotos").render(enable_agent=True)
         == "./install.sh --project sarasoldphotos --live --enable-agent"
+    )
+
+
+def test_install_command_renders_enable_upload_page():
+    cmd = deployment.InstallCommand("sarasoldphotos")
+    assert cmd.render(enable_upload_page=True) == (
+        "./install.sh --project sarasoldphotos --live --enable-upload-page"
     )
 
 
@@ -671,6 +695,286 @@ def test_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_pa
     # Loading is gated on --enable-agent, which setup does explicitly.
     spec = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", tmp_path / "registry.json")
     assert deployment.agent_loaded_check(spec, DEMO_INSTALL).fix is None
+
+
+def _page_spec(tmp_path):
+    return launch_agent.upload_page_agent_spec(
+        tmp_path / "repo", "demo", tmp_path / "registry.json", live=True
+    )
+
+
+def test_upload_page_agent_plist_check_unknown_when_absent(tmp_path):
+    spec = _page_spec(tmp_path)
+    outcome = deployment.upload_page_agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).probe()
+    assert outcome.status is Status.UNKNOWN
+    assert "not enabled" in outcome.detail
+
+
+def test_upload_page_agent_plist_check_pass_when_current(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    launch_agent.write_plist(spec, home)
+    assert deployment.upload_page_agent_plist_check(spec, home, DEMO_INSTALL).probe().status is Status.PASS
+
+
+def test_upload_page_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    target = launch_agent.plist_path(spec, home)
+    target.parent.mkdir(parents=True)
+    target.write_text("<plist>from an older checkout</plist>", encoding="utf-8")
+    assert deployment.upload_page_agent_plist_check(spec, home, DEMO_INSTALL).probe().status is Status.FAIL
+
+
+def test_upload_page_agent_plist_check_remedy_uses_enable_upload_page(tmp_path):
+    spec = _page_spec(tmp_path)
+    remedy = deployment.upload_page_agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).remedy
+    assert "--live --enable-upload-page" in remedy
+
+
+def test_upload_page_agent_plist_check_has_no_fix_so_only_enable_upload_page_writes_it(tmp_path):
+    # Writing the plist IS enabling it (§17); a converge-time fix() here would
+    # silently stand up an always-on live server outside --enable-upload-page.
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).fix is None
+
+
+def _enabled_page_agent_without_its_log_directory(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    launch_agent.write_plist(spec, home)
+    spec.output_path.parent.rmdir()
+    return spec, home
+
+
+def test_upload_page_agent_log_directory_check_fails_when_an_enabled_agent_lost_its_logs_folder(tmp_path):
+    spec, home = _enabled_page_agent_without_its_log_directory(tmp_path)
+    outcome = deployment.upload_page_agent_log_directory_check(spec, home, DEMO_INSTALL).probe()
+    assert outcome.status is Status.FAIL
+
+
+def test_upload_page_agent_log_directory_check_passes_without_the_folder_when_the_agent_is_not_enabled(tmp_path):
+    spec = _page_spec(tmp_path)
+    outcome = deployment.upload_page_agent_log_directory_check(spec, tmp_path / "home", DEMO_INSTALL).probe()
+    assert outcome.status is Status.PASS
+    assert "not enabled" in outcome.detail
+
+
+def test_upload_page_agent_loaded_check_is_unknown_when_launchctl_says_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(deployment.platform_probe, "launchctl_print", lambda _: None)
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).probe().status is Status.UNKNOWN
+
+
+def test_upload_page_agent_loaded_check_passes_and_reports_the_last_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 0\n"
+    )
+    spec = _page_spec(tmp_path)
+    outcome = deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).probe()
+    assert outcome.status is Status.PASS
+    assert "0" in outcome.detail
+
+
+def test_upload_page_agent_loaded_check_fails_when_the_last_run_errored(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 1\n"
+    )
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).probe().status is Status.FAIL
+
+
+def test_upload_page_agent_loaded_check_remedy_uses_enable_upload_page(tmp_path):
+    spec = _page_spec(tmp_path)
+    remedy = deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).remedy
+    assert "--live --enable-upload-page" in remedy
+
+
+def test_upload_page_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_path):
+    # Loading is gated on --enable-upload-page, which setup does explicitly.
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).fix is None
+
+
+def test_upload_page_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    assert deployment.upload_page_agent_plist_check(spec, home, DEMO_INSTALL).needed_by_agent is False
+    assert deployment.upload_page_agent_log_directory_check(spec, home, DEMO_INSTALL).needed_by_agent is False
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).needed_by_agent is False
+
+
+# ---------------------------------------------------------------------------
+# bundle-current, server-answering, server-running-current-code
+# ---------------------------------------------------------------------------
+
+
+def test_bundle_current_check_fails_when_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(deployment.build_stamp, "bundle_is_current", lambda _p: False)
+    check = deployment.bundle_current_check(tmp_path)
+    assert check.probe().status is deployment.Status.FAIL
+
+
+def test_bundle_current_check_passes_when_current(tmp_path, monkeypatch):
+    monkeypatch.setattr(deployment.build_stamp, "bundle_is_current", lambda _p: True)
+    check = deployment.bundle_current_check(tmp_path)
+    assert check.probe().status is deployment.Status.PASS
+
+
+def test_bundle_current_check_name_and_agent_need(tmp_path):
+    check = deployment.bundle_current_check(tmp_path)
+    assert check.name == deployment.BUNDLE_CHECK
+    assert check.needed_by_agent is False
+
+
+def test_server_answering_unknown_when_not_enabled(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    check = deployment.server_answering_check(spec, tmp_path, 5277, read_health=lambda _p: None)
+    assert check.probe().status is deployment.Status.UNKNOWN  # no plist -> not enabled
+
+
+def test_server_answering_fail_when_enabled_but_silent(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_answering_check(spec, tmp_path, 5277, read_health=lambda _p: None)
+    assert check.probe().status is deployment.Status.FAIL
+
+
+def test_server_answering_passes_when_enabled_and_answering(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_answering_check(
+        spec, tmp_path, 5277, read_health=lambda _p: {"commit": "abc"}
+    )
+    assert check.probe().status is deployment.Status.PASS
+
+
+def test_server_running_current_code_unknown_when_not_enabled(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    check = deployment.server_running_current_code_check(
+        spec, tmp_path, tmp_path, 5277,
+        read_health=lambda _p: {"commit": "abc"},
+        read_commit=lambda _r: "abc",
+        kickstart=lambda: pytest.fail("should not fix a check that never failed"),
+    )
+    assert check.probe().status is deployment.Status.UNKNOWN
+
+
+def test_server_running_current_code_unknown_when_not_answering(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_running_current_code_check(
+        spec, tmp_path, tmp_path, 5277,
+        read_health=lambda _p: None,
+        read_commit=lambda _r: "abc",
+    )
+    assert check.probe().status is deployment.Status.UNKNOWN
+
+
+def test_server_running_current_code_unknown_when_served_commit_is_unreported(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_running_current_code_check(
+        spec, tmp_path, tmp_path, 5277,
+        read_health=lambda _p: {"commit": "unknown"},
+        read_commit=lambda _r: "abc",
+    )
+    assert check.probe().status is deployment.Status.UNKNOWN
+
+
+def test_server_running_current_code_fail_on_mismatch(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_running_current_code_check(
+        spec, tmp_path, tmp_path, 5277,
+        read_health=lambda _p: {"commit": "old"},
+        read_commit=lambda _r: "new",
+        kickstart=lambda: "kickstarted",
+    )
+    outcome = check.probe()
+    assert outcome.status is deployment.Status.FAIL
+
+
+def test_server_running_current_code_fail_names_the_kickstart_as_its_fix(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_running_current_code_check(
+        spec, tmp_path, tmp_path, 5277,
+        read_health=lambda _p: {"commit": "old"},
+        read_commit=lambda _r: "new",
+        kickstart=lambda: "kickstarted",
+    )
+    assert check.fix is not None
+    assert check.fix() == "kickstarted"
+
+
+def test_server_running_current_code_passes_on_match(tmp_path):
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    check = deployment.server_running_current_code_check(
+        spec, tmp_path, tmp_path, 5277,
+        read_health=lambda _p: {"commit": "abc"},
+        read_commit=lambda _r: "abc",
+        kickstart=lambda: pytest.fail("should not fix a check that never failed"),
+    )
+    assert check.probe().status is deployment.Status.PASS
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Answers /api/health with a fixed commit; everything else is 404.
+
+    A real handler, not a mock, so the two server checks below exercise the
+    actual HTTP stack via deployment's own _default_read_health, not a
+    stand-in for it.
+    """
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
+        if self.path == "/api/health":
+            body = json.dumps({"commit": "abc"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):  # noqa: A002 - keep test output quiet
+        pass
+
+
+def test_server_checks_pass_against_a_real_loopback_server(tmp_path):
+    """The network guard permits loopback (see conftest.py); this is the one
+    test that goes through _default_read_health's real urllib GET rather than
+    an injected fake."""
+    spec = launch_agent.upload_page_agent_spec(tmp_path, "p", tmp_path / "r.json", live=True)
+    launch_agent.write_plist(spec, tmp_path)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        answering = deployment.server_answering_check(spec, tmp_path, port)
+        assert answering.probe().status is Status.PASS
+
+        running_current_code = deployment.server_running_current_code_check(
+            spec, tmp_path, tmp_path, port, read_commit=lambda _r: "abc"
+        )
+        assert running_current_code.probe().status is Status.PASS
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_read_head_commit_returns_unknown_on_failure(tmp_path):
+    assert deployment.read_head_commit(tmp_path / "not-a-repo") == "unknown"
+
+
+def test_read_head_commit_reads_the_real_head():
+    commit = deployment.read_head_commit(Path(__file__).resolve().parent)
+    assert re.fullmatch(r"[0-9a-f]{40}", commit)
 
 
 def test_install_sh_python_floor_matches_the_one_python_enforces():

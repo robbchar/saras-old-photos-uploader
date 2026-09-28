@@ -40,6 +40,13 @@ def agent_invocation() -> Invocation:
     return Invocation(spec.working_directory, script, arguments)
 
 
+def page_agent_invocation() -> Invocation:
+    """The page agent's argv, less the interpreter, from its WorkingDirectory."""
+    spec = launch_agent.upload_page_agent_spec(ia_bulk.REPO_ROOT, "demo", OTHER_REGISTRY, live=True)
+    _interpreter, script, *arguments = spec.program_arguments
+    return Invocation(spec.working_directory, script, arguments)
+
+
 def install_sh_handoff() -> tuple[str, str]:
     """The script and subcommand install.sh execs from its own directory with "$@"."""
     lines = INSTALL_SH.read_text(encoding="utf-8").splitlines()
@@ -71,6 +78,17 @@ def install_invocation(*registry_arguments: str) -> Invocation:
             agent_invocation,
             {"command": "sync-metadata", "project": "demo", "live": True, "registry": OTHER_REGISTRY},
             id="launch_agent",
+        ),
+        pytest.param(
+            page_agent_invocation,
+            {
+                "command": "serve",
+                "project": "demo",
+                "live": True,
+                "registry": OTHER_REGISTRY,
+                "port": launch_agent.DEFAULT_UPLOAD_PAGE_PORT,
+            },
+            id="launch_agent_upload_page",
         ),
         pytest.param(
             # Relative to where setup ran, not to where install.sh runs.
@@ -130,6 +148,34 @@ def test_sync_agent_spec_makes_a_relative_registry_absolute(tmp_path, monkeypatc
     assert registry_argument == str(tmp_path.resolve() / "alt.json")
 
 
+def test_upload_page_agent_spec_live_shape():
+    spec = launch_agent.upload_page_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json", live=True
+    )
+    assert spec.label == "org.lcpsociety.iabulk.uploadpage.sarasoldphotos"
+    assert spec.program_arguments[2] == "serve"
+    assert "--live" in spec.program_arguments
+    assert spec.program_arguments[-2:] == ["--port", "5277"]
+    assert isinstance(spec.schedule, launch_agent.KeepAliveSchedule)
+    assert spec.output_path.name == "launchagent-sarasoldphotos-upload-page.log"
+
+
+def test_upload_page_agent_spec_test_mode_drops_live():
+    spec = launch_agent.upload_page_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json", live=False
+    )
+    assert "--live" not in spec.program_arguments
+
+
+def test_upload_page_agent_plist_is_keepalive():
+    spec = launch_agent.upload_page_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json", live=True
+    )
+    body = plistlib.loads(launch_agent.render_plist(spec).encode("utf-8"))
+    assert body["KeepAlive"] == {"SuccessfulExit": False}
+    assert "StartInterval" not in body
+
+
 def test_plist_is_current_is_false_once_the_registry_changes(tmp_path):
     home = tmp_path / "home"
     launch_agent.write_plist(a_spec(tmp_path), home)
@@ -138,7 +184,7 @@ def test_plist_is_current_is_false_once_the_registry_changes(tmp_path):
 
 
 def test_sync_agent_spec_is_hourly(tmp_path):
-    assert a_spec(tmp_path).interval == launch_agent.HOURLY
+    assert a_spec(tmp_path).schedule == launch_agent.IntervalSchedule(launch_agent.HOURLY)
 
 
 def test_render_plist_is_parseable_and_carries_the_interval(tmp_path):
@@ -165,6 +211,77 @@ def test_render_plist_runs_at_load(tmp_path):
     # a login run with no changed rows is a no-op under the #24 hash gate.
     parsed = plistlib.loads(launch_agent.render_plist(a_spec(tmp_path)).encode("utf-8"))
     assert parsed["RunAtLoad"] is True
+
+
+def test_render_plist_matches_a_golden_byte_string_for_the_sync_agent():
+    """Pins the exact bytes render_plist produces, so a future change to key
+    order, escaping, or a new field is caught even though every other plist
+    test here only checks parsed fields. Keys come out alphabetical
+    (Label, ProgramArguments, RunAtLoad, ...) because plistlib.dumps defaults
+    to sort_keys=True - that, not dict insertion order in render_plist, is
+    what makes this ordering stable to pin."""
+    spec = launch_agent.sync_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json"
+    )
+    golden = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "\t<key>Label</key>\n"
+        "\t<string>org.lcpsociety.iabulk.sync.sarasoldphotos</string>\n"
+        "\t<key>ProgramArguments</key>\n"
+        "\t<array>\n"
+        "\t\t<string>C:\\srv\\repo\\.venv\\bin\\python</string>\n"
+        "\t\t<string>C:\\srv\\repo\\ia_bulk.py</string>\n"
+        "\t\t<string>sync-metadata</string>\n"
+        "\t\t<string>--project</string>\n"
+        "\t\t<string>sarasoldphotos</string>\n"
+        "\t\t<string>--live</string>\n"
+        "\t\t<string>--registry</string>\n"
+        "\t\t<string>C:\\srv\\repo\\projects_registry.json</string>\n"
+        "\t</array>\n"
+        "\t<key>RunAtLoad</key>\n"
+        "\t<true/>\n"
+        "\t<key>StandardErrorPath</key>\n"
+        "\t<string>C:\\srv\\repo\\logs\\launchagent-sarasoldphotos.log</string>\n"
+        "\t<key>StandardOutPath</key>\n"
+        "\t<string>C:\\srv\\repo\\logs\\launchagent-sarasoldphotos.log</string>\n"
+        "\t<key>StartInterval</key>\n"
+        "\t<integer>3600</integer>\n"
+        "\t<key>WorkingDirectory</key>\n"
+        "\t<string>C:\\srv\\repo</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+    assert launch_agent.render_plist(spec) == golden
+
+
+def test_render_plist_emits_keep_alive_for_a_keepalive_schedule():
+    spec = launch_agent.AgentSpec(
+        label="org.example.keepalive",
+        program_arguments=["/x/python", "/x/ia_bulk.py", "serve"],
+        schedule=launch_agent.KeepAliveSchedule(),
+        output_path=Path("/x/logs/a.log"),
+        working_directory=Path("/x"),
+    )
+    body = plistlib.loads(launch_agent.render_plist(spec).encode("utf-8"))
+    assert body["KeepAlive"] == {"SuccessfulExit": False}
+    assert "StartInterval" not in body
+    assert body["RunAtLoad"] is True
+
+
+def test_render_plist_emits_start_interval_for_an_interval_schedule():
+    spec = launch_agent.AgentSpec(
+        label="org.example.interval",
+        program_arguments=["/x/python", "/x/ia_bulk.py", "sync-metadata"],
+        schedule=launch_agent.IntervalSchedule(3600),
+        output_path=Path("/x/logs/a.log"),
+        working_directory=Path("/x"),
+    )
+    body = plistlib.loads(launch_agent.render_plist(spec).encode("utf-8"))
+    assert body["StartInterval"] == 3600
+    assert "KeepAlive" not in body
 
 
 def test_plist_path_lands_in_the_users_launchagents(tmp_path):

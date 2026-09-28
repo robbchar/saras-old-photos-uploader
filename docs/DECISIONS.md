@@ -129,6 +129,7 @@ decision gets made.
 - [KeepAlive restarts only on failure](decisions/UPLOAD-PAGE.md#keepalive-restarts-only-on-failure)
 - [The server's request guard](decisions/UPLOAD-PAGE.md#the-servers-request-guard)
 - [The run-state model](decisions/UPLOAD-PAGE.md#the-run-state-model)
+- [The page agent is always-on, and one of two mutually exclusive models](decisions/UPLOAD-PAGE.md#the-page-agent-is-always-on-and-one-of-two-mutually-exclusive-models)
 
 ## Still open
 

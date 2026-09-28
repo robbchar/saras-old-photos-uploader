@@ -15,12 +15,16 @@ import configparser
 import enum
 import importlib
 import importlib.metadata
+import json
 import re
 import shlex
+import subprocess
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import build_stamp
 import google_auth
 import launch_agent
 import platform_probe
@@ -109,6 +113,17 @@ def agent_blocking_failures(results: list[tuple[Check, CheckOutcome]]) -> list[s
     ]
 
 
+def upload_page_blocking_failures(results: list[tuple[Check, CheckOutcome]]) -> list[str]:
+    """FAILing checks the upload page depends on: everything the sync agent needs,
+    plus the files drive and the committed bundle (which the sync agent does not)."""
+    blocking = list(agent_blocking_failures(results))
+    for check, outcome in results:
+        if check.name in (DRIVE_CHECK, BUNDLE_CHECK) and outcome.status is Status.FAIL:
+            if check.name not in blocking:
+                blocking.append(check.name)
+    return blocking
+
+
 KEY_MODE = 0o600
 
 
@@ -124,12 +139,14 @@ class InstallCommand:
     # None for the checkout's own projects_registry.json, which install.sh reads by default.
     registry: Path | None = None
 
-    def render(self, *, enable_agent: bool = False) -> str:
+    def render(self, *, enable_agent: bool = False, enable_upload_page: bool = False) -> str:
         arguments = ["./install.sh", "--project", self.project_id]
         if self.registry is not None:
             arguments += ["--registry", str(self.registry)]
         if enable_agent:
             arguments += ["--live", "--enable-agent"]
+        if enable_upload_page:
+            arguments += ["--live", "--enable-upload-page"]
         return shlex.join(arguments)
 
 
@@ -335,6 +352,11 @@ def sheet_id_check(config: ProjectConfig, live: bool, registry_path: str) -> Che
     )
 
 
+# Named so upload_page_blocking_failures can single these out without re-spelling them.
+DRIVE_CHECK = "files drive"
+BUNDLE_CHECK = "upload page bundle"
+
+
 def drive_check(files_dir: Path) -> Check:
     def probe() -> CheckOutcome:
         if not files_dir.exists():
@@ -346,7 +368,7 @@ def drive_check(files_dir: Path) -> Check:
 
     # sync-metadata never reads the drive, so this does not gate the agent.
     return Check(
-        name="files drive",
+        name=DRIVE_CHECK,
         probe=probe,
         # FAIL only when the path exists, so the drive is attached; access or the path is wrong.
         remedy=(
@@ -560,5 +582,221 @@ def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) ->
             "log in as the operating account and run "
             f"{install.render(enable_agent=True)}"
         ),
+        needed_by_agent=False,
+    )
+
+
+def upload_page_agent_plist_check(spec: launch_agent.AgentSpec, home: Path, install: InstallCommand) -> Check:
+    """No fix(): launchd loads every plist in LaunchAgents at login, and a rewrite
+    alone never reaches the loaded job, so only --enable-upload-page writes it and reloads."""
+
+    def probe() -> CheckOutcome:
+        target = launch_agent.plist_path(spec, home)
+        if launch_agent.plist_is_current(spec, home):
+            return CheckOutcome(Status.PASS, str(target))
+        if target.exists():
+            return CheckOutcome(Status.FAIL, f"{target} does not match this checkout and registry")
+        return CheckOutcome(
+            Status.UNKNOWN, f"no plist at {target} - the upload page agent is not enabled for this account"
+        )
+
+    return Check(
+        name="upload page agent plist",
+        probe=probe,
+        remedy=(
+            f"{install.render(enable_upload_page=True)}, from the account that "
+            "runs the agent, rewrites it and reloads the agent; if that was just run and this "
+            "still fails, the plist could not be written "
+            '- see docs/DEPLOYMENT.md, section "Checking a machine later"'
+        ),
+        needed_by_agent=False,
+    )
+
+
+def upload_page_agent_log_directory_check(
+    spec: launch_agent.AgentSpec, home: Path, install: InstallCommand
+) -> Check:
+    """launchd creates no directory for StandardOutPath, so an enabled agent
+    whose logs/ was deleted never starts again and writes nothing anywhere."""
+    directory = spec.output_path.parent
+
+    def probe() -> CheckOutcome:
+        if directory.is_dir():
+            return CheckOutcome(Status.PASS, str(directory))
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.PASS, f"{directory} is absent, but the agent is not enabled")
+        return CheckOutcome(Status.FAIL, f"{directory} is missing, so launchd cannot start the agent")
+
+    def fix() -> str:
+        directory.mkdir(parents=True, exist_ok=True)
+        return f"created {directory}"
+
+    return Check(
+        name="upload page agent log directory",
+        probe=probe,
+        remedy=f"{install.render()} recreates it; delete the files in logs/, never the folder",
+        fix=fix,
+        needed_by_agent=False,
+    )
+
+
+def upload_page_agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) -> Check:
+    # Relative, as the operator reads it from the checkout they run install.sh in.
+    agent_log = spec.output_path.relative_to(spec.working_directory).as_posix()
+
+    def probe() -> CheckOutcome:
+        output = platform_probe.launchctl_print(spec.label)
+        if output is None:
+            # Not loaded, no launchctl, or a different account's session - all
+            # "could not tell", and loading is --enable-upload-page's job, never a fix().
+            return CheckOutcome(Status.UNKNOWN, f"{spec.label} is not loaded for this account")
+        last_exit = platform_probe.parse_last_exit(output)
+        pid = platform_probe.parse_pid(output)
+        running = f", running as pid {pid}" if pid is not None else ""
+        if last_exit is None:
+            return CheckOutcome(Status.PASS, f"loaded, has not run yet{running}")
+        if last_exit != 0:
+            return CheckOutcome(Status.FAIL, f"loaded, last run exited {last_exit}{running}")
+        return CheckOutcome(Status.PASS, f"loaded, last run exited 0{running}")
+
+    return Check(
+        name="upload page agent loaded",
+        probe=probe,
+        remedy=(
+            f"run tail -20 {agent_log} to see why the last run failed; to "
+            "reload the agent, "
+            "log in as the operating account and run "
+            f"{install.render(enable_upload_page=True)}"
+        ),
+        needed_by_agent=False,
+    )
+
+
+HealthReader = Callable[[int], "dict | None"]
+
+
+def _default_read_health(port: int) -> "dict | None":
+    """A 2s GET of the running server's own /api/health, or None on any
+    failure - unreachable port, timeout, non-200, or a body that is not
+    the JSON object /api/health always sends."""
+    url = f"http://127.0.0.1:{port}/api/health"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:  # noqa: S310 - loopback only
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_head_commit(repo_root: Path) -> str:
+    """`git rev-parse HEAD` for repo_root, "unknown" on any failure.
+
+    Deliberately its own copy of upload_server._default_read_commit's exact
+    git command, not an import of it: doctor stays decoupled from the
+    http-server module, and the identical command means there is no
+    algorithm connascence to keep in sync by hand.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def bundle_current_check(page_dir: Path) -> Check:
+    """Pairs with the upload page's own startup refusal on a stale bundle
+    (see upload_server._check_startup): this is the same fact, checked from
+    the outside so `doctor` catches it before the server ever tries to start."""
+
+    def probe() -> CheckOutcome:
+        if build_stamp.bundle_is_current(page_dir):
+            return CheckOutcome(Status.PASS, f"{page_dir / 'dist'} matches its source")
+        return CheckOutcome(Status.FAIL, f"{page_dir / 'dist'} is stale or missing")
+
+    return Check(
+        name=BUNDLE_CHECK,
+        probe=probe,
+        remedy="run yarn build in upload_page/ and commit dist/",
+        needed_by_agent=False,
+    )
+
+
+def server_answering_check(
+    spec: launch_agent.AgentSpec,
+    home: Path,
+    port: int,
+    read_health: HealthReader = _default_read_health,
+) -> Check:
+    """UNKNOWN (not FAIL) while the agent is not enabled: a server nobody
+    asked to run yet is not broken."""
+
+    def probe() -> CheckOutcome:
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.UNKNOWN, "upload page agent not enabled")
+        if read_health(port) is None:
+            return CheckOutcome(Status.FAIL, f"enabled but not answering on 127.0.0.1:{port}")
+        return CheckOutcome(Status.PASS, f"answering on 127.0.0.1:{port}")
+
+    return Check(
+        name="upload page server answering",
+        probe=probe,
+        remedy=(
+            f"check {spec.output_path} for why the server did not start, then "
+            "reload the agent - see docs/DEPLOYMENT.md"
+        ),
+        needed_by_agent=False,
+    )
+
+
+def server_running_current_code_check(
+    spec: launch_agent.AgentSpec,
+    home: Path,
+    repo_root: Path,
+    port: int,
+    read_health: HealthReader = _default_read_health,
+    read_commit: Callable[[Path], str] = read_head_commit,
+    kickstart: Callable[[], str] | None = None,
+) -> Check:
+    """FAILs only on a confirmed commit mismatch - every other "could not
+    tell" case (not enabled, not answering, no commit reported) is UNKNOWN,
+    matching server_answering_check's own FAIL for "not answering" so the
+    two checks do not both report the same failure as broken."""
+    if kickstart is None:
+        kickstart = lambda: platform_probe.launchctl_kickstart(spec.label)  # noqa: E731
+    # Shared by the FAIL outcome and the check itself - format_report falls back
+    # to the latter when a probe path (like UNKNOWN below) sets no outcome remedy.
+    kickstart_remedy = f"launchctl kickstart -k gui/<uid>/{spec.label} to restart it on the new code"
+
+    def probe() -> CheckOutcome:
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.UNKNOWN, "upload page agent not enabled")
+        health = read_health(port)
+        if health is None:
+            # server_answering_check already FAILs this; nothing new to add here.
+            return CheckOutcome(Status.UNKNOWN, f"not answering on 127.0.0.1:{port}")
+        served = health.get("commit")
+        if served in (None, "unknown"):
+            return CheckOutcome(Status.UNKNOWN, f"server did not report a usable commit ({served!r})")
+        head = read_commit(repo_root)
+        if served == head:
+            return CheckOutcome(Status.PASS, f"serving {served}, matches HEAD")
+        return CheckOutcome(
+            Status.FAIL,
+            f"serving {served}, checkout is at {head}",
+            remedy=kickstart_remedy,
+        )
+
+    return Check(
+        name="upload page server running current code",
+        probe=probe,
+        remedy=kickstart_remedy,
+        fix=kickstart,
         needed_by_agent=False,
     )
