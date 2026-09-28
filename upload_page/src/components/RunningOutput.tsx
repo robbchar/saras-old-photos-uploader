@@ -13,6 +13,11 @@ import type { CurrentItem } from "../api/schemas";
 
 export interface RunningOutputProps {
   lines: string[];
+  /** Absolute sequence number of `lines[0]`. App increments it as the capped
+   * buffer drops lines off the front, so each line keeps a stable React key
+   * (keyBase + index) instead of a shifting array index -- otherwise every
+   * line past the cap re-renders on each new line. Defaults to 0. */
+  keyBase?: number;
   done: number;
   planned: number | null;
   /** The photo uploading right now, or null/undefined when nothing is in
@@ -50,7 +55,7 @@ function isNearBottom(element: HTMLElement): boolean {
   return distanceFromBottom <= NEAR_BOTTOM_THRESHOLD_PX;
 }
 
-export function RunningOutput({ lines, done, planned, current, stopping, onStop }: RunningOutputProps) {
+export function RunningOutput({ lines, keyBase = 0, done, planned, current, stopping, onStop }: RunningOutputProps) {
   const [confirmingStop, setConfirmingStop] = useState(false);
   const logRef = useRef<HTMLDivElement | null>(null);
   // Whether the reader was at the bottom just before this update - a ref,
@@ -162,7 +167,7 @@ export function RunningOutput({ lines, done, planned, current, stopping, onStop 
         className="mt-4 h-80 overflow-y-auto rounded border border-border bg-bg p-2 font-mono text-sm text-text"
       >
         {lines.map((line, index) => (
-          <div key={index}>{visibleText(line)}</div>
+          <div key={keyBase + index}>{visibleText(line)}</div>
         ))}
       </div>
     </section>

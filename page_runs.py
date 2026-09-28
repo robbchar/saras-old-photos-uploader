@@ -8,7 +8,7 @@ its tests can read what a run is doing (read_progress) and how it ended
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -72,11 +72,12 @@ _MAX_RUN_DIR_SUFFIX = 999
 def new_run_dir(logs_base: Path, now: str) -> Path:
     """Create and return a unique `<logs_base>/page-runs/<now>[-NNN]/`.
 
-    `now` is second-resolution (see upload_server._default_now_utc), so two
-    runs started within the same second would otherwise collide on the same
-    folder -- silently overwriting one run's page-run.json and truncating
-    its output.txt. When `<now>` is already taken, a zero-padded `-002`,
-    `-003`, ... suffix is appended until an unused name is found.
+    `now` carries sub-second resolution (see upload_server._default_now_utc),
+    so a collision on the same folder is near-impossible in practice; but were
+    two runs ever to land on the same `<now>` it would silently overwrite one
+    run's page-run.json and truncate its output.txt. When `<now>` is already
+    taken, a zero-padded `-002`, `-003`, ... suffix is appended until an unused
+    name is found.
 
     The suffix is fixed-width and always longer than the bare timestamp, so
     newest_run_dir's lexicographic-max sort still picks the right folder: a
@@ -256,6 +257,84 @@ def read_progress_and_current(
     return done, planned, _current_item_from_records(records)
 
 
+@dataclass
+class ProgressCursor:
+    """Incremental (done, planned, current-item) state for a run's JSONL.
+
+    The SSE poll asks for progress every fraction of a second while a run is
+    live; re-reading and re-parsing the whole (ever-growing) log each time is
+    O(file) per poll, O(n**2) over a long run. advance_progress folds only the
+    bytes appended since `offset` into this cursor instead. Its running tallies
+    must match read_progress_and_current's one-shot result line for line -- the
+    difference is only that a single parse is amortized across the poll."""
+
+    offset: int = 0
+    done: int = 0
+    planned: int | None = None
+    path: Path | None = None
+    last_start: tuple[CurrentItem, str] | None = None  # (item, its identifier)
+    completed_ids: set[str] = field(default_factory=set)
+
+    def current(self) -> CurrentItem | None:
+        if self.last_start is None:
+            return None
+        item, identifier = self.last_start
+        return None if identifier in self.completed_ids else item
+
+
+def advance_progress(jsonl: Path | None, cursor: ProgressCursor) -> ProgressCursor:
+    """Fold the JSONL lines appended since `cursor.offset` into `cursor`, in place.
+
+    Parses only new COMPLETE (newline-terminated) lines; a trailing partial line
+    is left for the next call (offset stops before it), so a half-written line
+    is never counted -- matching UploadPageHandler._drain_output_lines. A line
+    that will not parse is skipped, as _read_jsonl_records does. Rebinds (and
+    resets) the cursor if the resolved JSONL path changes, which normally never
+    happens for one run. Raises OSError on a read failure, like the reads it
+    mirrors; the SSE caller tolerates a transient one."""
+    if jsonl is None:
+        return cursor
+    if cursor.path is not None and cursor.path != jsonl:
+        cursor.offset = 0
+        cursor.done = 0
+        cursor.planned = None
+        cursor.last_start = None
+        cursor.completed_ids = set()
+    cursor.path = jsonl
+    with open(jsonl, "rb") as handle:
+        handle.seek(cursor.offset)
+        chunk = handle.read()
+    if not chunk:
+        return cursor
+    complete_lines = chunk.split(b"\n")[:-1]  # the last piece has no trailing \n yet
+    for raw_line in complete_lines:
+        cursor.offset += len(raw_line) + 1  # +1 for the \n split() consumed
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        kind = record.get("record")
+        if kind is None:  # a per-item result record -> one completed item
+            cursor.done += 1
+            identifier = record.get("identifier")
+            if isinstance(identifier, str):
+                cursor.completed_ids.add(identifier)
+        elif kind == "run_header":
+            planned = record.get("planned")
+            cursor.planned = None if planned is None else int(planned)  # type: ignore[arg-type]
+        elif kind == ITEM_START_RECORD:
+            cursor.last_start = (
+                CurrentItem(index=int(record["index"]), file=str(record["file"])),  # type: ignore[arg-type]
+                str(record["identifier"]),
+            )
+    return cursor
+
+
 @dataclass(frozen=True)
 class Refused:
     """No JSONL at all: the run never got as far as writing run_header."""
@@ -432,14 +511,14 @@ def compute_run_state(lock_path: Path, logs_base: Path) -> RunState:
             page_run = read_page_run(newest)
             if holder is not None and page_run is not None and holder.pid == page_run.pid:
                 jsonl = find_jsonl(newest)
-                done, planned = read_progress(jsonl)
+                done, planned, current = read_progress_and_current(jsonl)
                 return PageRunActive(
                     batch=page_run.batch,
                     live=page_run.live,
                     started_at=page_run.started_at,
                     done=done,
                     planned=planned,
-                    current=read_current_item(jsonl),
+                    current=current,
                 )
         return TerminalRunActive(holder=holder)
 

@@ -183,6 +183,11 @@ export default function App() {
   const [themes, setThemes] = useState<ValidateDoc | null>(null);
   const eventSourceRef = useRef<ReturnType<typeof openOutput> | null>(null);
   const rememberedBundleStampRef = useRef<string | null>(null);
+  // Total lines ever appended this session. `lines[0]`'s absolute sequence
+  // number is this minus the buffer length, which RunningOutput uses as a
+  // stable React key base so a capped buffer dropping lines off the front does
+  // not force every remaining line to re-render.
+  const linesSeenRef = useRef(0);
   // True while startRun is in flight - see handleConfirmStart.
   const [starting, setStarting] = useState(false);
 
@@ -317,6 +322,7 @@ export default function App() {
     const handlers: OutputHandlers = {
       onLine: (text, byteOffset) => {
         writeStoredOffset(startedAt, byteOffset);
+        linesSeenRef.current += 1;
         setLines((previous) => appendLineCapped(previous, text));
       },
       onProgress: (progress) => dispatch({ type: "sse/progress", ...progress }),
@@ -410,6 +416,7 @@ export default function App() {
         return (
           <RunningOutput
             lines={lines}
+            keyBase={linesSeenRef.current - lines.length}
             done={state.done}
             planned={state.planned}
             current={state.current}

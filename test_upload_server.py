@@ -5,6 +5,7 @@ these exercise the actual HTTP stack, not a mocked one."""
 from __future__ import annotations
 
 import json
+import re
 import socket
 import sys
 import threading
@@ -360,6 +361,44 @@ def test_status_reports_finished_state(tmp_path, monkeypatch):
             "ending": {"kind": "completed", "summary": {"uploaded": 5}},
             "page_run": None,
         }
+
+
+def test_status_reports_active_for_a_just_spawned_run_before_it_locks(tmp_path, monkeypatch):
+    # A run this server just spawned holds no lock and has written no JSONL yet
+    # -- on disk that reads as Finished, but its child is still alive, so
+    # /api/status must report it active, not bounce the page back to the picker.
+    run_dir = _write_matching_page_run(tmp_path, pid=4242, now="20260925T130000Z")
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    monkeypatch.setitem(upload_server._spawned_upload_processes, run_dir, _Alive())
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/status")
+    assert status == 200
+    assert json.loads(body)["run"]["kind"] == "page_run_active"
+
+
+def test_status_reports_finished_once_the_run_wrote_a_jsonl(tmp_path, monkeypatch):
+    # Even with a live tracked child, a run that has written its JSONL has the
+    # lock and is past the pre-lock window -- it is not reclassified as starting.
+    run_dir = _write_matching_page_run(tmp_path, pid=4242, now="20260925T130000Z")
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 1}, RUN_SUMMARY])
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: None)
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    monkeypatch.setitem(upload_server._spawned_upload_processes, run_dir, _Alive())
+    cfg = _make_config(tmp_path)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/status")
+    assert status == 200
+    assert json.loads(body)["run"]["kind"] == "finished"
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +1000,14 @@ def test_default_run_validate_runs_in_repo_root(monkeypatch):
     assert captured["kwargs"]["cwd"] == upload_server._MODULE_DIR
 
 
+def test_default_now_utc_carries_microseconds_and_is_sortable():
+    # A run's stamp is its page-run folder name AND its started_at, which the
+    # page keys its resume offset by; microseconds keep two same-second runs
+    # from colliding. Fixed-width fields keep it lexicographically sortable.
+    stamp = upload_server._default_now_utc()
+    assert re.fullmatch(r"\d{8}T\d{6}_\d{6}Z", stamp), stamp
+
+
 # ---------------------------------------------------------------------------
 # Startup refusals
 # ---------------------------------------------------------------------------
@@ -1378,3 +1425,39 @@ def test_sse_streams_refused_ending_when_run_never_wrote_jsonl(tmp_path):
         events = _read_sse(base + "/api/runs/current/output", stop_on="finished", timeout=3.0)
     fin = [e for e in events if e.event == "finished"][-1]
     assert json.loads(fin.data)["ending"]["kind"] == "refused"
+
+
+def test_sse_finishes_when_a_different_run_takes_the_lock_after_restart(tmp_path, monkeypatch):
+    # After a restart (no tracked Popen), if a NEW run takes the lock while the
+    # old run's stream is still open, that stream must still end -- the lock
+    # being held by a different pid than the streamed run means our run is over.
+    logs = tmp_path / "logs"
+    run_dir = page_runs.new_run_dir(logs, "20260925T150000Z")
+    page_runs.write_page_run(
+        page_runs.PageRun(pid=4242, project=PROJECT, batch="Logging", live=False, started_at="t", dir=run_dir)
+    )
+    (run_dir / "output.txt").write_bytes(b"")
+    _write_jsonl(run_dir, [{"record": "run_header", "planned": 1}])
+    _append_jsonl(run_dir, RUN_SUMMARY)
+
+    lock_state: dict[str, upload_lock.RunningUpload | None] = {"value": _running(4242)}
+    monkeypatch.setattr(upload_lock, "running_upload", lambda lock_path: lock_state["value"])
+
+    cfg = _make_config(tmp_path)
+    results: list[list[_SseEvent]] = []
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        reader = threading.Thread(
+            target=lambda: results.append(
+                _read_sse(base + "/api/runs/current/output", stop_on="finished", timeout=3.0)
+            )
+        )
+        reader.start()
+        time.sleep(0.3)
+        assert reader.is_alive(), "stream should still be open while our run holds the lock"
+
+        lock_state["value"] = _running(9999)  # a different run took the lock
+        reader.join(timeout=3.0)
+        assert not reader.is_alive(), "stream should close once a different run holds the lock"
+
+    assert len(results) == 1
+    assert any(e.event == "finished" for e in results[0])

@@ -206,8 +206,19 @@ def _default_spawn_upload(argv: list[str], out_path: Path, cwd: Path) -> int:
 
 
 def _default_now_utc() -> str:
-    """A UTC stamp in the pipeline's own directory-sortable format (see ia_bulk.open_log)."""
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    """A UTC stamp, unique per run: the pipeline's directory-sortable format
+    (see ia_bulk.open_log) plus microseconds.
+
+    The microseconds are what make it unique. This stamp is both the run's
+    page-run folder name AND its `started_at`, and the page keys its
+    output-resume offset by `started_at` (see the upload page's App); a plain
+    second-resolution stamp would collide for two runs started in the same
+    second, letting one run's stored offset be applied to another's output.
+    page_runs.new_run_dir still suffixes a same-stamp folder collision as a
+    final safety net. Stays lexicographically sortable (fixed-width fields)."""
+    now = time.time()
+    micros = int((now - int(now)) * 1_000_000)
+    return time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)) + f"_{micros:06d}Z"
 
 
 def _default_read_commit() -> str:
@@ -336,6 +347,20 @@ def _describe_run_state(state: page_runs.PageRunActive | page_runs.TerminalRunAc
     if isinstance(state, page_runs.PageRunActive):
         return f"a page run for batch '{state.batch}' is already in progress (started {state.started_at})"
     return state.holder.describe() if state.holder is not None else "another run holds the upload lock"
+
+
+def _run_dir_process_alive(run_dir: Path) -> bool:
+    """Whether this server still has a live child for `run_dir`.
+
+    Right after this server spawns a run there is a window -- until the child
+    acquires the upload lock and opens its JSONL -- where the lock is free and
+    no JSONL exists yet, which on disk is indistinguishable from a
+    finished/refused run. A live tracked Popen tells "just starting" apart from
+    "over"; see UploadPageHandler._reclassify_starting_run. Only meaningful in
+    the process that spawned the run: after a restart the dict is empty, and
+    that pre-lock window no longer applies to any run still on disk."""
+    process = _spawned_upload_processes.get(run_dir)
+    return process is not None and process.poll() is None
 
 
 # ---------------------------------------------------------------------------
@@ -517,11 +542,38 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _reclassify_starting_run(self, run_state: page_runs.RunState) -> page_runs.RunState:
+        """Correct a Finished state that is really a just-spawned run.
+
+        compute_run_state reports Finished whenever the upload lock is free and
+        a run folder exists. Right after this server spawns a run that is also
+        briefly true of a run that has NOT finished -- the child has not
+        acquired the lock or written its JSONL yet. When the newest run's own
+        child is still alive and no JSONL exists, report it active instead, so
+        neither /api/status nor the start gate ever treats a starting run as
+        finished. See _run_dir_process_alive."""
+        if not isinstance(run_state, page_runs.Finished):
+            return run_state
+        page_run = run_state.page_run
+        if page_run is None or page_runs.find_jsonl(page_run.dir) is not None:
+            return run_state
+        if not _run_dir_process_alive(page_run.dir):
+            return run_state
+        return page_runs.PageRunActive(
+            batch=page_run.batch,
+            live=page_run.live,
+            started_at=page_run.started_at,
+            done=0,
+            planned=None,
+            current=None,
+        )
+
     def _handle_status(self) -> None:
         server = self.app_server
         config = server.config
         collection = server.project_config.ia_collection if config.live else _test_collection()
         run_state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
+        run_state = self._reclassify_starting_run(run_state)
         self._send_json(
             200,
             {
@@ -642,6 +694,11 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         # _UploadServer.start_lock's comment.
         with server.start_lock:
             state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
+            # A run this server spawned but that has not yet acquired the lock
+            # reads as Finished on disk; reclassify it to active so a second
+            # start in that window is refused too, not just an already-locked
+            # one. See _reclassify_starting_run.
+            state = self._reclassify_starting_run(state)
             # Only refuse when the lock is actually held (a run is going right
             # now). Idle and Finished both leave the lock free -- Finished is a
             # *past* run's ending, not a current one -- so a new run is allowed
@@ -723,7 +780,7 @@ class UploadPageHandler(BaseHTTPRequestHandler):
             self._send_error(409, "a terminal-run upload is in progress")
             return
 
-        self._stream_output(run_dir)
+        self._stream_output(run_dir, page_run.pid if page_run is not None else None)
 
     def _resume_offset(self) -> int:
         """Where to resume reading output.txt.
@@ -750,13 +807,16 @@ class UploadPageHandler(BaseHTTPRequestHandler):
                 pass
         return 0
 
-    def _stream_output(self, run_dir: Path) -> None:
+    def _stream_output(self, run_dir: Path, expected_pid: int | None) -> None:
         """Drain whole lines and progress, check whether the run has ended,
         and repeat until it has -- then send one `finished` event and close.
 
-        A client disconnect (BrokenPipeError/ConnectionResetError, raised by
-        the socket write inside _write_sse_event) ends the loop quietly;
-        anything else is a real bug and is left to propagate.
+        `expected_pid` is the pid of the run whose folder is being streamed, so
+        _run_is_over can tell "our run finished" from "a different run now holds
+        the lock" after a restart. A client disconnect
+        (BrokenPipeError/ConnectionResetError, raised by the socket write inside
+        _write_sse_event) ends the loop quietly; anything else is a real bug and
+        is left to propagate.
         """
         offset = self._resume_offset()
         self.send_response(200)
@@ -766,19 +826,27 @@ class UploadPageHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
+        cursor = page_runs.ProgressCursor()
         last_progress: tuple[int, int | None, page_runs.CurrentItem | None] | None = None
         try:
             while True:
                 offset = self._drain_output_lines(run_dir, offset)
-                last_progress = self._emit_progress_if_changed(run_dir, last_progress)
-                if self._run_is_over(run_dir):
+                last_progress = self._emit_progress_if_changed(run_dir, cursor, last_progress)
+                if self._run_is_over(run_dir, expected_pid):
                     # One more drain: output/progress written between the
                     # poll above and the process actually exiting -- most
                     # importantly the JSONL's run_summary line -- must not
                     # be lost.
                     offset = self._drain_output_lines(run_dir, offset)
-                    self._emit_progress_if_changed(run_dir, last_progress)
-                    ending = page_runs.read_ending(run_dir)
+                    last_progress = self._emit_progress_if_changed(run_dir, cursor, last_progress)
+                    try:
+                        ending = page_runs.read_ending(run_dir)
+                    except OSError:
+                        # A transient read failure (e.g. Windows AV/file lock)
+                        # reading the JSONL: close cleanly rather than aborting
+                        # with a traceback. The client's EventSource reconnects,
+                        # resumes from its last offset, and retries the finish.
+                        return
                     self._write_sse_event("finished", json.dumps({"ending": ending.to_json()}))
                     return
                 time.sleep(_SSE_POLL_INTERVAL_SECONDS)
@@ -830,33 +898,58 @@ class UploadPageHandler(BaseHTTPRequestHandler):
     def _emit_progress_if_changed(
         self,
         run_dir: Path,
+        cursor: page_runs.ProgressCursor,
         last_progress: tuple[int, int | None, page_runs.CurrentItem | None] | None,
-    ) -> tuple[int, int | None, page_runs.CurrentItem | None]:
+    ) -> tuple[int, int | None, page_runs.CurrentItem | None] | None:
+        """Advance `cursor` over the JSONL and emit a `progress` event if it changed.
+
+        The cursor reads only the bytes appended since the last poll (see
+        page_runs.advance_progress), so a long run's growing log is not
+        re-parsed from the start every tick. A transient read failure (e.g. a
+        Windows AV/file lock) is swallowed -- keep `last_progress` and try again
+        next poll rather than aborting the stream.
+        """
         jsonl = page_runs.find_jsonl(run_dir)
-        done, planned, current_item = page_runs.read_progress_and_current(jsonl)
-        state = (done, planned, current_item)
+        try:
+            page_runs.advance_progress(jsonl, cursor)
+        except OSError:
+            return last_progress
+        current_item = cursor.current()
+        state = (cursor.done, cursor.planned, current_item)
         if state != last_progress:
             self._write_sse_event(
                 "progress",
                 json.dumps({
-                    "done": done,
-                    "planned": planned,
+                    "done": cursor.done,
+                    "planned": cursor.planned,
                     "current": None if current_item is None else current_item.to_json(),
                 }),
             )
         return state
 
-    def _run_is_over(self, run_dir: Path) -> bool:
+    def _run_is_over(self, run_dir: Path, expected_pid: int | None) -> bool:
         """A tracked Popen -- one this same server process spawned -- answers
         directly via poll(). After a server restart there's no tracked Popen
         for any run still on disk; the upload lock, which the OS drops the
-        instant the holder process dies, is the only way left to tell "still
-        going" from "over".
+        instant the holder process dies, is the way left to tell "still going"
+        from "over".
+
+        A free lock means the run is over. A lock held by a DIFFERENT run than
+        the one being streamed (`expected_pid`) also means this run is over -- a
+        new run took the lock after a restart -- otherwise the finished run's
+        stream would never end. A lock held with no readable holder is a
+        transient probe, not a run: keep polling.
         """
         process = _spawned_upload_processes.get(run_dir)
         if process is not None:
             return process.poll() is not None
-        return upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH) is None
+        running = upload_lock.running_upload(upload_lock.UPLOAD_LOCK_PATH)
+        if running is None:
+            return True
+        holder = running.holder
+        if holder is None:
+            return False
+        return expected_pid is None or holder.pid != expected_pid
 
     def _write_sse_event(self, event: str, data: str, event_id: str | None = None) -> None:
         frame_lines = []
