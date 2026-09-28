@@ -98,6 +98,10 @@ can't build it. Anything else that ends the server counts as a failure a
 restart might actually cure. Recorded here, ahead of piece 6, because it
 already constrains what "exit clean" has to mean in `upload_server.py` today.
 
+Piece 6's *manual* half now exists — a person double-clicking to serve the
+page in LIVE mode; see [`../MAC-LAUNCHER.md`](../MAC-LAUNCHER.md). The
+LaunchAgent that runs the server unattended is still the remaining half.
+
 ## The server's request guard
 
 *Built 2026-09-25 (#29, piece 5).*

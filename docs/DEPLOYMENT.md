@@ -691,3 +691,12 @@ instead:
 ```bash
 .venv/bin/python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e < /dev/null
 ```
+
+## 17. The upload page: one-click launch
+
+Once the checkout is installed (§10) and current, a person can start the
+upload page in LIVE mode with a double-click — or a Dock button. It is the
+manual counterpart to the hourly sync agent (§12), and needs no Node or
+`yarn` on this Mac: the built page bundle is committed and arrives with
+`git pull`. See [`MAC-LAUNCHER.md`](MAC-LAUNCHER.md) for the launcher, putting
+it in the Dock, and a verification checklist.
