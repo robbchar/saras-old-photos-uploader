@@ -1519,7 +1519,7 @@ def build_sheet_client(config: ProjectConfig, live: bool) -> SheetClient:
     """The seam tests monkeypatch. Raises PlaceholderSheetId before loading credentials."""
     sheet_id = config.require_real_sheet_id(live)
     service = build_sheets_service(google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH)
-    return SheetClient(service, sheet_id, config.sheet_tab)
+    return SheetClient(service, sheet_id, config.sheet_tab_for(live))
 
 
 @dataclass(frozen=True)
@@ -2237,7 +2237,7 @@ def sheet_banner(config: ProjectConfig, live: bool) -> str:
     mode = "live" if live else "test"
     return (
         f"project '{config.project_id}': {mode} mode, "
-        f"spreadsheet '{config.sheet_id_for(live)}', tab '{config.sheet_tab}'"
+        f"spreadsheet '{config.sheet_id_for(live)}', tab '{config.sheet_tab_for(live)}'"
     )
 
 
@@ -2290,8 +2290,8 @@ def read_sheet(args, registry: dict, config: ProjectConfig, live: bool, command:
         grid = client.read_grid()
     except HttpError as exc:
         print(
-            f"could not read spreadsheet '{sheet_id}' tab '{config.sheet_tab}': {exc}. Check "
-            f"that 'sheet_tab' in {args.registry} names the tab exactly (case-sensitive) as it "
+            f"could not read spreadsheet '{sheet_id}' tab '{config.sheet_tab_for(live)}': {exc}. Check "
+            f"that '{config.sheet_tab_key_for(live)}' in {args.registry} names the tab exactly (case-sensitive) as it "
             "appears in the Sheet, that the spreadsheet ID is correct, and that the Sheet has "
             f"been shared, as Editor, with {sheet_sharing_target()}.",
             file=sys.stderr,

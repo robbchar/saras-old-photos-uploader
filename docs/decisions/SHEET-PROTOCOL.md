@@ -372,16 +372,17 @@ one-directional. That is enforced by construction rather than by care:
   `SheetClient` would carry `write_cells` along with it, and "it could
   overwrite the metadata columns but does not" is a promise; a type without
   the method is a property.
-- A `upload_log_tab` or `sync_log_tab` equal to `sheet_tab` is refused at
-  config load. It is the one configuration mistake with a permanent cost —
-  run summaries appended onto the photographs — and by the time a run is
-  appending it is far too late to catch.
+- A `upload_log_tab` or `sync_log_tab` equal to any configured metadata tab
+  (`sheet_tab` or a per-document override — see "The metadata tab may be
+  named per document") is refused at config load. It is the one configuration
+  mistake with a permanent cost — run summaries appended onto the photographs
+  — and by the time a run is appending it is far too late to catch.
 - Any *other* existing tab is caught at write time instead: if the tab is
   already there and its first row is neither empty nor the log header,
-  `ensure_tab()` refuses. Configuration can only know about `sheet_tab`; a
-  name mistyped as some other real tab — an archived copy of the metadata, a
-  donor's notes — would otherwise collect telemetry underneath it, quietly,
-  on every run.
+  `ensure_tab()` refuses. Configuration can only know about the metadata tabs
+  it names; a name mistyped as some other real tab — an archived copy of the
+  metadata, a donor's notes — would otherwise collect telemetry underneath
+  it, quietly, on every run.
 
 **A tab each, not one shared.** An hourly sync and a once-a-week upload
 interleaved in one tab would bury the upload rows someone opened the Sheet
@@ -435,6 +436,35 @@ to, and it means a tab someone deletes or renames repairs itself on the next
 run rather than silently swallowing every run after it. A tab an operator
 creates by hand before the first run is adopted and given its header, so it
 ends up identical to one this created.
+
+## The metadata tab may be named per document
+
+*Decided 2026-09-28. Issue #82.*
+
+A project's live and test metadata live in two separate spreadsheet documents
+— `sheet_id` and `test_sheet_id`, chosen per run by
+`ProjectConfig.sheet_id_for(live)`. Those documents may legitimately name
+their metadata tab differently: the test document is a curated sheet whose
+tab reads `Test Sheet`, while a live document might name its tab for the
+collection it holds. Confirmed against the LCPS building sheets on
+2026-09-27.
+
+A project may set `live_sheet_tab` and `test_sheet_tab` in its registry
+entry. `ProjectConfig.sheet_tab_for(live)` resolves the tab for the run's
+document, parallel to `sheet_id_for`: the matching override when present,
+otherwise the shared `sheet_tab`.
+
+**`sheet_tab` stays the required shared default.** Both overrides are
+optional; an entry that sets neither behaves exactly as before, so no
+existing registry changes. A blank override is treated as unset — the same
+rule the log tabs follow — so clearing one falls back to `sheet_tab` rather
+than requesting a tab named nothing.
+
+The e2e rehearsal writes only the test document, so `check_reset_allowed`
+(`e2e_sheet.py`) resolves the tab it resets from `test_sheet_tab`, falling
+back to `sheet_tab`. The log-tab collision guard refuses a log tab equal to
+*any* configured metadata tab, not just `sheet_tab` — see "The Sheet's log
+tabs are telemetry, never an input".
 
 ## The rehearsal reset is a hand edit, not a command
 

@@ -61,6 +61,66 @@ def test_live_and_test_runs_select_different_sheets():
     assert config.sheet_id_for(live=False) == "TEST_SHEET"
 
 
+def test_sheet_tab_for_falls_back_to_the_shared_default():
+    """With no per-document override, both documents use the single shared
+    sheet_tab - the pre-issue-82 behavior, unchanged."""
+    config = load_project_config(_registry(sheet_tab="Metadata"), "p")
+
+    assert config.sheet_tab_for(live=True) == "Metadata"
+    assert config.sheet_tab_for(live=False) == "Metadata"
+
+
+def test_sheet_tab_for_uses_per_document_overrides_when_set():
+    """The live and test documents can name their metadata tabs differently -
+    parallel to sheet_id_for selecting the document itself."""
+    config = load_project_config(
+        _registry(
+            sheet_tab="Shared",
+            live_sheet_tab="Photographs",
+            test_sheet_tab="Test Sheet",
+        ),
+        "p",
+    )
+
+    assert config.sheet_tab_for(live=True) == "Photographs"
+    assert config.sheet_tab_for(live=False) == "Test Sheet"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "live", "expected"),
+    [
+        ({"test_sheet_tab": "Test Sheet"}, True, "Shared"),
+        ({"test_sheet_tab": "Test Sheet"}, False, "Test Sheet"),
+        ({"live_sheet_tab": "Photographs"}, False, "Shared"),
+        ({"live_sheet_tab": "Photographs"}, True, "Photographs"),
+    ],
+)
+def test_sheet_tab_for_falls_back_per_document_when_only_one_override_is_set(overrides, live, expected):
+    config = load_project_config(_registry(sheet_tab="Shared", **overrides), "p")
+
+    assert config.sheet_tab_for(live=live) == expected
+
+
+def test_a_blank_per_document_sheet_tab_falls_back_to_the_shared_default():
+    """Blank is unset, not a tab named nothing - the same rule the log tabs
+    follow. An operator clears an override without editing the registry shape."""
+    config = load_project_config(
+        _registry(sheet_tab="Shared", live_sheet_tab="   ", test_sheet_tab=""),
+        "p",
+    )
+
+    assert config.sheet_tab_for(live=True) == "Shared"
+    assert config.sheet_tab_for(live=False) == "Shared"
+
+
+@pytest.mark.parametrize("key", ["live_sheet_tab", "test_sheet_tab"])
+def test_a_non_string_per_document_sheet_tab_is_rejected(key):
+    """Optional, so absent from REQUIRED_KEYS' type check - but still validated,
+    so a number or list fails fast rather than coercing to a garbage tab name."""
+    with pytest.raises(ConfigError, match=f"{key}.*string"):
+        load_project_config(_registry(**{key: 5}), "p")
+
+
 @pytest.mark.parametrize(
     ("sheet_id", "expected"),
     [
@@ -472,5 +532,23 @@ def test_a_log_tab_may_not_collide_with_the_metadata_tab():
     with pytest.raises(ConfigError) as caught:
         load_project_config(registry, "p")
 
-    assert "upload_log_tab" in str(caught.value)
-    assert "Sheet1" in str(caught.value)
+    message = str(caught.value)
+    assert "upload_log_tab" in message
+    assert "Sheet1" in message
+    assert "sheet_tab" in message
+
+
+@pytest.mark.parametrize("metadata_key", ["live_sheet_tab", "test_sheet_tab"])
+def test_a_log_tab_may_not_collide_with_a_per_document_metadata_tab(metadata_key):
+    """The metadata tab a log tab must not overwrite can be a per-document
+    override, not just the shared sheet_tab - and the refusal names the exact
+    colliding key so the operator edits the right one."""
+    registry = _registry(**{metadata_key: "Photographs"}, upload_log_tab="Photographs")
+
+    with pytest.raises(ConfigError) as caught:
+        load_project_config(registry, "p")
+
+    message = str(caught.value)
+    assert "upload_log_tab" in message
+    assert "Photographs" in message
+    assert metadata_key in message
