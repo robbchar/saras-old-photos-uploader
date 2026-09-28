@@ -2741,6 +2741,10 @@ def cmd_setup(args) -> int:
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
+    refusal = enable_upload_page_refusal(args)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 1
 
     changes: list[str] = []
 
@@ -2775,14 +2779,6 @@ def cmd_setup(args) -> int:
         results = deployment.run_checks(checks)
 
     if args.enable_upload_page:
-        # Unlike --enable-agent, offline is only refused here, after the
-        # convergence above already ran: a test-mode page is allowed, so
-        # --offline is not a reason to skip fixing the machine, only to
-        # refuse loading the agent itself.
-        refusal = enable_upload_page_refusal(args)
-        if refusal is not None:
-            print(refusal)
-            return 1
         # Same "verify first, then enable" rule as --enable-agent, but a
         # test-mode page is allowed - the Sheet checks only gate live mode.
         blocking = deployment.upload_page_blocking_failures(results)

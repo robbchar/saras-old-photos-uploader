@@ -3022,12 +3022,20 @@ def test_setup_does_not_enable_the_upload_page_by_default():
     assert args.enable_upload_page is False
 
 
-def test_setup_enable_upload_page_refuses_offline(capsys):
-    code = ia_bulk.main(
-        ["setup", "--project", "sarasoldphotos", "--offline", "--enable-upload-page"]
+def test_setup_enable_upload_page_refuses_offline(monkeypatch, capsys):
+    """Mirrors test_cmd_setup_refuses_enable_agent_with_offline: a pure
+    contradictory-flag error is pre-flight, before converge does any work and
+    before anything is written or loaded."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
     )
+    _explode_on_launchctl(monkeypatch)
+
+    code = ia_bulk.cmd_setup(_setup_args("--offline", "--enable-upload-page"))
     assert code != 0
-    assert "offline" in capsys.readouterr().out.lower()
+    assert "offline" in capsys.readouterr().err.lower()
 
 
 def test_main_dispatches_to_cmd_setup(monkeypatch):
