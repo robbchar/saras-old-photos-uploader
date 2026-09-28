@@ -203,6 +203,50 @@ describe("App", () => {
     expect(mockGetPreview).toHaveBeenCalledWith("Fishing");
   });
 
+  it("updates the dropdown label when a re-check changes a theme's readiness", async () => {
+    const notReadyThemes: ValidateDoc = {
+      ...THEMES,
+      ready_to_upload: 0,
+      batches: [
+        {
+          value: "Fishing",
+          ready_to_upload: 0,
+          counts: { ...ZERO_COUNTS, unassigned: { ready: 0, invalid: 0, not_ready: 2 } },
+        },
+      ],
+    };
+    const twoNotReadyRows: ValidateRow[] = [
+      { row: 3, state: "unassigned", verdict: "not_ready", identifier: "", file: "a.jpg", errors: [], missing_fields: ["title"] },
+      { row: 4, state: "unassigned", verdict: "not_ready", identifier: "", file: "b.jpg", errors: [], missing_fields: ["title"] },
+    ];
+    const zeroReadyPreview: ValidateDoc = {
+      ...PREVIEW,
+      ready_to_upload: 0,
+      counts: { ...ZERO_COUNTS, unassigned: { ready: 0, invalid: 0, not_ready: 2 } },
+      rows: twoNotReadyRows,
+    };
+    const oneReadyPreview: ValidateDoc = {
+      ...PREVIEW,
+      ready_to_upload: 1,
+      counts: { ...ZERO_COUNTS, unassigned: { ready: 1, invalid: 0, not_ready: 1 } },
+      rows: [{ ...twoNotReadyRows[0], verdict: "ready", missing_fields: [] }, twoNotReadyRows[1]],
+    };
+    mockGetThemes.mockResolvedValue(notReadyThemes);
+    mockGetPreview.mockResolvedValueOnce(zeroReadyPreview).mockResolvedValueOnce(oneReadyPreview);
+
+    render(<App />);
+    const trigger = await screen.findByRole("combobox", { name: /choose a theme/i });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole("option", { name: "Fishing — 2 not ready" }));
+    await screen.findByText("0 ready to upload");
+    expect(trigger).toHaveTextContent("Fishing — 2 not ready");
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-check" }));
+    await screen.findByText("1 ready to upload");
+    // The dropdown reflects the re-check, not the stale all-mode count.
+    expect(trigger).toHaveTextContent("Fishing — 1 ready");
+  });
+
   it("confirming the start dialog starts the run and shows the output pane", async () => {
     await selectFishingTheme();
 

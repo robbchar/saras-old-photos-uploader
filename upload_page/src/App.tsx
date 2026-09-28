@@ -107,6 +107,24 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+/** Returns `themes` with the batch matching `preview` updated to that preview's
+ * fresh per-batch counts, so the persistent dropdown stays in step with a
+ * re-check (which otherwise leaves the once-fetched all-mode themes doc stale).
+ * A per-batch validate doc's top-level ready_to_upload/counts are scoped to that
+ * batch (see ia_bulk.validate_json), matching an all-mode batches[] entry.
+ * Returns the same reference when nothing matches, to skip a needless render. */
+function withBatchFromPreview(themes: ValidateDoc, preview: ValidateDoc): ValidateDoc {
+  if (preview.batch === null || themes.batches === null) return themes;
+  const batchValue = preview.batch;
+  let matched = false;
+  const batches = themes.batches.map((batch) => {
+    if (batch.value !== batchValue) return batch;
+    matched = true;
+    return { ...batch, ready_to_upload: preview.ready_to_upload, counts: preview.counts };
+  });
+  return matched ? { ...themes, batches } : themes;
+}
+
 /** The persistent theme picker shows in every state except the ones with
  * nothing to pick from: still booting, another run holds the lock, or a
  * terminal error. */
@@ -246,9 +264,11 @@ export default function App() {
     let cancelled = false;
     getPreview(state.batch)
       .then((preview) => {
-        if (!cancelled) {
-          dispatch({ type: "preview/loaded", preview, checkedAt: new Date().toISOString() });
-        }
+        if (cancelled) return;
+        dispatch({ type: "preview/loaded", preview, checkedAt: new Date().toISOString() });
+        // Keep the persistent dropdown in step with this check: re-checking a
+        // theme (e.g. after fixing a row) changes its ready/not-ready counts.
+        setThemes((current) => (current ? withBatchFromPreview(current, preview) : current));
       })
       .catch((error: unknown) => {
         if (!cancelled) dispatch({ type: "preview/failed", message: describeError(error) });
