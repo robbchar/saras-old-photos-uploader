@@ -31,7 +31,7 @@ Terminal window stops the server.
 Bring the checkout up to date before a run:
 
 ```bash
-cd <checkout>
+cd /path/to/checkout
 git pull
 ```
 
@@ -80,8 +80,9 @@ An app pins to the main (left) side of the Dock and can carry a custom icon.
 - **Start:** click the Dock item (or double-click the `.command`). A Terminal
   window opens showing the **LIVE MODE** banner, and the browser opens to the
   page.
-- **Stop:** close that Terminal window (or press Ctrl-C in it). The server
-  stops with it.
+- **Stop:** close that Terminal window - the server stops and the window
+  closes. Or press Ctrl-C: the server stops, then the launcher waits for you
+  to press return before the window closes.
 
 ## Verifying it on the Mac
 
