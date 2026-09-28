@@ -326,6 +326,41 @@ describe("App", () => {
     expect(mockOpenOutput).not.toHaveBeenCalled();
   });
 
+  it("shows the just-run theme's row breakdown on the finished screen", async () => {
+    let capturedHandlers: OutputHandlers | undefined;
+    mockOpenOutput.mockImplementation((handlers: OutputHandlers) => {
+      capturedHandlers = handlers;
+      return { close: vi.fn() };
+    });
+    // After the run, re-fetching the theme returns the uploaded row as done
+    // plus one that still needs a title.
+    const afterRunPreview: ValidateDoc = {
+      ...PREVIEW,
+      rows: [
+        { row: 2, state: "done", verdict: "ready", identifier: "lcps-photosexample-00001", file: "photo1.jpg", errors: [], missing_fields: [] },
+        { row: 3, state: "unassigned", verdict: "not_ready", identifier: "", file: "photo2.jpg", errors: [], missing_fields: ["title"] },
+      ],
+    };
+
+    await selectFishingTheme();
+    fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalled());
+
+    // The finished-screen re-fetch returns the post-run rows.
+    mockGetPreview.mockResolvedValueOnce(afterRunPreview);
+    act(() => {
+      capturedHandlers?.onFinished(COMPLETED_ENDING);
+    });
+
+    expect(await screen.findByText("5 uploaded, 0 failed")).toBeInTheDocument();
+    // The full breakdown appears without re-selecting the theme.
+    expect(await screen.findByText("Uploaded (1)")).toBeInTheDocument();
+    expect(screen.getByText("photo1.jpg")).toBeInTheDocument();
+    expect(screen.getByText("Needs fixing")).toBeInTheDocument();
+    expect(screen.getByText("row 3: needs title")).toBeInTheDocument();
+  });
+
   it("resubscribes to the output stream when mounting mid-run, with no Confirm click involved", async () => {
     let capturedHandlers: OutputHandlers | undefined;
     mockOpenOutput.mockImplementation((handlers: OutputHandlers) => {

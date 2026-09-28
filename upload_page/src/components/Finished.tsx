@@ -4,10 +4,15 @@
 // needs to know (did it succeed, did it stop, is IA rate-limiting us, was
 // it refused outright, or did it end with nothing to report at all).
 
-import type { Ending, RowFailure, Summary } from "../api/schemas";
+import type { Ending, RowFailure, Summary, ValidateRow } from "../api/schemas";
+import { RowBreakdown } from "./RowBreakdown";
 
 export interface FinishedProps {
   ending: Ending;
+  /** The just-run theme's rows, so the same per-row breakdown the Preview shows
+   * (Uploaded / Needs fixing / Not yet catalogued) appears here too after a
+   * run. Omitted/null when unavailable (e.g. the rows could not be re-fetched). */
+  themeRows?: ValidateRow[] | null;
 }
 
 function RowFailureList({
@@ -114,10 +119,11 @@ function FinishedBody({ ending }: { ending: Ending }) {
   }
 }
 
-export function Finished({ ending }: FinishedProps) {
+export function Finished({ ending, themeRows }: FinishedProps) {
   return (
     <section className="rounded border border-border bg-surface p-4 text-text">
       <FinishedBody ending={ending} />
+      {themeRows && <RowBreakdown rows={themeRows} />}
     </section>
   );
 }

@@ -16,7 +16,7 @@ import {
   type OutputHandlers,
 } from "./api/client";
 import type { AppState, TerminalRunHolder } from "./state/types";
-import type { ValidateDoc } from "./api/schemas";
+import type { ValidateDoc, ValidateRow } from "./api/schemas";
 import { reducer } from "./state/reducer";
 import { Header } from "./components/Header";
 import { ThemePicker } from "./components/ThemePicker";
@@ -208,6 +208,11 @@ export default function App() {
   const linesSeenRef = useRef(0);
   // True while startRun is in flight - see handleConfirmStart.
   const [starting, setStarting] = useState(false);
+  // The theme currently uploading, remembered so the Finished screen can fetch
+  // that theme's rows after the run and show the same per-row breakdown the
+  // Preview does. `finishedThemeRows` holds those fetched rows (null = omit).
+  const runningBatchRef = useRef<string | null>(null);
+  const [finishedThemeRows, setFinishedThemeRows] = useState<ValidateRow[] | null>(null);
 
   // Mount only - fetch status once and route to the matching screen. Choose-
   // another does NOT come back through here: it goes straight from
@@ -257,6 +262,34 @@ export default function App() {
     previousKindRef.current = state.kind;
     if (state.kind === "finished" && wasRunning) setThemes(null);
   }, [state.kind]);
+
+  // Remember which theme is uploading, and once its run finishes fetch that
+  // theme's rows so the Finished screen can show the same per-row breakdown
+  // the Preview does (the run recorded its new uploads to the Sheet).
+  useEffect(() => {
+    if (state.kind === "running" || state.kind === "stopping") {
+      runningBatchRef.current = state.batch;
+      return;
+    }
+    if (state.kind !== "finished") {
+      setFinishedThemeRows(null);
+      return;
+    }
+    const batch = runningBatchRef.current;
+    if (batch === null) return;
+    let cancelled = false;
+    getPreview(batch)
+      .then((preview) => {
+        if (!cancelled) setFinishedThemeRows(preview.rows ?? []);
+      })
+      .catch(() => {
+        // A refused re-fetch just means no breakdown here; the summary still shows.
+        if (!cancelled) setFinishedThemeRows(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
 
   // Covers both a theme selection and Re-check - both land on "checking".
   useEffect(() => {
@@ -446,7 +479,7 @@ export default function App() {
         );
 
       case "finished":
-        return <Finished ending={state.ending} />;
+        return <Finished ending={state.ending} themeRows={finishedThemeRows} />;
 
       case "terminal-run":
         return <TerminalRunView holder={state.holder} />;
