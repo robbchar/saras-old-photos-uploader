@@ -105,6 +105,10 @@ def render_plist(spec: AgentSpec) -> str:
             body["StartInterval"] = seconds
         case KeepAliveSchedule():
             body["KeepAlive"] = {"SuccessfulExit": False}
+        case _:
+            # Python 3.10 target: no typing.assert_never in stdlib, so this is the
+            # fail-fast for a future third Schedule variant this match forgot.
+            raise AssertionError(f"unhandled schedule: {spec.schedule!r}")
     return plistlib.dumps(body).decode("utf-8")
 
 

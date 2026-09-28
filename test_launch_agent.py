@@ -213,6 +213,50 @@ def test_render_plist_runs_at_load(tmp_path):
     assert parsed["RunAtLoad"] is True
 
 
+def test_render_plist_matches_a_golden_byte_string_for_the_sync_agent():
+    """Pins the exact bytes render_plist produces, so a future change to key
+    order, escaping, or a new field is caught even though every other plist
+    test here only checks parsed fields. Keys come out alphabetical
+    (Label, ProgramArguments, RunAtLoad, ...) because plistlib.dumps defaults
+    to sort_keys=True - that, not dict insertion order in render_plist, is
+    what makes this ordering stable to pin."""
+    spec = launch_agent.sync_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json"
+    )
+    golden = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "\t<key>Label</key>\n"
+        "\t<string>org.lcpsociety.iabulk.sync.sarasoldphotos</string>\n"
+        "\t<key>ProgramArguments</key>\n"
+        "\t<array>\n"
+        "\t\t<string>C:\\srv\\repo\\.venv\\bin\\python</string>\n"
+        "\t\t<string>C:\\srv\\repo\\ia_bulk.py</string>\n"
+        "\t\t<string>sync-metadata</string>\n"
+        "\t\t<string>--project</string>\n"
+        "\t\t<string>sarasoldphotos</string>\n"
+        "\t\t<string>--live</string>\n"
+        "\t\t<string>--registry</string>\n"
+        "\t\t<string>C:\\srv\\repo\\projects_registry.json</string>\n"
+        "\t</array>\n"
+        "\t<key>RunAtLoad</key>\n"
+        "\t<true/>\n"
+        "\t<key>StandardErrorPath</key>\n"
+        "\t<string>C:\\srv\\repo\\logs\\launchagent-sarasoldphotos.log</string>\n"
+        "\t<key>StandardOutPath</key>\n"
+        "\t<string>C:\\srv\\repo\\logs\\launchagent-sarasoldphotos.log</string>\n"
+        "\t<key>StartInterval</key>\n"
+        "\t<integer>3600</integer>\n"
+        "\t<key>WorkingDirectory</key>\n"
+        "\t<string>C:\\srv\\repo</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+    assert launch_agent.render_plist(spec) == golden
+
+
 def test_render_plist_emits_keep_alive_for_a_keepalive_schedule():
     spec = launch_agent.AgentSpec(
         label="org.example.keepalive",

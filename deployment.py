@@ -769,6 +769,9 @@ def server_running_current_code_check(
     two checks do not both report the same failure as broken."""
     if kickstart is None:
         kickstart = lambda: platform_probe.launchctl_kickstart(spec.label)  # noqa: E731
+    # Shared by the FAIL outcome and the check itself - format_report falls back
+    # to the latter when a probe path (like UNKNOWN below) sets no outcome remedy.
+    kickstart_remedy = f"launchctl kickstart -k gui/<uid>/{spec.label} to restart it on the new code"
 
     def probe() -> CheckOutcome:
         if not launch_agent.plist_path(spec, home).exists():
@@ -786,13 +789,13 @@ def server_running_current_code_check(
         return CheckOutcome(
             Status.FAIL,
             f"serving {served}, checkout is at {head}",
-            remedy=f"launchctl kickstart -k gui/<uid>/{spec.label} to restart it on the new code",
+            remedy=kickstart_remedy,
         )
 
     return Check(
         name="upload page server running current code",
         probe=probe,
-        remedy=f"launchctl kickstart -k gui/<uid>/{spec.label} to restart it on the new code",
+        remedy=kickstart_remedy,
         fix=kickstart,
         needed_by_agent=False,
     )

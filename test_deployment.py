@@ -732,6 +732,13 @@ def test_upload_page_agent_plist_check_remedy_uses_enable_upload_page(tmp_path):
     assert "--live --enable-upload-page" in remedy
 
 
+def test_upload_page_agent_plist_check_has_no_fix_so_only_enable_upload_page_writes_it(tmp_path):
+    # Writing the plist IS enabling it (§17); a converge-time fix() here would
+    # silently stand up an always-on live server outside --enable-upload-page.
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).fix is None
+
+
 def _enabled_page_agent_without_its_log_directory(tmp_path):
     spec = _page_spec(tmp_path)
     home = tmp_path / "home"
@@ -781,6 +788,12 @@ def test_upload_page_agent_loaded_check_remedy_uses_enable_upload_page(tmp_path)
     spec = _page_spec(tmp_path)
     remedy = deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).remedy
     assert "--live --enable-upload-page" in remedy
+
+
+def test_upload_page_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_path):
+    # Loading is gated on --enable-upload-page, which setup does explicitly.
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).fix is None
 
 
 def test_upload_page_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):

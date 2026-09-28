@@ -737,8 +737,10 @@ rm ~/Library/LaunchAgents/org.lcpsociety.iabulk.uploadpage.<project>.plist
 
 Same shape as §13: run this as the account the agent is loaded for, and
 remove the plist too — a bootout alone leaves it to load again at the next
-login. `doctor` then reports the three upload page agent checks as
-`UNKNOWN`, the same way §13 describes for the sync agent.
+login. `doctor` then reports the `upload page agent plist` and `upload page
+agent loaded` checks as `UNKNOWN`, the same way §13 describes for the sync
+agent — but `upload page agent log directory` stays `PASS`: the folder being
+absent is not a problem when nothing is enabled to write to it.
 
 ### Upgrading
 
