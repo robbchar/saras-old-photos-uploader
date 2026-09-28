@@ -10,6 +10,10 @@ from pathlib import Path
 
 HOURLY = 3600
 LABEL_PREFIX = "org.lcpsociety.iabulk.sync"
+UPLOAD_PAGE_LABEL_PREFIX = "org.lcpsociety.iabulk.uploadpage"
+# The one source `serve --port` and the page agent's spec share - see ia_bulk.py's
+# serve subcommand.
+DEFAULT_UPLOAD_PAGE_PORT = 5277
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,33 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
         ],
         schedule=IntervalSchedule(HOURLY),
         output_path=repo_root / "logs" / f"launchagent-{project_id}.log",
+        working_directory=repo_root,
+    )
+
+
+def upload_page_agent_spec(
+    repo_root: Path, project_id: str, registry_path: Path | str, *, live: bool
+) -> AgentSpec:
+    repo_root = Path(repo_root).resolve()
+    # Absolute, so the agent reads the file setup checked, whatever its working directory.
+    registry_path = Path(registry_path).resolve()
+    program_arguments = [
+        str(repo_root / ".venv" / "bin" / "python"),
+        str(repo_root / "ia_bulk.py"),
+        "serve",
+        "--project",
+        project_id,
+        "--registry",
+        str(registry_path),
+    ]
+    if live:
+        program_arguments.append("--live")
+    program_arguments += ["--port", str(DEFAULT_UPLOAD_PAGE_PORT)]
+    return AgentSpec(
+        label=f"{UPLOAD_PAGE_LABEL_PREFIX}.{project_id}",
+        program_arguments=program_arguments,
+        schedule=KeepAliveSchedule(),
+        output_path=repo_root / "logs" / f"launchagent-{project_id}-upload-page.log",
         working_directory=repo_root,
     )
 

@@ -40,6 +40,13 @@ def agent_invocation() -> Invocation:
     return Invocation(spec.working_directory, script, arguments)
 
 
+def page_agent_invocation() -> Invocation:
+    """The page agent's argv, less the interpreter, from its WorkingDirectory."""
+    spec = launch_agent.upload_page_agent_spec(ia_bulk.REPO_ROOT, "demo", OTHER_REGISTRY, live=True)
+    _interpreter, script, *arguments = spec.program_arguments
+    return Invocation(spec.working_directory, script, arguments)
+
+
 def install_sh_handoff() -> tuple[str, str]:
     """The script and subcommand install.sh execs from its own directory with "$@"."""
     lines = INSTALL_SH.read_text(encoding="utf-8").splitlines()
@@ -71,6 +78,17 @@ def install_invocation(*registry_arguments: str) -> Invocation:
             agent_invocation,
             {"command": "sync-metadata", "project": "demo", "live": True, "registry": OTHER_REGISTRY},
             id="launch_agent",
+        ),
+        pytest.param(
+            page_agent_invocation,
+            {
+                "command": "serve",
+                "project": "demo",
+                "live": True,
+                "registry": OTHER_REGISTRY,
+                "port": launch_agent.DEFAULT_UPLOAD_PAGE_PORT,
+            },
+            id="launch_agent_upload_page",
         ),
         pytest.param(
             # Relative to where setup ran, not to where install.sh runs.
@@ -128,6 +146,34 @@ def test_sync_agent_spec_makes_a_relative_registry_absolute(tmp_path, monkeypatc
     arguments = launch_agent.sync_agent_spec(tmp_path / "repo", "demo", "alt.json").program_arguments
     registry_argument = arguments[arguments.index("--registry") + 1]
     assert registry_argument == str(tmp_path.resolve() / "alt.json")
+
+
+def test_upload_page_agent_spec_live_shape():
+    spec = launch_agent.upload_page_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json", live=True
+    )
+    assert spec.label == "org.lcpsociety.iabulk.uploadpage.sarasoldphotos"
+    assert spec.program_arguments[2] == "serve"
+    assert "--live" in spec.program_arguments
+    assert spec.program_arguments[-2:] == ["--port", "5277"]
+    assert isinstance(spec.schedule, launch_agent.KeepAliveSchedule)
+    assert spec.output_path.name == "launchagent-sarasoldphotos-upload-page.log"
+
+
+def test_upload_page_agent_spec_test_mode_drops_live():
+    spec = launch_agent.upload_page_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json", live=False
+    )
+    assert "--live" not in spec.program_arguments
+
+
+def test_upload_page_agent_plist_is_keepalive():
+    spec = launch_agent.upload_page_agent_spec(
+        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json", live=True
+    )
+    body = plistlib.loads(launch_agent.render_plist(spec).encode("utf-8"))
+    assert body["KeepAlive"] == {"SuccessfulExit": False}
+    assert "StartInterval" not in body
 
 
 def test_plist_is_current_is_false_once_the_registry_changes(tmp_path):

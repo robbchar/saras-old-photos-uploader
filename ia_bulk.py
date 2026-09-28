@@ -5771,7 +5771,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--project", required=True, help="Project ID from the registry")
     serve_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     serve_parser.add_argument("--live", action="store_true", help="Serve against the project's real Sheet and collection instead of the test Sheet and test_collection")
-    serve_parser.add_argument("--port", type=int, default=5277, help="Port to listen on (default 5277)")
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=launch_agent.DEFAULT_UPLOAD_PAGE_PORT,
+        help=f"Port to listen on (default {launch_agent.DEFAULT_UPLOAD_PAGE_PORT})",
+    )
 
     return parser
 
