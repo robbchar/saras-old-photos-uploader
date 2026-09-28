@@ -767,6 +767,14 @@ def test_upload_page_agent_loaded_check_passes_and_reports_the_last_exit(tmp_pat
     assert "0" in outcome.detail
 
 
+def test_upload_page_agent_loaded_check_fails_when_the_last_run_errored(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 1\n"
+    )
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).probe().status is Status.FAIL
+
+
 def test_upload_page_agent_loaded_check_remedy_uses_enable_upload_page(tmp_path):
     spec = _page_spec(tmp_path)
     remedy = deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).remedy

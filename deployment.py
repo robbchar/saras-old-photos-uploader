@@ -629,7 +629,7 @@ def upload_page_agent_log_directory_check(
     return Check(
         name="upload page agent log directory",
         probe=probe,
-        remedy=f"{install.render(enable_upload_page=True)} recreates it; delete the files in logs/, never the folder",
+        remedy=f"{install.render()} recreates it; delete the files in logs/, never the folder",
         fix=fix,
         needed_by_agent=False,
     )
