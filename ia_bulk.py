@@ -2495,11 +2495,21 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
     page_spec = launch_agent.upload_page_agent_spec(
         repo_root, config.project_id, args.registry, live=live
     )
+    # Matches upload_server.build_config_from_args's own default - the served
+    # bundle always lives at repo_root/upload_page, whatever the caller's cwd.
+    page_dir = repo_root / "upload_page"
     checks.extend(
         [
             deployment.upload_page_agent_plist_check(page_spec, home, install),
             deployment.upload_page_agent_log_directory_check(page_spec, home, install),
             deployment.upload_page_agent_loaded_check(page_spec, install),
+            deployment.bundle_current_check(page_dir),
+            deployment.server_answering_check(
+                page_spec, home, launch_agent.DEFAULT_UPLOAD_PAGE_PORT
+            ),
+            deployment.server_running_current_code_check(
+                page_spec, home, repo_root, launch_agent.DEFAULT_UPLOAD_PAGE_PORT
+            ),
         ]
     )
     return checks

@@ -102,6 +102,22 @@ def launchctl_bootstrap(plist_path: Path) -> tuple[bool, str]:
     return False, f"launchctl bootstrap failed: {result.stderr.strip()}"
 
 
+def launchctl_kickstart(label: str) -> str:
+    """Restarts a loaded job in place (`launchctl kickstart -k`), for a doctor
+    fix() that needs the new code running without a full bootout/bootstrap.
+
+    Unlike bootstrap/bootout, this raises rather than returning a (bool,
+    message) pair: it exists only as a Check.fix(), and converge() already
+    wraps every fix() in a try/except, turning a raise into "could not fix"."""
+    domain = _gui_domain()
+    if domain is None:
+        raise RuntimeError(NO_LAUNCHCTL)
+    result = _launchctl("kickstart", "-k", f"{domain}/{label}")
+    if result.returncode != 0:
+        raise RuntimeError(f"launchctl kickstart failed: {result.stderr.strip()}")
+    return f"kickstarted {label}"
+
+
 def launchctl_bootout(label: str) -> tuple[bool, str]:
     """(unloaded, message), for the same reason launchctl_bootstrap returns one."""
     domain = _gui_domain()

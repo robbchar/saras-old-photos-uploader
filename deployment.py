@@ -15,12 +15,16 @@ import configparser
 import enum
 import importlib
 import importlib.metadata
+import json
 import re
 import shlex
+import subprocess
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import build_stamp
 import google_auth
 import launch_agent
 import platform_probe
@@ -663,5 +667,132 @@ def upload_page_agent_loaded_check(spec: launch_agent.AgentSpec, install: Instal
             "log in as the operating account and run "
             f"{install.render(enable_upload_page=True)}"
         ),
+        needed_by_agent=False,
+    )
+
+
+HealthReader = Callable[[int], "dict | None"]
+
+
+def _default_read_health(port: int) -> "dict | None":
+    """A 2s GET of the running server's own /api/health, or None on any
+    failure - unreachable port, timeout, non-200, or a body that is not
+    the JSON object /api/health always sends."""
+    url = f"http://127.0.0.1:{port}/api/health"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as resp:  # noqa: S310 - loopback only
+            if resp.status != 200:
+                return None
+            return json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_head_commit(repo_root: Path) -> str:
+    """`git rev-parse HEAD` for repo_root, "unknown" on any failure.
+
+    Deliberately its own copy of upload_server._default_read_commit's exact
+    git command, not an import of it: doctor stays decoupled from the
+    http-server module, and the identical command means there is no
+    algorithm connascence to keep in sync by hand.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def bundle_current_check(page_dir: Path) -> Check:
+    """Pairs with the upload page's own startup refusal on a stale bundle
+    (see upload_server._check_startup): this is the same fact, checked from
+    the outside so `doctor` catches it before the server ever tries to start."""
+
+    def probe() -> CheckOutcome:
+        if build_stamp.bundle_is_current(page_dir):
+            return CheckOutcome(Status.PASS, f"{page_dir / 'dist'} matches its source")
+        return CheckOutcome(Status.FAIL, f"{page_dir / 'dist'} is stale or missing")
+
+    return Check(
+        name=BUNDLE_CHECK,
+        probe=probe,
+        remedy="run yarn build in upload_page/ and commit dist/",
+        needed_by_agent=False,
+    )
+
+
+def server_answering_check(
+    spec: launch_agent.AgentSpec,
+    home: Path,
+    port: int,
+    read_health: HealthReader = _default_read_health,
+) -> Check:
+    """UNKNOWN (not FAIL) while the agent is not enabled: a server nobody
+    asked to run yet is not broken."""
+
+    def probe() -> CheckOutcome:
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.UNKNOWN, "upload page agent not enabled")
+        if read_health(port) is None:
+            return CheckOutcome(Status.FAIL, f"enabled but not answering on 127.0.0.1:{port}")
+        return CheckOutcome(Status.PASS, f"answering on 127.0.0.1:{port}")
+
+    return Check(
+        name="upload page server answering",
+        probe=probe,
+        remedy=(
+            f"check {spec.output_path} for why the server did not start, then "
+            "reload the agent - see docs/DEPLOYMENT.md"
+        ),
+        needed_by_agent=False,
+    )
+
+
+def server_running_current_code_check(
+    spec: launch_agent.AgentSpec,
+    home: Path,
+    repo_root: Path,
+    port: int,
+    read_health: HealthReader = _default_read_health,
+    read_commit: Callable[[Path], str] = read_head_commit,
+    kickstart: Callable[[], str] | None = None,
+) -> Check:
+    """FAILs only on a confirmed commit mismatch - every other "could not
+    tell" case (not enabled, not answering, no commit reported) is UNKNOWN,
+    matching server_answering_check's own FAIL for "not answering" so the
+    two checks do not both report the same failure as broken."""
+    if kickstart is None:
+        kickstart = lambda: platform_probe.launchctl_kickstart(spec.label)  # noqa: E731
+
+    def probe() -> CheckOutcome:
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.UNKNOWN, "upload page agent not enabled")
+        health = read_health(port)
+        if health is None:
+            # server_answering_check already FAILs this; nothing new to add here.
+            return CheckOutcome(Status.UNKNOWN, f"not answering on 127.0.0.1:{port}")
+        served = health.get("commit")
+        if served in (None, "unknown"):
+            return CheckOutcome(Status.UNKNOWN, f"server did not report a usable commit ({served!r})")
+        head = read_commit(repo_root)
+        if served == head:
+            return CheckOutcome(Status.PASS, f"serving {served}, matches HEAD")
+        return CheckOutcome(
+            Status.FAIL,
+            f"serving {served}, checkout is at {head}",
+            remedy=f"launchctl kickstart -k gui/<uid>/{spec.label} to restart it on the new code",
+        )
+
+    return Check(
+        name="upload page server running current code",
+        probe=probe,
+        remedy=f"launchctl kickstart -k gui/<uid>/{spec.label} to restart it on the new code",
+        fix=kickstart,
         needed_by_agent=False,
     )

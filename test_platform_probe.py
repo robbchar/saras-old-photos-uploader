@@ -165,3 +165,30 @@ def test_bootstrap_and_bootout_refuse_where_there_is_no_getuid(tmp_path, monkeyp
     assert platform_probe.launchctl_bootstrap(tmp_path / "a.plist") == (False, platform_probe.NO_LAUNCHCTL)
     assert platform_probe.launchctl_bootout("org.example.job") == (False, platform_probe.NO_LAUNCHCTL)
     assert platform_probe.launchctl_print("org.example.job") is None
+
+
+def test_launchctl_kickstart_returns_a_message_on_success(monkeypatch):
+    _with_uid(monkeypatch)
+    monkeypatch.setattr(platform_probe, "_launchctl", lambda *a: _FakeCompleted())
+    message = platform_probe.launchctl_kickstart("org.example.job")
+    assert "org.example.job" in message
+
+
+def test_launchctl_kickstart_raises_on_failure(monkeypatch):
+    _with_uid(monkeypatch)
+    monkeypatch.setattr(
+        platform_probe, "_launchctl", lambda *a: _FakeCompleted(returncode=1, stderr="no such job")
+    )
+    with pytest.raises(RuntimeError, match="no such job"):
+        platform_probe.launchctl_kickstart("org.example.job")
+
+
+def test_launchctl_kickstart_raises_where_there_is_no_getuid(monkeypatch):
+    """Same "could not tell" seam as bootstrap/bootout - a doctor fix() that
+    raises is caught by converge()'s own guard, so this never crashes doctor."""
+    monkeypatch.delattr(platform_probe.os, "getuid", raising=False)
+    monkeypatch.setattr(
+        platform_probe, "_launchctl", lambda *a: pytest.fail("ran launchctl without a uid")
+    )
+    with pytest.raises(RuntimeError, match=platform_probe.NO_LAUNCHCTL):
+        platform_probe.launchctl_kickstart("org.example.job")
