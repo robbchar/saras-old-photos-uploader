@@ -1,0 +1,199 @@
+// The upload page's app state machine: what screen is showing and the
+// data it carries, plus every event that can move it from one screen to
+// another. `reducer.ts` is the only thing allowed to interpret these -
+// components (Tasks 13/14) dispatch Actions and render off AppState, and
+// never construct a next AppState by hand.
+//
+// AppState and Action are both discriminated unions (`kind` / `type`
+// respectively) so a `switch` over either narrows exhaustively - see
+// reducer.ts's `never` checks.
+
+import type { CurrentItem, Ending, RunState, SseProgressEvent, ValidateDoc } from "../api/schemas";
+
+/** The `holder` a `terminal_run_active` RunState carries - someone else
+ * (a terminal `ia_bulk.py upload` run, not this page) holds the run lock.
+ * `null` means the lock is held but the holder's identity is unknown. */
+export type TerminalRunHolder = Extract<RunState, { kind: "terminal_run_active" }>["holder"];
+
+// ---------------------------------------------------------------------
+// AppState
+// ---------------------------------------------------------------------
+
+/** Before the first `GET /api/status` response has come back. */
+export interface LoadingState {
+  kind: "loading";
+}
+
+/** No theme is chosen yet. The theme picker is a persistent, App-level
+ * control (not part of this state), so `choosing` only means "nothing picked
+ * so far" - its body is a prompt to pick one from the dropdown above. */
+export interface ChoosingState {
+  kind: "choosing";
+}
+
+/** A theme was picked; its preview (`GET /api/preview`) is in flight. */
+export interface CheckingState {
+  kind: "checking";
+  batch: string;
+}
+
+/** The preview loaded successfully and is on screen, awaiting Start or
+ * Re-check. `checkedAt` is when this preview was fetched, for display. */
+export interface PreviewedState {
+  kind: "previewed";
+  batch: string;
+  preview: ValidateDoc;
+  checkedAt: string;
+}
+
+/** The Start confirmation dialog is open over the previewed screen. */
+export interface ConfirmingState {
+  kind: "confirming";
+  batch: string;
+  preview: ValidateDoc;
+  checkedAt: string;
+}
+
+/** A run is in progress. `planned` is null until the server reports a
+ * total (mirrors RunState's `page_run_active.planned`). `current` is the
+ * item uploading right now, or null when nothing is in flight. `startedAt`
+ * is the run's identity (its `started_at`), used to key the output-offset
+ * resume so a stale offset from a different run is never applied. */
+export interface RunningState {
+  kind: "running";
+  batch: string;
+  startedAt: string;
+  done: number;
+  planned: number | null;
+  current: CurrentItem | null;
+}
+
+/** Stop was requested; the run is winding down but hasn't finished yet. */
+export interface StoppingState {
+  kind: "stopping";
+  batch: string;
+  startedAt: string;
+  done: number;
+  planned: number | null;
+  current: CurrentItem | null;
+}
+
+/** The run ended, one way or another - see Ending's five kinds. */
+export interface FinishedState {
+  kind: "finished";
+  ending: Ending;
+}
+
+/** Someone else holds the run lock (a terminal run, not this page's own).
+ * There is nothing for this page to do but show who and wait. */
+export interface TerminalRunState {
+  kind: "terminal-run";
+  holder: TerminalRunHolder;
+}
+
+/** An unrecoverable problem: a preview refusal, a boundary parse failure,
+ * a network error - anything reported via the `error` action. */
+export interface ErrorState {
+  kind: "error";
+  message: string;
+}
+
+export type AppState =
+  | LoadingState
+  | ChoosingState
+  | CheckingState
+  | PreviewedState
+  | ConfirmingState
+  | RunningState
+  | StoppingState
+  | FinishedState
+  | TerminalRunState
+  | ErrorState;
+
+// ---------------------------------------------------------------------
+// Action
+// ---------------------------------------------------------------------
+
+/**
+ * The initial `GET /api/status` result. Only `loading` interprets this -
+ * it is how the app decides which screen to start on by routing on
+ * `run.kind`. From every other state it is ignored (see reducer.ts).
+ */
+export interface StatusReceivedAction {
+  type: "status/received";
+  run: RunState;
+}
+
+/** A theme was picked from the persistent dropdown. Valid from any state
+ * where the picker is enabled (choosing, checking, previewed, confirming,
+ * finished); a no-op during a run or an error. Always lands on "checking". */
+export interface ThemeSelectedAction {
+  type: "theme/selected";
+  batch: string;
+}
+
+export interface PreviewLoadedAction {
+  type: "preview/loaded";
+  preview: ValidateDoc;
+  checkedAt: string;
+}
+
+/** The server refused to produce a preview (e.g. an invalid batch). */
+export interface PreviewFailedAction {
+  type: "preview/failed";
+  message: string;
+}
+
+export interface RecheckClickedAction {
+  type: "recheck/clicked";
+}
+
+export interface StartClickedAction {
+  type: "start/clicked";
+}
+
+export interface ConfirmCancelAction {
+  type: "confirm/cancel";
+}
+
+/** Carries the run's `started_at` (from the POST /api/runs response) so the
+ * running state can key its output-offset resume by run identity. */
+export interface ConfirmYesAction {
+  type: "confirm/yes";
+  startedAt: string;
+}
+
+/** Wraps the parsed SSE `progress` event as-is - same done/planned shape
+ * the server sends, so there is nothing for the App to translate. */
+export type SseProgressAction = { type: "sse/progress" } & SseProgressEvent;
+
+export interface StopClickedAction {
+  type: "stop/clicked";
+}
+
+/** The parsed SSE `finished` event's Ending (the event itself is
+ * `{ending: Ending}` - see schemas.ts's SseFinishedEvent). */
+export interface SseFinishedAction {
+  type: "sse/finished";
+  ending: Ending;
+}
+
+/** A terminal, unrecoverable problem - valid from any state. */
+export interface ErrorAction {
+  type: "error";
+  message: string;
+}
+
+export type Action =
+  | StatusReceivedAction
+  | ThemeSelectedAction
+  | PreviewLoadedAction
+  | PreviewFailedAction
+  | RecheckClickedAction
+  | StartClickedAction
+  | ConfirmCancelAction
+  | ConfirmYesAction
+  | SseProgressAction
+  | StopClickedAction
+  | SseFinishedAction
+  | ErrorAction;

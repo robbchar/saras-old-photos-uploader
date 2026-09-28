@@ -115,6 +115,21 @@ run writes down about itself.
 - [An interrupt stops a run after the current item](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)
 - [One upload runs at a time, enforced by `upload`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload)
 
+## [The upload page](decisions/UPLOAD-PAGE.md)
+
+Why the local upload page (issue #29) is shaped the way it is — a thin page
+that displays what the pipeline already decided, never a second place a
+decision gets made.
+
+- [The upload outlives the server](decisions/UPLOAD-PAGE.md#the-upload-outlives-the-server)
+- [The lock is the single source of truth](decisions/UPLOAD-PAGE.md#the-lock-is-the-single-source-of-truth)
+- [No banner in live mode](decisions/UPLOAD-PAGE.md#no-banner-in-live-mode)
+- [The confirmation dialog appears in both modes](decisions/UPLOAD-PAGE.md#the-confirmation-dialog-appears-in-both-modes)
+- [Progress and results come from the JSONL, never from printed text](decisions/UPLOAD-PAGE.md#progress-and-results-come-from-the-jsonl-never-from-printed-text)
+- [KeepAlive restarts only on failure](decisions/UPLOAD-PAGE.md#keepalive-restarts-only-on-failure)
+- [The server's request guard](decisions/UPLOAD-PAGE.md#the-servers-request-guard)
+- [The run-state model](decisions/UPLOAD-PAGE.md#the-run-state-model)
+
 ## Still open
 
 

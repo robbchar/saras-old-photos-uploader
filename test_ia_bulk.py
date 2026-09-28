@@ -1021,6 +1021,29 @@ def test_build_lifecycle_report_pairs_each_row_with_its_state():
     )
 
 
+def test_build_lifecycle_report_records_each_rows_templated_file_from_raw_cells():
+    from ia_bulk import RowValidation, build_lifecycle_report
+
+    # The file comes from the RAW Sheet cells via the template, not the
+    # disk-resolved name - so an already-uploaded row still shows what it
+    # uploaded even when the photo is no longer on this machine.
+    rows = [
+        {
+            "folder_on_lacie_drive": "SOP CD 1",
+            "file_name": "a.jpg",
+            "ia_identifier": "lcps-x-00001",
+            "ia_uploaded": "2026-01-01T00:00:00Z",
+        }
+    ]
+    results = [RowValidation(row_number=2, identifier="lcps-x-00001")]
+
+    report = build_lifecycle_report(
+        rows, results, file_template="{folder_on_lacie_drive}/{file_name}"
+    )
+
+    assert report.entries[0].file == "SOP CD 1/a.jpg"
+
+
 def test_a_lifecycle_report_returns_each_buckets_results():
     from ia_bulk import RowValidation, UploadVerdict, build_lifecycle_report
     from identifiers import RowState
@@ -2230,10 +2253,10 @@ def test_cmd_validate_passes_only_the_row_results_to_the_lifecycle_summary_not_t
 
     captured = {}
 
-    def fake_build_lifecycle_report(rows, row_results):
+    def fake_build_lifecycle_report(rows, row_results, file_template=None):
         captured["rows"] = rows
         captured["row_results"] = row_results
-        return build_lifecycle_report(rows, row_results)
+        return build_lifecycle_report(rows, row_results, file_template)
 
     monkeypatch.setattr("ia_bulk.build_lifecycle_report", fake_build_lifecycle_report)
 
@@ -4205,8 +4228,8 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
     assert len(log_files) == 1
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
-    # Header, the one row, then the closing run summary.
-    assert len(lines) == 3
+    # Header, the item's start marker, the one row's result, then the run summary.
+    assert len(lines) == 4
 
     header = json.loads(lines[0])
     assert header["record"] == "run_header"
@@ -4224,9 +4247,76 @@ def test_cmd_upload_writes_the_run_header_as_the_first_line_of_the_sheet_path_lo
     assert header["limit"] is None
     assert header["chunk_size"] == CHUNK_SIZE
 
-    result = json.loads(lines[1])
+    # lines[1] is the item_start marker; lines[2] is the row's own result.
+    start = json.loads(lines[1])
+    assert start["record"] == "item_start"
+    result = json.loads(lines[2])
     assert result["status"] == "success"
     assert result["identifier"] == "lcps-astoriaphotos-00001"
+
+
+def test_cmd_upload_writes_an_item_start_marker_before_each_item(
+    tmp_path, monkeypatch, capsys
+):
+    """The upload page names the photo uploading right now by reading an
+    item_start marker written just before the (blocking) upload call. It must
+    precede that item's own result record, carry the run's 1-based position, and
+    use the same identifier the result record does so the page can pair them."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    log_files = list((tmp_path / "logs").glob("upload-*.jsonl"))
+    records = [
+        json.loads(line)
+        for line in log_files[0].read_text(encoding="utf-8").strip().splitlines()
+    ]
+
+    starts = [r for r in records if r.get("record") == "item_start"]
+    assert [(s["index"], s["identifier"], s["file"]) for s in starts] == [
+        (1, "lcps-astoriaphotos-00001", "photo1.jpg"),
+        (2, "lcps-astoriaphotos-00002", "photo2.jpg"),
+    ]
+    # The first item's marker comes before its own success record.
+    start_index = records.index(starts[0])
+    result_index = next(
+        i
+        for i, r in enumerate(records)
+        if r.get("status") == "success" and r.get("identifier") == "lcps-astoriaphotos-00001"
+    )
+    assert start_index < result_index
+
+
+def test_cmd_upload_survives_an_item_start_write_failure_and_still_uploads(
+    tmp_path, monkeypatch, capsys
+):
+    """The item_start marker only feeds the page's progress display, so a
+    failure writing it must never stop a run about to create permanent items."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+    monkeypatch.setattr(
+        "ia_bulk.log_item_start",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
 
 
 def test_cmd_upload_survives_a_run_header_write_failure_and_still_uploads(
@@ -4260,11 +4350,12 @@ def test_cmd_upload_survives_a_run_header_write_failure_and_still_uploads(
     lines = log_files[0].read_text(encoding="utf-8").strip().splitlines()
     # The header failed to write, so no run_header record exists - proving
     # the failure was swallowed rather than silently retried or masked. The
-    # run's own records are all still there: the row result, then the closing
-    # summary.
+    # run's own records are all still there: the item_start marker, the row
+    # result, then the closing summary.
     records = [json.loads(line) for line in lines]
     assert not any(entry.get("record") == "run_header" for entry in records)
-    assert records[0]["status"] == "success"
+    result = next(entry for entry in records if "record" not in entry)
+    assert result["status"] == "success"
 
 
 def test_cmd_upload_with_write_identifier_reserves_then_uploads_then_confirms(
@@ -11736,6 +11827,8 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
     ]
     assert document["rows"][1]["errors"] != []
     assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
+    # A done row carries the file it uploaded, for the page's Uploaded list.
+    assert document["rows"][2]["file"] == "photo6.jpg"
     assert document["rows"][4]["missing_fields"] == ["title"]
     assert document["rows"][5]["errors"] != []
     # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
@@ -12808,3 +12901,49 @@ def test_a_sync_run_with_only_skips_mirrors_the_line_the_operator_saw(
     assert rows[0][4].startswith("nothing to sync")
     assert rows[0][4] in out.splitlines()
     assert [row[2:4] for row in rows[1:]] == [["skipped", "lcps-astoriaphotos-00002"]]
+
+
+# ---------------------------------------------------------------------------
+# Task 9: the `serve` subcommand
+# ---------------------------------------------------------------------------
+
+
+def test_serve_parser_defaults():
+    args = ia_bulk.build_parser().parse_args(["serve", "--project", "astoriaphotos"])
+    assert args.command == "serve"
+    assert args.port == 5277
+    assert args.live is False
+    assert args.registry == ia_bulk.DEFAULT_REGISTRY
+    assert args.project == "astoriaphotos"
+
+
+def test_serve_parser_accepts_port_and_live():
+    args = ia_bulk.build_parser().parse_args(
+        ["serve", "--project", "astoriaphotos", "--port", "9", "--live"]
+    )
+    assert args.port == 9
+    assert args.live is True
+
+
+def test_cmd_serve_calls_run_server(monkeypatch):
+    called = {}
+
+    def fake_run_server(config, deps=None):
+        called["cfg"] = config
+        return 0
+
+    monkeypatch.setattr(ia_bulk.upload_server, "run_server", fake_run_server)
+    args = ia_bulk.build_parser().parse_args(["serve", "--project", "p", "--port", "9"])
+    assert ia_bulk.cmd_serve(args) == 0
+    cfg = called["cfg"]
+    assert cfg.project == "p"
+    assert cfg.port == 9
+    assert cfg.repo_root == ia_bulk.REPO_ROOT
+    assert cfg.page_dir == ia_bulk.REPO_ROOT / "upload_page"
+
+
+def test_main_dispatches_to_cmd_serve(monkeypatch):
+    called = []
+    monkeypatch.setattr(ia_bulk, "cmd_serve", lambda args: called.append(args.command) or 0)
+    assert ia_bulk.main(["serve", "--project", "demo"]) == 0
+    assert called == ["serve"]

@@ -31,6 +31,7 @@ import launch_agent
 import log_tab
 import platform_probe
 import upload_lock
+import upload_server
 from column_map import (
     ColumnMap,
     FileResolutionError,
@@ -533,6 +534,11 @@ class LifecycleEntry:
 
     state: RowState
     result: RowValidation
+    # The row's templated file path (folder/file_name), from the RAW Sheet cells
+    # so it survives even when the file is not on this machine - what the upload
+    # page shows an operator for an already-uploaded row. compare=False: it is
+    # descriptive, not identity, so it never disturbs report/entry equality.
+    file: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -560,9 +566,17 @@ class LifecycleReport:
 
 
 def build_lifecycle_report(
-    rows: list[dict[str, str]], row_results: list[RowValidation]
+    rows: list[dict[str, str]],
+    row_results: list[RowValidation],
+    file_template: str | None = None,
 ) -> LifecycleReport:
-    """row_results must be validate_rows()'s own output for these rows, in the same order."""
+    """row_results must be validate_rows()'s own output for these rows, in the same order.
+
+    With `file_template`, each entry records the row's templated file path from the
+    raw Sheet cells (candidate_path, not the disk-resolved name), so an
+    already-uploaded row still shows what it uploaded even when the file is gone
+    from this machine. Without it, entries carry no file (the text summary and the
+    per-batch count reports do not need one)."""
     if len(rows) != len(row_results):
         raise ValueError(
             f"build_lifecycle_report: got {len(rows)} row(s) but {len(row_results)} "
@@ -572,7 +586,11 @@ def build_lifecycle_report(
         )
     return LifecycleReport(
         tuple(
-            LifecycleEntry(state=classify_row(row), result=result)
+            LifecycleEntry(
+                state=classify_row(row),
+                result=result,
+                file=candidate_path(file_template, row) if file_template else "",
+            )
             for row, result in zip(rows, row_results)
         )
     )
@@ -752,6 +770,7 @@ def validate_json(
                 "state": entry.state.value,
                 "verdict": entry.result.verdict.value,
                 "identifier": entry.result.identifier,
+                "file": entry.file,
                 "errors": list(entry.result.errors),
                 "missing_fields": list(entry.result.missing_fields),
             }
@@ -1039,6 +1058,25 @@ def log_result(
         "uploaded_as": uploaded_as,
         "live": live,
         "timestamp": utc_timestamp(),
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def log_item_start(log_path: str | Path, identifier: str, file_value: str, index: int) -> None:
+    """One line marking that item `index` (1-based in the run) has begun
+    uploading, written just before the blocking upload call so a reader can name
+    the photo in flight - the library reports no per-byte progress. The "record"
+    key keeps it out of the per-item result count (page_runs.read_progress), and
+    `identifier` matches the later result record so page_runs.read_current_item
+    can tell a still-uploading item from a finished one. The kind string mirrors
+    page_runs.ITEM_START_RECORD (kept as a literal here, as run_header/run_summary
+    are, since the two files share the log format but not an import)."""
+    entry = {
+        "record": "item_start",
+        "identifier": identifier,
+        "file": file_value,
+        "index": index,
     }
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
@@ -2645,6 +2683,17 @@ def cmd_setup(args) -> int:
     return deployment.exit_code(results)
 
 
+def cmd_serve(args) -> int:
+    """Runs the upload page's local HTTP server until it is stopped.
+
+    repo_root is this file's own directory, so the served bundle
+    (repo_root/upload_page) always matches this checkout regardless of the
+    caller's cwd.
+    """
+    config = upload_server.build_config_from_args(args, REPO_ROOT)
+    return upload_server.run_server(config)
+
+
 def cmd_validate(args) -> int:
     if not getattr(args, "json", False):
         return run_validate(args, json_out=None)
@@ -2703,7 +2752,7 @@ def run_validate(args, json_out: TextIO | None) -> int:
 
     results = header_results + row_results
     exit_code = 0 if all(r.is_valid for r in results) else 1
-    report = build_lifecycle_report(rows, row_results)
+    report = build_lifecycle_report(rows, row_results, config.file_template)
 
     if json_out is not None:
         try:
@@ -3458,6 +3507,7 @@ class SheetUploadRun:
                 position += 1
                 settled += 1
                 print(f"[{position}/{total}] uploading {target.uploaded_as} ({target.row['file']})")
+                self._log_start(target, position)
                 try:
                     upload_row(
                         sheet_upload_metadata(target, self.uploadable, self.mediatype),
@@ -3624,6 +3674,15 @@ class SheetUploadRun:
             uploaded_as=target.uploaded_as,
             http_status=http_status,
         )
+
+    def _log_start(self, target: UploadTarget, index: int) -> None:
+        """Best-effort: the marker only drives the page's progress display, so a
+        write failure must not stop a run about to create permanent items - the
+        result record (log_result) is the one that must always be written."""
+        try:
+            log_item_start(self.log_path, target.identifier, target.row["file"], index)
+        except OSError:
+            pass
 
 
 REMOVE_TAG_SENTINEL = "REMOVE_TAG"
@@ -5706,6 +5765,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    serve_parser = subparsers.add_parser(
+        "serve", help="Run the upload page's local HTTP server", allow_abbrev=False
+    )
+    serve_parser.add_argument("--project", required=True, help="Project ID from the registry")
+    serve_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
+    serve_parser.add_argument("--live", action="store_true", help="Serve against the project's real Sheet and collection instead of the test Sheet and test_collection")
+    serve_parser.add_argument("--port", type=int, default=5277, help="Port to listen on (default 5277)")
+
     return parser
 
 
@@ -5740,6 +5807,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     if args.command == "setup":
         return cmd_setup(args)
+    if args.command == "serve":
+        return cmd_serve(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2

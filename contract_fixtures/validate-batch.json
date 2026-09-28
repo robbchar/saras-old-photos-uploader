@@ -34,6 +34,7 @@
       "state": "unassigned",
       "verdict": "ready",
       "identifier": "",
+      "file": "photo1.jpg",
       "errors": [],
       "missing_fields": []
     },
@@ -42,6 +43,7 @@
       "state": "unassigned",
       "verdict": "invalid",
       "identifier": "",
+      "file": "",
       "errors": [
         "no file found in '<files_dir>' matching 'photo3.jpg' (looked for an exact filename match, then a case-insensitive match ignoring extension)"
       ],
@@ -52,6 +54,7 @@
       "state": "done",
       "verdict": "ready",
       "identifier": "lcps-astoriaphotos-00001",
+      "file": "photo6.jpg",
       "errors": [],
       "missing_fields": []
     },
@@ -60,6 +63,7 @@
       "state": "reserved",
       "verdict": "ready",
       "identifier": "lcps-astoriaphotos-00002",
+      "file": "photo7.jpg",
       "errors": [],
       "missing_fields": []
     },
@@ -68,6 +72,7 @@
       "state": "unassigned",
       "verdict": "not_ready",
       "identifier": "",
+      "file": "photo10.jpg",
       "errors": [],
       "missing_fields": [
         "title"
@@ -78,6 +83,7 @@
       "state": "unassigned",
       "verdict": "not_ready",
       "identifier": "",
+      "file": "",
       "errors": [
         "no file found in '<files_dir>' matching 'photo11.jpg' (looked for an exact filename match, then a case-insensitive match ignoring extension)"
       ],

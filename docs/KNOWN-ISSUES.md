@@ -48,6 +48,14 @@ code...".
 enforces the cap per run, not per day; see
 [`OPERATIONS.md`](OPERATIONS.md#pacing-and-batch-limits).
 
+Tracked as its own, non-blocking issue: **#75**. Whatever counts a day's
+uploads must look in both places a run can log to: a terminal run's
+`logs/upload-*.jsonl` and a page run's
+`logs/page-runs/<UTC>/upload-*.jsonl` — the local upload page (`ia_bulk.py
+serve`) spends the same daily quota through the same account, just logged
+under its own per-run folder. See
+[`ARCHITECTURE.md`, "`serve` and the upload page"](ARCHITECTURE.md#serve-and-the-upload-page).
+
 ## 5. `check_file_exists`'s `is_file()` catch has no test for the case it exists for
 
 *Found 2026-08-22, during the row-readiness effort — pre-existing, not
