@@ -293,6 +293,21 @@ def test_agent_blocking_failures_names_only_fails_the_agent_needs():
     assert deployment.agent_blocking_failures(results) == ["key"]
 
 
+def test_upload_page_blocking_failures_includes_drive_and_bundle():
+    def outcome(status):
+        return CheckOutcome(status, "")
+
+    results = [
+        (Check(deployment.DRIVE_CHECK, lambda: outcome(Status.FAIL), "r",
+               needed_by_agent=False), outcome(Status.FAIL)),
+        (Check(deployment.BUNDLE_CHECK, lambda: outcome(Status.FAIL), "r",
+               needed_by_agent=False), outcome(Status.FAIL)),
+    ]
+    assert set(deployment.upload_page_blocking_failures(results)) == {
+        deployment.DRIVE_CHECK, deployment.BUNDLE_CHECK
+    }
+
+
 def test_python_version_check_fails_below_the_floor():
     assert deployment.python_version_check((3, 9), DEMO_INSTALL).probe().status is Status.FAIL
 
@@ -365,6 +380,13 @@ def test_install_command_for_the_agent_adds_live_and_enable_agent():
     assert (
         deployment.InstallCommand("sarasoldphotos").render(enable_agent=True)
         == "./install.sh --project sarasoldphotos --live --enable-agent"
+    )
+
+
+def test_install_command_renders_enable_upload_page():
+    cmd = deployment.InstallCommand("sarasoldphotos")
+    assert cmd.render(enable_upload_page=True) == (
+        "./install.sh --project sarasoldphotos --live --enable-upload-page"
     )
 
 

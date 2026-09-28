@@ -2567,6 +2567,62 @@ def enable_agent_refusal(args) -> str | None:
     return None
 
 
+# {command} is install_command_for(args).render(enable_upload_page=True).
+ENABLE_UPLOAD_PAGE_NEEDS_NETWORK = (
+    "--enable-upload-page cannot be combined with --offline: the checks it gates on are "
+    "exactly the ones that need the network to verify. Re-run on a machine with network. "
+    "Run: {command}"
+)
+
+UPLOAD_PAGE_NOT_ENABLED = (
+    "{names} failed - the upload page agent was NOT enabled and nothing was loaded. Fix those "
+    "[FAIL] lines above, then re-run: {command}"
+)
+
+UPLOAD_PAGE_NOT_ENABLED_UNVERIFIED = (
+    "the live Sheet could not be verified ({names} came back UNKNOWN, not PASS) - the upload "
+    "page agent was NOT enabled and nothing was loaded. In live mode it would serve unattended "
+    "against a Sheet whose sharing and sync columns were never confirmed. Each UNKNOWN line "
+    "above says why - most often no network, or Google briefly unavailable. Resolve that, then "
+    "re-run: {command}"
+)
+
+UPLOAD_PAGE_NOT_LOADED = (
+    "the upload page agent was not loaded - see the message above. A plist written above still "
+    "loads at this account's next login; `doctor --live` shows what is loaded now."
+)
+
+UPLOAD_PAGE_ENABLED_DESPITE_FAILS = (
+    "the upload page agent IS enabled: the [FAIL] lines above are for other work, not for it."
+)
+
+
+def enable_upload_page_refusal(args) -> str | None:
+    """`--enable-upload-page` is refused offline: unlike `--enable-agent`, a
+    test-mode page is allowed, so only the missing-network case refuses here."""
+    if not args.enable_upload_page:
+        return None
+    if args.offline:
+        command = install_command_for(args).render(enable_upload_page=True)
+        return ENABLE_UPLOAD_PAGE_NEEDS_NETWORK.format(command=command)
+    return None
+
+
+def upload_page_not_enabled_message(
+    blocking: list[str], unverified: list[str], install: deployment.InstallCommand
+) -> str:
+    """FAILs are named first: an UNKNOWN Sheet check is often only their
+    consequence. Mirrors agent_not_enabled_message for the upload page's own
+    gate."""
+    command = install.render(enable_upload_page=True)
+    if not blocking:
+        return UPLOAD_PAGE_NOT_ENABLED_UNVERIFIED.format(names=" and ".join(unverified), command=command)
+    message = UPLOAD_PAGE_NOT_ENABLED.format(names=", ".join(blocking), command=command)
+    if unverified:
+        message += f" ({' and '.join(unverified)} came back UNKNOWN too, and must PASS as well.)"
+    return message
+
+
 def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
     """Write the plist and load the hourly agent, replacing an already-loaded
     one. True when launchd took it. Bootout first because launchd holds its own
@@ -2593,6 +2649,54 @@ def load_sync_agent(args, announce: Callable[[str], None]) -> bool:
         announce(
             "  it is already loaded - unloading it first so the new plist takes effect; "
             "a sync running right now is stopped"
+        )
+        # Waited on even when bootout reports failure: it exits 36 ("in progress")
+        # while a running job is still stopping. Only a job still listed is fatal.
+        _unloaded, bootout_message = platform_probe.launchctl_bootout(spec.label)
+        announce(f"  {bootout_message}")
+        if not platform_probe.wait_until_unloaded(spec.label):
+            announce(
+                f"  {spec.label} was still registered "
+                f"{platform_probe.UNLOAD_TIMEOUT_SECONDS:.0f}s after bootout - not loading over it"
+            )
+            return False
+
+    loaded, bootstrap_message = platform_probe.launchctl_bootstrap(plist)
+    announce(f"  {bootstrap_message}")
+    return loaded
+
+
+def load_upload_page_agent(
+    repo_root: Path,
+    project_id: str,
+    registry_path: Path | str,
+    live: bool,
+    home: Path,
+    announce: Callable[[str], None],
+) -> bool:
+    """Write the plist and load the upload page agent, replacing an already-loaded
+    one. True when launchd took it. Bootout first because launchd holds its own
+    copy of the plist from bootstrap time, so a rewritten plist otherwise never
+    takes effect. Mirrors load_sync_agent exactly, but the spec (and so the
+    plist) is built from explicit arguments rather than from args, since a
+    test-mode page is allowed here."""
+    spec = launch_agent.upload_page_agent_spec(repo_root, project_id, registry_path, live=live)
+    plist = launch_agent.plist_path(spec, home)
+
+    announce(f"loading {spec.label} for {platform_probe.current_user()}")
+    announce("  this starts the upload page now, and again at every login")
+
+    # Written here and nowhere else: launchd loads every plist in LaunchAgents at login.
+    try:
+        announce(f"  {launch_agent.write_plist(spec, home)}")
+    except OSError as exc:
+        announce(f"  could not write {plist} ({exc})")
+        return False
+
+    if platform_probe.launchctl_print(spec.label) is not None:
+        announce(
+            "  it is already loaded - unloading it first so the new plist takes effect; "
+            "the page it was serving stops"
         )
         # Waited on even when bootout reports failure: it exits 36 ("in progress")
         # while a running job is still stopping. Only a job still listed is fatal.
@@ -2650,6 +2754,7 @@ def cmd_setup(args) -> int:
         return report_unreadable_registry(args, exc)
     results = deployment.converge(checks, announce)
     agent_failed = False
+    upload_page_failed = False
 
     if args.enable_agent:
         # "Verify first, then enable" is the whole reason --enable-agent is a
@@ -2669,6 +2774,36 @@ def cmd_setup(args) -> int:
             return report_unreadable_registry(args, exc)
         results = deployment.run_checks(checks)
 
+    if args.enable_upload_page:
+        # Unlike --enable-agent, offline is only refused here, after the
+        # convergence above already ran: a test-mode page is allowed, so
+        # --offline is not a reason to skip fixing the machine, only to
+        # refuse loading the agent itself.
+        refusal = enable_upload_page_refusal(args)
+        if refusal is not None:
+            print(refusal)
+            return 1
+        # Same "verify first, then enable" rule as --enable-agent, but a
+        # test-mode page is allowed - the Sheet checks only gate live mode.
+        blocking = deployment.upload_page_blocking_failures(results)
+        unverified = deployment.unverified_sheet_checks(results) if args.live else []
+        if blocking or unverified:
+            print(deployment.format_report(results))
+            print(
+                upload_page_not_enabled_message(blocking, unverified, install_command_for(args)),
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            registry = load_registry(args.registry)
+            config = load_project_config(registry, args.project)
+            upload_page_failed = not load_upload_page_agent(
+                REPO_ROOT, config.project_id, args.registry, args.live, Path.home(), announce
+            )
+        except REGISTRY_READ_ERRORS as exc:
+            return report_unreadable_registry(args, exc)
+        results = deployment.run_checks(checks)
+
     if not changes:
         if deployment.exit_code(results) == 0:
             print("nothing to change; this machine already matches the checkout.")
@@ -2678,8 +2813,13 @@ def cmd_setup(args) -> int:
     if agent_failed:
         print(AGENT_NOT_LOADED, file=sys.stderr)
         return 1
+    if upload_page_failed:
+        print(UPLOAD_PAGE_NOT_LOADED, file=sys.stderr)
+        return 1
     if args.enable_agent and deployment.exit_code(results) != 0:
         print(AGENT_ENABLED_DESPITE_FAILS, file=sys.stderr)
+    if args.enable_upload_page and deployment.exit_code(results) != 0:
+        print(UPLOAD_PAGE_ENABLED_DESPITE_FAILS, file=sys.stderr)
     return deployment.exit_code(results)
 
 
@@ -5762,6 +5902,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Load the hourly sync LaunchAgent for the account running this. Run it from the "
             "operating account, after the first live runs have been verified"
+        ),
+    )
+    setup_parser.add_argument(
+        "--enable-upload-page",
+        action="store_true",
+        help=(
+            "Load the upload page LaunchAgent for the account running this. Test mode is "
+            "allowed; --offline is refused"
         ),
     )
 

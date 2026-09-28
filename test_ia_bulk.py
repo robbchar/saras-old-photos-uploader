@@ -3010,6 +3010,26 @@ def test_setup_does_not_enable_the_agent_by_default():
     assert args.enable_agent is False
 
 
+def test_build_parser_accepts_setup_with_enable_upload_page():
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "sarasoldphotos", "--live", "--enable-upload-page"]
+    )
+    assert args.enable_upload_page is True
+
+
+def test_setup_does_not_enable_the_upload_page_by_default():
+    args = ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])
+    assert args.enable_upload_page is False
+
+
+def test_setup_enable_upload_page_refuses_offline(capsys):
+    code = ia_bulk.main(
+        ["setup", "--project", "sarasoldphotos", "--offline", "--enable-upload-page"]
+    )
+    assert code != 0
+    assert "offline" in capsys.readouterr().out.lower()
+
+
 def test_main_dispatches_to_cmd_setup(monkeypatch):
     called = []
     monkeypatch.setattr(ia_bulk, "cmd_setup", lambda args: called.append(args.command) or 0)
@@ -3043,6 +3063,51 @@ def test_cmd_setup_with_enable_agent_bootstraps_it(monkeypatch):
     )
     ia_bulk.cmd_setup(args)
     assert len(loaded) == 1
+
+
+def test_cmd_setup_with_enable_upload_page_bootstraps_it(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    written = []
+    _stub_plist_write(monkeypatch, written)
+    loaded = []
+    monkeypatch.setattr(
+        ia_bulk.platform_probe,
+        "launchctl_bootstrap",
+        lambda path: (loaded.append(path), (True, "loaded"))[1],
+    )
+    monkeypatch.setattr(ia_bulk.platform_probe, "launchctl_print", lambda _: None)
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "sarasoldphotos", "--live", "--enable-upload-page"]
+    )
+    ia_bulk.cmd_setup(args)
+    assert len(loaded) == 1
+    assert written == ["org.lcpsociety.iabulk.uploadpage.sarasoldphotos"]
+
+
+def test_cmd_setup_does_not_enable_the_upload_page_when_a_check_failed(monkeypatch, capsys):
+    """Mirrors the sync agent's CRITICAL: a FAILing drive/bundle check must not
+    still bootstrap the upload page's RunAtLoad plist."""
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name=deployment.DRIVE_CHECK,
+                probe=lambda: deployment.CheckOutcome(deployment.Status.FAIL, "unreadable"),
+                remedy="reattach the drive",
+                needed_by_agent=False,
+            )
+        ],
+    )
+    _explode_on_launchctl(monkeypatch)
+
+    args = ia_bulk.build_parser().parse_args(
+        ["setup", "--project", "sarasoldphotos", "--live", "--enable-upload-page"]
+    )
+    assert ia_bulk.cmd_setup(args) == 1
+    captured = capsys.readouterr()
+    assert "NOT enabled" in captured.err
+    assert f"[FAIL] {deployment.DRIVE_CHECK}" in captured.out
 
 
 def test_cmd_setup_reports_when_it_changed_nothing(monkeypatch, capsys):

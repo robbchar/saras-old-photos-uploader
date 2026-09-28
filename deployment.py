@@ -109,6 +109,17 @@ def agent_blocking_failures(results: list[tuple[Check, CheckOutcome]]) -> list[s
     ]
 
 
+def upload_page_blocking_failures(results: list[tuple[Check, CheckOutcome]]) -> list[str]:
+    """FAILing checks the upload page depends on: everything the sync agent needs,
+    plus the files drive and the committed bundle (which the sync agent does not)."""
+    blocking = list(agent_blocking_failures(results))
+    for check, outcome in results:
+        if check.name in (DRIVE_CHECK, BUNDLE_CHECK) and outcome.status is Status.FAIL:
+            if check.name not in blocking:
+                blocking.append(check.name)
+    return blocking
+
+
 KEY_MODE = 0o600
 
 
@@ -124,12 +135,14 @@ class InstallCommand:
     # None for the checkout's own projects_registry.json, which install.sh reads by default.
     registry: Path | None = None
 
-    def render(self, *, enable_agent: bool = False) -> str:
+    def render(self, *, enable_agent: bool = False, enable_upload_page: bool = False) -> str:
         arguments = ["./install.sh", "--project", self.project_id]
         if self.registry is not None:
             arguments += ["--registry", str(self.registry)]
         if enable_agent:
             arguments += ["--live", "--enable-agent"]
+        if enable_upload_page:
+            arguments += ["--live", "--enable-upload-page"]
         return shlex.join(arguments)
 
 
@@ -335,6 +348,11 @@ def sheet_id_check(config: ProjectConfig, live: bool, registry_path: str) -> Che
     )
 
 
+# Named so upload_page_blocking_failures can single these out without re-spelling them.
+DRIVE_CHECK = "files drive"
+BUNDLE_CHECK = "upload page bundle"
+
+
 def drive_check(files_dir: Path) -> Check:
     def probe() -> CheckOutcome:
         if not files_dir.exists():
@@ -346,7 +364,7 @@ def drive_check(files_dir: Path) -> Check:
 
     # sync-metadata never reads the drive, so this does not gate the agent.
     return Check(
-        name="files drive",
+        name=DRIVE_CHECK,
         probe=probe,
         # FAIL only when the path exists, so the drive is attached; access or the path is wrong.
         remedy=(
