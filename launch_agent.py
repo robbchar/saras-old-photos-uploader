@@ -13,10 +13,23 @@ LABEL_PREFIX = "org.lcpsociety.iabulk.sync"
 
 
 @dataclass(frozen=True)
+class IntervalSchedule:
+    seconds: int
+
+
+@dataclass(frozen=True)
+class KeepAliveSchedule:
+    pass
+
+
+Schedule = IntervalSchedule | KeepAliveSchedule
+
+
+@dataclass(frozen=True)
 class AgentSpec:
     label: str
     program_arguments: list[str]
-    interval: int
+    schedule: Schedule
     # launchd sends both stdout and stderr here; the program keeps their lines in order.
     output_path: Path
     working_directory: Path
@@ -38,7 +51,7 @@ def sync_agent_spec(repo_root: Path, project_id: str, registry_path: Path | str)
             "--registry",
             str(registry_path),
         ],
-        interval=HOURLY,
+        schedule=IntervalSchedule(HOURLY),
         output_path=repo_root / "logs" / f"launchagent-{project_id}.log",
         working_directory=repo_root,
     )
@@ -51,12 +64,16 @@ def render_plist(spec: AgentSpec) -> str:
     body = {
         "Label": spec.label,
         "ProgramArguments": list(spec.program_arguments),
-        "StartInterval": spec.interval,
         "RunAtLoad": True,
         "WorkingDirectory": str(spec.working_directory),
         "StandardOutPath": str(spec.output_path),
         "StandardErrorPath": str(spec.output_path),
     }
+    match spec.schedule:
+        case IntervalSchedule(seconds):
+            body["StartInterval"] = seconds
+        case KeepAliveSchedule():
+            body["KeepAlive"] = {"SuccessfulExit": False}
     return plistlib.dumps(body).decode("utf-8")
 
 

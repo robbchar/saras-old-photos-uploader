@@ -138,7 +138,7 @@ def test_plist_is_current_is_false_once_the_registry_changes(tmp_path):
 
 
 def test_sync_agent_spec_is_hourly(tmp_path):
-    assert a_spec(tmp_path).interval == launch_agent.HOURLY
+    assert a_spec(tmp_path).schedule == launch_agent.IntervalSchedule(launch_agent.HOURLY)
 
 
 def test_render_plist_is_parseable_and_carries_the_interval(tmp_path):
@@ -165,6 +165,33 @@ def test_render_plist_runs_at_load(tmp_path):
     # a login run with no changed rows is a no-op under the #24 hash gate.
     parsed = plistlib.loads(launch_agent.render_plist(a_spec(tmp_path)).encode("utf-8"))
     assert parsed["RunAtLoad"] is True
+
+
+def test_render_plist_emits_keep_alive_for_a_keepalive_schedule():
+    spec = launch_agent.AgentSpec(
+        label="org.example.keepalive",
+        program_arguments=["/x/python", "/x/ia_bulk.py", "serve"],
+        schedule=launch_agent.KeepAliveSchedule(),
+        output_path=Path("/x/logs/a.log"),
+        working_directory=Path("/x"),
+    )
+    body = plistlib.loads(launch_agent.render_plist(spec).encode("utf-8"))
+    assert body["KeepAlive"] == {"SuccessfulExit": False}
+    assert "StartInterval" not in body
+    assert body["RunAtLoad"] is True
+
+
+def test_render_plist_emits_start_interval_for_an_interval_schedule():
+    spec = launch_agent.AgentSpec(
+        label="org.example.interval",
+        program_arguments=["/x/python", "/x/ia_bulk.py", "sync-metadata"],
+        schedule=launch_agent.IntervalSchedule(3600),
+        output_path=Path("/x/logs/a.log"),
+        working_directory=Path("/x"),
+    )
+    body = plistlib.loads(launch_agent.render_plist(spec).encode("utf-8"))
+    assert body["StartInterval"] == 3600
+    assert "KeepAlive" not in body
 
 
 def test_plist_path_lands_in_the_users_launchagents(tmp_path):
