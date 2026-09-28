@@ -3835,35 +3835,66 @@ def print_sync_dry_run(
 
 
 def print_dry_run(
-    targets: list[UploadTarget], columns: SheetColumns, write_back: bool, uploaded_at: str
+    targets: list[UploadTarget],
+    columns: SheetColumns,
+    write_back: bool,
+    uploaded_at: str,
+    verbose: bool = False,
 ) -> None:
+    """Previews an upload. By default it reports counts - a line per item
+    buries the summary on a 500-item run (issue #81); -v restores the full
+    per-item and per-cell listing."""
     if not targets:
         print("nothing to upload")
         return
 
-    print(f"would upload {_pluralize(len(targets), 'item')}:")
-    for target in targets:
-        if target.newly_minted:
+    if verbose:
+        print(f"would upload {_pluralize(len(targets), 'item')}:")
+        for target in targets:
+            if target.newly_minted:
+                print(
+                    f"  row {target.row_number}: would mint '{target.identifier}' and upload it as "
+                    f"'{target.uploaded_as}' ({target.row['file']})"
+                )
+            else:
+                print(
+                    f"  row {target.row_number}: would upload under its existing identifier "
+                    f"'{target.identifier}', as '{target.uploaded_as}' ({target.row['file']})"
+                )
+        print()
+
+        if not write_back:
             print(
-                f"  row {target.row_number}: would mint '{target.identifier}' and upload it as "
-                f"'{target.uploaded_as}' ({target.row['file']})"
+                "would write nothing to the Sheet - neither --live nor --write-identifier was passed"
             )
-        else:
-            print(
-                f"  row {target.row_number}: would upload under its existing identifier "
-                f"'{target.identifier}', as '{target.uploaded_as}' ({target.row['file']})"
-            )
-    print()
+            return
+
+        print("would write these cells:")
+        for update in reserve_updates(targets, columns) + confirm_updates(targets, columns, uploaded_at):
+            print(f"  {update.a1} = {update.value}")
+        return
+
+    # Default: counts, not a line per item.
+    minted = sum(1 for target in targets if target.newly_minted)
+    existing = len(targets) - minted
+    # Raw counts beside a _pluralize line use its {:,} format - see _pluralize.
+    breakdown = []
+    if minted:
+        breakdown.append(f"{minted:,} would mint a new identifier")
+    if existing:
+        breakdown.append(f"{existing:,} under an existing one")
+    print(f"would upload {_pluralize(len(targets), 'item')}: {', '.join(breakdown)}")
 
     if not write_back:
         print(
             "would write nothing to the Sheet - neither --live nor --write-identifier was passed"
         )
+        print("(re-run with -v to list every item)")
         return
 
-    print("would write these cells:")
-    for update in reserve_updates(targets, columns) + confirm_updates(targets, columns, uploaded_at):
-        print(f"  {update.a1} = {update.value}")
+    cells = reserve_updates(targets, columns) + confirm_updates(targets, columns, uploaded_at)
+    print(f"would write {_pluralize(len(cells), 'cell')} across {_pluralize(len(targets), 'item')}")
+    print("(re-run with -v to list every item and cell)")
 
 
 def cmd_upload(args) -> int:
@@ -4107,7 +4138,10 @@ def upload_from_sheet(args) -> int:
     print()
 
     if dry_run:
-        print_dry_run(targets, columns, write_back, upload_timestamp())
+        print_dry_run(
+            targets, columns, write_back, upload_timestamp(),
+            bool(getattr(args, "verbose", False)),
+        )
         return 1 if blocked else 0
 
     if not targets:
@@ -5139,6 +5173,7 @@ def cmd_reconcile_files(args) -> int:
     config = load_project_config(registry, args.project)
     live = bool(args.live)
     dry_run = bool(getattr(args, "dry_run", False))
+    verbose = bool(getattr(args, "verbose", False))
 
     print(sheet_banner(config, live))
     if dry_run:
@@ -5223,6 +5258,7 @@ def cmd_reconcile_files(args) -> int:
     log_path = None if dry_run else open_log(args.log_dir, "reconcile-files")
     pending: list[PendingCorrection] = []
     accepted = stopped = 0
+    dry_proposed = dry_no_candidate = dry_ambiguous = 0
 
     def flush() -> bool:
         """Write what has been accepted, dropping anything whose row moved.
@@ -5290,8 +5326,11 @@ def cmd_reconcile_files(args) -> int:
             proposal = propose_match(wanted, candidates)
             reason = proposal.reason if proposal else ""
         except AmbiguousMatch as exc:
-            print(f"row {row_number}  '{wanted}'  matches {len(exc.matches)} files - "
-                  f"leaving it alone: {', '.join(exc.matches)}")
+            if dry_run:
+                dry_ambiguous += 1
+            if verbose or not dry_run:
+                print(f"row {row_number}  '{wanted}'  matches {len(exc.matches)} files - "
+                      f"leaving it alone: {', '.join(exc.matches)}")
             if log_path:
                 log_decision(log_path, row_number, folder, wanted, "ambiguous",
                              matches=exc.matches)
@@ -5299,9 +5338,14 @@ def cmd_reconcile_files(args) -> int:
 
         if dry_run:
             if proposal:
-                print(f"row {row_number}  '{wanted}' -> '{proposal.filename}'  ({reason})")
+                dry_proposed += 1
             else:
-                print(f"row {row_number}  '{wanted}'  no candidate in '{folder}'")
+                dry_no_candidate += 1
+            if verbose:
+                if proposal:
+                    print(f"row {row_number}  '{wanted}' -> '{proposal.filename}'  ({reason})")
+                else:
+                    print(f"row {row_number}  '{wanted}'  no candidate in '{folder}'")
             continue
 
         decision = prompt_for_decision(
@@ -5344,6 +5388,23 @@ def cmd_reconcile_files(args) -> int:
 
     if not flush():
         return 1
+
+    if dry_run:
+        # A dry run corrects nothing, so the "N corrected" trailer below would
+        # read "0 corrected" and mislead. Report what the run WOULD do instead;
+        # -v already listed each row above, so it needs no closing count.
+        if not verbose:
+            print()
+            # Raw counts beside a _pluralize line use its {:,} format - see _pluralize.
+            parts = [
+                f"{_pluralize(dry_proposed, 'row')} would be corrected",
+                f"{dry_no_candidate:,} have no candidate",
+            ]
+            if dry_ambiguous:
+                parts.append(f"{dry_ambiguous:,} matched more than one file and were left alone")
+            print("; ".join(parts))
+            print("(re-run with -v to list each row)")
+        return 0
 
     print()
     print(f"{accepted} filename(s) corrected")
@@ -5586,6 +5647,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Upload nothing and write nothing; print the identifiers that would be minted and the cells that would be written",
     )
+    upload_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="With --dry-run, list every item and cell instead of a summary",
+    )
     upload_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
     upload_parser.add_argument(
         "--limit",
@@ -5665,6 +5732,12 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     reconcile_parser.add_argument("--live", action="store_true", help="Read and write the project's real Sheet instead of its test Sheet")
     reconcile_parser.add_argument("--dry-run", action="store_true", help="Print what would be proposed; prompt for nothing and write nothing")
+    reconcile_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="With --dry-run, list every row instead of a summary",
+    )
     reconcile_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
 
     append_parser = subparsers.add_parser(

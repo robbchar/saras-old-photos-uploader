@@ -114,6 +114,7 @@ run writes down about itself.
 - ["Unchanged" is a third outcome, not a failure](decisions/QUOTA-AND-RUNS.md#unchanged-is-a-third-outcome-not-a-failure)
 - [An interrupt stops a run after the current item](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)
 - [One upload runs at a time, enforced by `upload`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload)
+- [Dry-run output is a summary by default; `-v` restores per-item detail](decisions/QUOTA-AND-RUNS.md#dry-run-output-is-a-summary-by-default--v-restores-per-item-detail)
 
 ## Still open
 

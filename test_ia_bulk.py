@@ -2843,6 +2843,24 @@ def test_build_parser_upload_subcommand_accepts_write_identifier_and_dry_run():
     assert args.dry_run is True
 
 
+def test_build_parser_upload_and_reconcile_accept_verbose():
+    parser = build_parser()
+    upload_args = parser.parse_args(["upload", "--project", "astoriaphotos", "-v"])
+    reconcile_args = parser.parse_args(
+        ["reconcile-files", "--project", "astoriaphotos", "--verbose"]
+    )
+    assert upload_args.verbose is True
+    assert reconcile_args.verbose is True
+
+
+def test_build_parser_verbose_defaults_false():
+    parser = build_parser()
+    upload_args = parser.parse_args(["upload", "--project", "astoriaphotos"])
+    reconcile_args = parser.parse_args(["reconcile-files", "--project", "astoriaphotos"])
+    assert upload_args.verbose is False
+    assert reconcile_args.verbose is False
+
+
 def test_build_parser_sync_metadata_subcommand_defaults():
     parser = build_parser()
     args = parser.parse_args(["sync-metadata", "--project", "astoriaphotos"])
@@ -4402,7 +4420,7 @@ def test_cmd_upload_skips_an_invalid_row_uploads_the_valid_ones_and_exits_non_ze
     assert _unresolved_message(tmp_path, "does-not-exist.jpg") in out
 
 
-def test_cmd_upload_dry_run_writes_nothing_uploads_nothing_and_prints_what_it_would_mint(
+def test_cmd_upload_dry_run_writes_nothing_uploads_nothing_and_summarizes(
     tmp_path, monkeypatch, capsys
 ):
     from ia_bulk import cmd_upload
@@ -4419,16 +4437,13 @@ def test_cmd_upload_dry_run_writes_nothing_uploads_nothing_and_prints_what_it_wo
     assert recorder.kinds == ["read"]
     assert recorder.writes == []
     assert recorder.uploads == []
-    assert "lcps-astoriaphotos-00001" in out
-    assert "C2 = lcps-astoriaphotos-00001" in out
-    # The real run would upload under the STAMPED identifier, not the bare
-    # permanent one - a dry run that only ever showed the real identifier
-    # would misrepresent what --live's absence actually means. See
-    # docs/DECISIONS.md, "Test identifiers carry a per-run stamp".
-    assert (
-        f"would mint 'lcps-astoriaphotos-00001' and upload it as "
-        f"'zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001'"
-    ) in out
+    assert "would upload 1 item: 1 would mint a new identifier" in out
+    assert "would write 4 cells across 1 item" in out
+    # Default folds the per-item / per-cell detail into counts; -v restores it
+    # (that verbose path, including the STAMPED identifier a real test run
+    # would upload under, is pinned by the -v test below).
+    assert "would mint 'lcps-astoriaphotos-00001'" not in out
+    assert "C2 = " not in out
     assert not (tmp_path / "logs").exists()
 
 
@@ -4450,6 +4465,61 @@ def test_cmd_upload_dry_run_without_write_identifier_says_it_would_write_nothing
     assert recorder.writes == []
     assert "would write nothing to the Sheet" in out
     assert "C2 = " not in out
+
+
+def test_cmd_upload_dry_run_summarizes_items_by_default(tmp_path, monkeypatch, capsys):
+    """Default dry-run prints counts, not a line per item - the per-item
+    flood is what buries the summary on a real 500-item run. Issue #81."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, dry_run=True)
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.writes == []
+    assert recorder.uploads == []
+    assert "would upload 2 items: 2 would mint a new identifier" in out
+    assert "would write 8 cells across 2 items" in out
+    # No per-item or per-cell detail without -v.
+    assert "would mint 'lcps-astoriaphotos-00001'" not in out
+    assert "C2 = " not in out
+    assert "-v" in out
+
+
+def test_cmd_upload_dry_run_verbose_lists_every_item_and_cell(tmp_path, monkeypatch, capsys):
+    """-v restores the full per-item / per-cell listing the default folds
+    into counts. Issue #81."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(
+        make_upload_args(
+            tmp_path, registry_path, write_identifier=True, dry_run=True, verbose=True
+        )
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert (
+        f"would mint 'lcps-astoriaphotos-00001' and upload it as "
+        f"'zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001'"
+    ) in out
+    assert "C2 = lcps-astoriaphotos-00001" in out
+    # Verbose is the detail view; it does not also nudge toward -v.
+    assert "re-run with -v" not in out
 
 
 @pytest.mark.parametrize(
@@ -10770,8 +10840,58 @@ def test_cmd_reconcile_files_dry_run_neither_prompts_nor_writes(tmp_path, monkey
 
     assert written == []
     assert not (tmp_path / "logs").exists()
-    assert "Finnish Meat Market.jpg" in out
+    assert "1 row would be corrected" in out
     assert exit_code == 0
+
+
+def test_cmd_reconcile_files_dry_run_summarizes_proposals_by_default(tmp_path, monkeypatch, capsys):
+    """Default dry-run reports counts, not a line per row - the same flood
+    upload had. -v restores the per-row proposals. Issue #81."""
+    from ia_bulk import cmd_reconcile_files
+
+    registry_path, written = _setup_reconcile(
+        tmp_path,
+        monkeypatch,
+        [["SOP CD 1", "Finnis Meat Market.jpg", "A title"]],
+        {"SOP CD 1": ["Finnish Meat Market.jpg"]},
+        [],
+    )
+
+    exit_code = cmd_reconcile_files(_reconcile_args(tmp_path, registry_path, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert written == []
+    assert "1 row would be corrected" in out
+    # No per-row proposal detail without -v.
+    assert "Finnish Meat Market.jpg" not in out
+    assert "->" not in out
+    assert "-v" in out
+
+
+def test_cmd_reconcile_files_dry_run_verbose_lists_each_row(tmp_path, monkeypatch, capsys):
+    """-v restores the per-row proposal lines the default folds into a count.
+    Issue #81."""
+    from ia_bulk import cmd_reconcile_files
+
+    registry_path, written = _setup_reconcile(
+        tmp_path,
+        monkeypatch,
+        [["SOP CD 1", "Finnis Meat Market.jpg", "A title"]],
+        {"SOP CD 1": ["Finnish Meat Market.jpg"]},
+        [],
+    )
+
+    exit_code = cmd_reconcile_files(
+        _reconcile_args(tmp_path, registry_path, dry_run=True, verbose=True)
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert written == []
+    assert "'Finnis Meat Market.jpg' -> 'Finnish Meat Market.jpg'" in out
+    # Verbose is the detail view; no trailing summary count.
+    assert "would be corrected" not in out
 
 
 def test_cmd_reconcile_files_on_a_clean_sheet_proposes_nothing(tmp_path, monkeypatch, capsys):
