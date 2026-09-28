@@ -695,6 +695,92 @@ def test_agent_loaded_check_has_no_fix_so_setup_never_loads_it_implicitly(tmp_pa
     assert deployment.agent_loaded_check(spec, DEMO_INSTALL).fix is None
 
 
+def _page_spec(tmp_path):
+    return launch_agent.upload_page_agent_spec(
+        tmp_path / "repo", "demo", tmp_path / "registry.json", live=True
+    )
+
+
+def test_upload_page_agent_plist_check_unknown_when_absent(tmp_path):
+    spec = _page_spec(tmp_path)
+    outcome = deployment.upload_page_agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).probe()
+    assert outcome.status is Status.UNKNOWN
+    assert "not enabled" in outcome.detail
+
+
+def test_upload_page_agent_plist_check_pass_when_current(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    launch_agent.write_plist(spec, home)
+    assert deployment.upload_page_agent_plist_check(spec, home, DEMO_INSTALL).probe().status is Status.PASS
+
+
+def test_upload_page_agent_plist_check_fails_when_the_plist_is_stale(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    target = launch_agent.plist_path(spec, home)
+    target.parent.mkdir(parents=True)
+    target.write_text("<plist>from an older checkout</plist>", encoding="utf-8")
+    assert deployment.upload_page_agent_plist_check(spec, home, DEMO_INSTALL).probe().status is Status.FAIL
+
+
+def test_upload_page_agent_plist_check_remedy_uses_enable_upload_page(tmp_path):
+    spec = _page_spec(tmp_path)
+    remedy = deployment.upload_page_agent_plist_check(spec, tmp_path / "home", DEMO_INSTALL).remedy
+    assert "--live --enable-upload-page" in remedy
+
+
+def _enabled_page_agent_without_its_log_directory(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    launch_agent.write_plist(spec, home)
+    spec.output_path.parent.rmdir()
+    return spec, home
+
+
+def test_upload_page_agent_log_directory_check_fails_when_an_enabled_agent_lost_its_logs_folder(tmp_path):
+    spec, home = _enabled_page_agent_without_its_log_directory(tmp_path)
+    outcome = deployment.upload_page_agent_log_directory_check(spec, home, DEMO_INSTALL).probe()
+    assert outcome.status is Status.FAIL
+
+
+def test_upload_page_agent_log_directory_check_passes_without_the_folder_when_the_agent_is_not_enabled(tmp_path):
+    spec = _page_spec(tmp_path)
+    outcome = deployment.upload_page_agent_log_directory_check(spec, tmp_path / "home", DEMO_INSTALL).probe()
+    assert outcome.status is Status.PASS
+    assert "not enabled" in outcome.detail
+
+
+def test_upload_page_agent_loaded_check_is_unknown_when_launchctl_says_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(deployment.platform_probe, "launchctl_print", lambda _: None)
+    spec = _page_spec(tmp_path)
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).probe().status is Status.UNKNOWN
+
+
+def test_upload_page_agent_loaded_check_passes_and_reports_the_last_exit(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        deployment.platform_probe, "launchctl_print", lambda _: "\tlast exit code = 0\n"
+    )
+    spec = _page_spec(tmp_path)
+    outcome = deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).probe()
+    assert outcome.status is Status.PASS
+    assert "0" in outcome.detail
+
+
+def test_upload_page_agent_loaded_check_remedy_uses_enable_upload_page(tmp_path):
+    spec = _page_spec(tmp_path)
+    remedy = deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).remedy
+    assert "--live --enable-upload-page" in remedy
+
+
+def test_upload_page_agent_checks_do_not_block_the_enabling_that_fixes_them(tmp_path):
+    spec = _page_spec(tmp_path)
+    home = tmp_path / "home"
+    assert deployment.upload_page_agent_plist_check(spec, home, DEMO_INSTALL).needed_by_agent is False
+    assert deployment.upload_page_agent_log_directory_check(spec, home, DEMO_INSTALL).needed_by_agent is False
+    assert deployment.upload_page_agent_loaded_check(spec, DEMO_INSTALL).needed_by_agent is False
+
+
 def test_install_sh_python_floor_matches_the_one_python_enforces():
     script = Path("install.sh").read_text(encoding="utf-8")
     major = re.search(r"^MIN_PY_MAJOR=(\d+)$", script, re.MULTILINE)

@@ -579,3 +579,89 @@ def agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) ->
         ),
         needed_by_agent=False,
     )
+
+
+def upload_page_agent_plist_check(spec: launch_agent.AgentSpec, home: Path, install: InstallCommand) -> Check:
+    """No fix(): launchd loads every plist in LaunchAgents at login, and a rewrite
+    alone never reaches the loaded job, so only --enable-upload-page writes it and reloads."""
+
+    def probe() -> CheckOutcome:
+        target = launch_agent.plist_path(spec, home)
+        if launch_agent.plist_is_current(spec, home):
+            return CheckOutcome(Status.PASS, str(target))
+        if target.exists():
+            return CheckOutcome(Status.FAIL, f"{target} does not match this checkout and registry")
+        return CheckOutcome(
+            Status.UNKNOWN, f"no plist at {target} - the upload page agent is not enabled for this account"
+        )
+
+    return Check(
+        name="upload page agent plist",
+        probe=probe,
+        remedy=(
+            f"{install.render(enable_upload_page=True)}, from the account that "
+            "runs the agent, rewrites it and reloads the agent; if that was just run and this "
+            "still fails, the plist could not be written "
+            '- see docs/DEPLOYMENT.md, section "Checking a machine later"'
+        ),
+        needed_by_agent=False,
+    )
+
+
+def upload_page_agent_log_directory_check(
+    spec: launch_agent.AgentSpec, home: Path, install: InstallCommand
+) -> Check:
+    """launchd creates no directory for StandardOutPath, so an enabled agent
+    whose logs/ was deleted never starts again and writes nothing anywhere."""
+    directory = spec.output_path.parent
+
+    def probe() -> CheckOutcome:
+        if directory.is_dir():
+            return CheckOutcome(Status.PASS, str(directory))
+        if not launch_agent.plist_path(spec, home).exists():
+            return CheckOutcome(Status.PASS, f"{directory} is absent, but the agent is not enabled")
+        return CheckOutcome(Status.FAIL, f"{directory} is missing, so launchd cannot start the agent")
+
+    def fix() -> str:
+        directory.mkdir(parents=True, exist_ok=True)
+        return f"created {directory}"
+
+    return Check(
+        name="upload page agent log directory",
+        probe=probe,
+        remedy=f"{install.render(enable_upload_page=True)} recreates it; delete the files in logs/, never the folder",
+        fix=fix,
+        needed_by_agent=False,
+    )
+
+
+def upload_page_agent_loaded_check(spec: launch_agent.AgentSpec, install: InstallCommand) -> Check:
+    # Relative, as the operator reads it from the checkout they run install.sh in.
+    agent_log = spec.output_path.relative_to(spec.working_directory).as_posix()
+
+    def probe() -> CheckOutcome:
+        output = platform_probe.launchctl_print(spec.label)
+        if output is None:
+            # Not loaded, no launchctl, or a different account's session - all
+            # "could not tell", and loading is --enable-upload-page's job, never a fix().
+            return CheckOutcome(Status.UNKNOWN, f"{spec.label} is not loaded for this account")
+        last_exit = platform_probe.parse_last_exit(output)
+        pid = platform_probe.parse_pid(output)
+        running = f", running as pid {pid}" if pid is not None else ""
+        if last_exit is None:
+            return CheckOutcome(Status.PASS, f"loaded, has not run yet{running}")
+        if last_exit != 0:
+            return CheckOutcome(Status.FAIL, f"loaded, last run exited {last_exit}{running}")
+        return CheckOutcome(Status.PASS, f"loaded, last run exited 0{running}")
+
+    return Check(
+        name="upload page agent loaded",
+        probe=probe,
+        remedy=(
+            f"run tail -20 {agent_log} to see why the last run failed; to "
+            "reload the agent, "
+            "log in as the operating account and run "
+            f"{install.render(enable_upload_page=True)}"
+        ),
+        needed_by_agent=False,
+    )

@@ -2482,12 +2482,24 @@ def build_deployment_checks(args, *, include_network: bool) -> list[deployment.C
             ]
         )
 
+    home = Path.home()
     spec = launch_agent.sync_agent_spec(repo_root, config.project_id, args.registry)
     checks.extend(
         [
-            deployment.agent_plist_check(spec, Path.home(), install),
-            deployment.agent_log_directory_check(spec, Path.home(), install),
+            deployment.agent_plist_check(spec, home, install),
+            deployment.agent_log_directory_check(spec, home, install),
             deployment.agent_loaded_check(spec, install),
+        ]
+    )
+
+    page_spec = launch_agent.upload_page_agent_spec(
+        repo_root, config.project_id, args.registry, live=live
+    )
+    checks.extend(
+        [
+            deployment.upload_page_agent_plist_check(page_spec, home, install),
+            deployment.upload_page_agent_log_directory_check(page_spec, home, install),
+            deployment.upload_page_agent_loaded_check(page_spec, install),
         ]
     )
     return checks
