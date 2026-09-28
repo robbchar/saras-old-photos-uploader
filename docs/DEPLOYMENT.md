@@ -784,3 +784,12 @@ Windows dev box.
       file rather than a terminal — check
       `logs/launchagent-<project>-upload-page.log` for garbled `\r`-driven
       progress lines during a real upload started from the page.
+## 19. The upload page: one-click launch
+
+Once the checkout is installed (§10) and current, a person can start the
+upload page in LIVE mode with a double-click — or a Dock button. It is the
+manual counterpart to the hourly sync agent (§12), and needs no Node or
+`yarn` on this Mac: the built page bundle is committed and arrives with
+`git pull`. See [`MAC-LAUNCHER.md`](MAC-LAUNCHER.md) for the launcher, putting
+it in the Dock, and a verification checklist. A Mac uses this manual launcher
+*or* the always-on agent (§17) — never both.

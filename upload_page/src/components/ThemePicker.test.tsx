@@ -26,8 +26,10 @@ const READY_BATCH: ValidateBatch = {
   },
 };
 
-// Nothing left ready, but rows are still broken - "N need fixing".
-const NEEDS_FIXING_BATCH: ValidateBatch = {
+// Nothing left ready, but rows still need attention - "N not ready". The
+// dropdown stays generic; the Preview says whether they need fixing (invalid)
+// or cataloguing (missing fields).
+const NOT_READY_BATCH: ValidateBatch = {
   value: "Waterfront",
   ready_to_upload: 0,
   counts: {
@@ -36,8 +38,8 @@ const NEEDS_FIXING_BATCH: ValidateBatch = {
   },
 };
 
-// Exactly one broken row - the verb agrees: "1 needs fixing".
-const ONE_NEEDS_FIXING_BATCH: ValidateBatch = {
+// Exactly one not-ready row - "1 not ready".
+const ONE_NOT_READY_BATCH: ValidateBatch = {
   value: "Harborside",
   ready_to_upload: 0,
   counts: {
@@ -70,7 +72,7 @@ describe("ThemePicker", () => {
   it("shows an enabled theme's ready count and selects it", () => {
     const onSelect = vi.fn();
     render(
-      <ThemePicker batches={[READY_BATCH, NEEDS_FIXING_BATCH]} onSelect={onSelect} />,
+      <ThemePicker batches={[READY_BATCH, NOT_READY_BATCH]} onSelect={onSelect} />,
     );
 
     openPicker();
@@ -81,22 +83,24 @@ describe("ThemePicker", () => {
     expect(onSelect).toHaveBeenCalledWith("Fishing");
   });
 
-  it("still lets you select a zero-ready theme with broken rows, labeled 'N need fixing'", () => {
+  it("still lets you select a zero-ready theme with rows needing attention, labeled 'N not ready'", () => {
     const onSelect = vi.fn();
-    render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={onSelect} />);
+    render(<ThemePicker batches={[NOT_READY_BATCH]} onSelect={onSelect} />);
 
     openPicker();
-    const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });
+    // Generic "not ready" up top, never "N need fixing" -- the Preview alone
+    // says which are invalid vs not-yet-catalogued.
+    const option = screen.getByRole("option", { name: "Waterfront — 3 not ready" });
     expect(option).not.toHaveAttribute("aria-disabled", "true");
     fireEvent.click(option);
     expect(onSelect).toHaveBeenCalledWith("Waterfront");
   });
 
-  it("uses the singular 'needs' when exactly one row needs fixing", () => {
-    render(<ThemePicker batches={[ONE_NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
+  it("labels a single not-ready row as '1 not ready'", () => {
+    render(<ThemePicker batches={[ONE_NOT_READY_BATCH]} onSelect={vi.fn()} />);
 
     openPicker();
-    expect(screen.getByRole("option", { name: "Harborside — 1 needs fixing" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Harborside — 1 not ready" })).toBeInTheDocument();
   });
 
   it("still lets you select an all-uploaded theme, labeled 'all uploaded'", () => {
@@ -119,9 +123,9 @@ describe("ThemePicker", () => {
   });
 
   it("renders zero-ready themes de-emphasized with a legible token, not the near-invisible faint one", () => {
-    render(<ThemePicker batches={[NEEDS_FIXING_BATCH]} onSelect={vi.fn()} />);
+    render(<ThemePicker batches={[NOT_READY_BATCH]} onSelect={vi.fn()} />);
     openPicker();
-    const option = screen.getByRole("option", { name: "Waterfront — 3 need fixing" });
+    const option = screen.getByRole("option", { name: "Waterfront — 3 not ready" });
     expect(option.className).toContain("text-muted");
     expect(option.className).not.toContain("text-faint");
   });

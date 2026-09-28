@@ -1269,6 +1269,25 @@ def test_build_sheet_client_reads_the_test_sheet_id_when_not_live(monkeypatch):
     assert fake_service.values_api.get_calls == [("TEST_SHEET_ID", "'Donor Photos'")]
 
 
+def test_build_sheet_client_uses_the_per_document_tab_matching_the_run_mode(monkeypatch):
+    """Wiring check: build_sheet_client resolves sheet_tab_for(live), so a live
+    run reads the live document's own tab, not the shared default."""
+    fake_service = _RecordingSheetsService({"values": [["Title"]]})
+    monkeypatch.setattr(
+        "ia_bulk.google_auth.load_service_account_credentials", lambda key_path: "FAKE_CREDS"
+    )
+    monkeypatch.setattr("ia_bulk.googleapiclient.discovery.build", lambda *a, **k: fake_service)
+    config = _sheet_config(
+        sheet_tab="Shared",
+        live_sheet_tab="Photographs",
+        test_sheet_tab="Test Sheet",
+    )
+
+    build_sheet_client(config, live=True).read_grid()
+
+    assert fake_service.values_api.get_calls == [("REAL_SHEET_ID", "'Photographs'")]
+
+
 def test_build_sheet_client_refuses_a_placeholder_before_loading_credentials(monkeypatch):
     monkeypatch.setattr(
         "ia_bulk.build_sheets_service", lambda key_path: pytest.fail("loaded credentials for a placeholder ID")

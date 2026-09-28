@@ -395,7 +395,8 @@ AUTH_REMEDY = (
 )
 BAD_REQUEST_REMEDY = (
     "check that sheet_id names a native Google Sheet (not an uploaded Excel file) and that "
-    "sheet_tab names its tab exactly as the Sheet shows it (case-sensitive), in the "
+    "the metadata tab name - sheet_tab, or its live_sheet_tab/test_sheet_tab override for "
+    "this mode - matches its tab exactly as the Sheet shows it (case-sensitive), in the "
     "project's registry entry"
 )
 SHEET_REFUSED_REMEDY = (

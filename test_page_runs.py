@@ -122,6 +122,61 @@ def test_read_progress_and_current_no_jsonl_is_zero_none_none(tmp_path):
     assert page_runs.read_progress_and_current(page_runs.find_jsonl(tmp_path)) == (0, None, None)
 
 
+# --- advance_progress (incremental cursor for the SSE poll) -----------------
+
+
+def test_advance_progress_matches_the_one_shot_read(tmp_path):
+    # The incremental cursor must land on exactly read_progress_and_current's
+    # result for the same log -- it just amortizes the parse across polls.
+    _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"identifier": "a", "status": "success"},
+        {"record": "item_start", "identifier": "b", "file": "photos/b.jpg", "index": 2},
+    ])
+    jsonl = page_runs.find_jsonl(tmp_path)
+    cursor = page_runs.advance_progress(jsonl, page_runs.ProgressCursor())
+    assert (cursor.done, cursor.planned, cursor.current()) == page_runs.read_progress_and_current(jsonl)
+
+
+def test_advance_progress_only_reads_bytes_appended_since_last_call(tmp_path):
+    # A second call over an appended log parses just the new lines, and the
+    # in-flight item resolves to None once its result record lands.
+    jsonl = _write_jsonl(tmp_path, [
+        {"record": "run_header", "planned": 3},
+        {"record": "item_start", "identifier": "b", "file": "photos/b.jpg", "index": 1},
+    ])
+    cursor = page_runs.advance_progress(jsonl, page_runs.ProgressCursor())
+    first_offset = cursor.offset
+    assert (cursor.done, cursor.planned) == (0, 3)
+    assert cursor.current() == page_runs.CurrentItem(index=1, file="photos/b.jpg")
+
+    with open(jsonl, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"identifier": "b", "status": "success"}) + "\n")
+    page_runs.advance_progress(jsonl, cursor)
+    assert cursor.offset > first_offset
+    assert cursor.done == 1 and cursor.current() is None
+
+
+def test_advance_progress_leaves_a_trailing_partial_line_unconsumed(tmp_path):
+    # A half-written final line (no trailing newline) is not counted until it
+    # is complete -- offset stops before it, and the next call picks it up.
+    jsonl = tmp_path / "upload-20260925T000000Z.jsonl"
+    jsonl.write_text(json.dumps({"identifier": "a", "status": "success"}) + "\n{\"identifier\": \"b\"",
+                     encoding="utf-8")
+    cursor = page_runs.advance_progress(jsonl, page_runs.ProgressCursor())
+    assert cursor.done == 1  # only the complete first line
+
+    with open(jsonl, "a", encoding="utf-8") as handle:
+        handle.write(", \"status\": \"success\"}\n")
+    page_runs.advance_progress(jsonl, cursor)
+    assert cursor.done == 2
+
+
+def test_advance_progress_none_jsonl_leaves_cursor_untouched():
+    cursor = page_runs.advance_progress(None, page_runs.ProgressCursor())
+    assert (cursor.offset, cursor.done, cursor.planned, cursor.current()) == (0, 0, None, None)
+
+
 def test_item_start_marker_is_not_counted_as_done(tmp_path):
     # The in-flight marker carries a "record" key so read_progress's per-item
     # (record-less) count never mistakes it for a completed item.

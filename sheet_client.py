@@ -100,9 +100,10 @@ class SheetClient:
         - The tab exists and starts with something else: refused. A tab name
           mistyped as some other real tab - an archived copy of the metadata,
           a donor's notes - would otherwise have every run quietly append
-          rows underneath content nobody meant to touch. Only `sheet_tab`
-          itself is caught in configuration; every other tab in the
-          spreadsheet is not, and this is the check that covers them.
+          rows underneath content nobody meant to touch. Only the configured
+          metadata tabs (`sheet_tab` and any per-document override) are caught
+          in configuration; every other tab in the spreadsheet is not, and
+          this is the check that covers them.
 
         The tab list is read rather than creating and catching an
         "already exists" error, because every run calls this and the common

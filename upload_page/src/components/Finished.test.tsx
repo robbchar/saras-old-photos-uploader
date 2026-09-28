@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import type { Ending, Summary } from "../api/schemas";
+import type { Ending, Summary, ValidateRow } from "../api/schemas";
 import { Finished } from "./Finished";
 
 afterEach(cleanup);
@@ -91,6 +91,28 @@ describe("Finished", () => {
     render(<Finished ending={ending} />);
     expect(screen.getByText("lcps-photosexample-00007")).toBeInTheDocument();
     expect(screen.getByText("HTTP 500 Internal Server Error")).toBeInTheDocument();
+  });
+
+  it("shows the just-run theme's row breakdown (uploaded / needs fixing / not catalogued)", () => {
+    const ending: Ending = { kind: "completed", summary: { ...BASE_SUMMARY, succeeded: 1 } };
+    const rows: ValidateRow[] = [
+      { row: 3, state: "done", verdict: "ready", identifier: "lcps-photosexample-00001", file: "SOP CD 1/photo6.jpg", errors: [], missing_fields: [] },
+      { row: 4, state: "unassigned", verdict: "invalid", identifier: "", file: "", errors: ["no file found"], missing_fields: [] },
+      { row: 5, state: "unassigned", verdict: "not_ready", identifier: "", file: "b.jpg", errors: [], missing_fields: ["title"] },
+    ];
+    render(<Finished ending={ending} themeRows={rows} />);
+    expect(screen.getByText("Uploaded (1)")).toBeInTheDocument();
+    expect(screen.getByText("SOP CD 1/photo6.jpg")).toBeInTheDocument();
+    expect(screen.getByText("row 4: no file found")).toBeInTheDocument();
+    expect(screen.getByText("row 5: needs title")).toBeInTheDocument();
+  });
+
+  it("omits the row breakdown when no rows are provided", () => {
+    const ending: Ending = { kind: "completed", summary: BASE_SUMMARY };
+    render(<Finished ending={ending} />);
+    expect(screen.queryByText(/Uploaded \(/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Needs fixing")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not yet catalogued")).not.toBeInTheDocument();
   });
 
   it("renders every failure even when identifiers are blank and duplicate", () => {

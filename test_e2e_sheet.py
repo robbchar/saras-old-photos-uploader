@@ -55,6 +55,18 @@ def test_guard_returns_the_test_sheet_when_nothing_live_matches(tmp_path):
     )
 
 
+def test_guard_uses_the_test_sheet_tab_override_for_the_data_tab(tmp_path):
+    """The rehearsal only ever writes the test document, so a test_sheet_tab
+    override names the tab it resets - the shared sheet_tab is the fallback."""
+    e2e_path, live_path = write_registries(
+        tmp_path,
+        e2e_block(test_sheet_tab="Rehearsal Data"),
+        {"photos": {"sheet_id": "real-sheet-id", "test_sheet_id": TEST_SHEET_ID}},
+    )
+
+    assert check_reset_allowed(e2e_path, live_path).data_tab == "Rehearsal Data"
+
+
 def test_guard_allows_sharing_a_live_projects_test_sheet(tmp_path):
     e2e_path, live_path = write_registries(
         tmp_path, e2e_block(), {"photos": {"sheet_id": "REPLACE_WITH_REAL_SHEET_ID", "test_sheet_id": TEST_SHEET_ID}}

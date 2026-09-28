@@ -16,7 +16,7 @@ import {
   type OutputHandlers,
 } from "./api/client";
 import type { AppState, TerminalRunHolder } from "./state/types";
-import type { ValidateDoc } from "./api/schemas";
+import type { ValidateDoc, ValidateRow } from "./api/schemas";
 import { reducer } from "./state/reducer";
 import { Header } from "./components/Header";
 import { ThemePicker } from "./components/ThemePicker";
@@ -107,6 +107,24 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
+/** Returns `themes` with the batch matching `preview` updated to that preview's
+ * fresh per-batch counts, so the persistent dropdown stays in step with a
+ * re-check (which otherwise leaves the once-fetched all-mode themes doc stale).
+ * A per-batch validate doc's top-level ready_to_upload/counts are scoped to that
+ * batch (see ia_bulk.validate_json), matching an all-mode batches[] entry.
+ * Returns the same reference when nothing matches, to skip a needless render. */
+function withBatchFromPreview(themes: ValidateDoc, preview: ValidateDoc): ValidateDoc {
+  if (preview.batch === null || themes.batches === null) return themes;
+  const batchValue = preview.batch;
+  let matched = false;
+  const batches = themes.batches.map((batch) => {
+    if (batch.value !== batchValue) return batch;
+    matched = true;
+    return { ...batch, ready_to_upload: preview.ready_to_upload, counts: preview.counts };
+  });
+  return matched ? { ...themes, batches } : themes;
+}
+
 /** The persistent theme picker shows in every state except the ones with
  * nothing to pick from: still booting, another run holds the lock, or a
  * terminal error. */
@@ -183,8 +201,18 @@ export default function App() {
   const [themes, setThemes] = useState<ValidateDoc | null>(null);
   const eventSourceRef = useRef<ReturnType<typeof openOutput> | null>(null);
   const rememberedBundleStampRef = useRef<string | null>(null);
+  // Total lines ever appended this session. `lines[0]`'s absolute sequence
+  // number is this minus the buffer length, which RunningOutput uses as a
+  // stable React key base so a capped buffer dropping lines off the front does
+  // not force every remaining line to re-render.
+  const linesSeenRef = useRef(0);
   // True while startRun is in flight - see handleConfirmStart.
   const [starting, setStarting] = useState(false);
+  // The theme currently uploading, remembered so the Finished screen can fetch
+  // that theme's rows after the run and show the same per-row breakdown the
+  // Preview does. `finishedThemeRows` holds those fetched rows (null = omit).
+  const runningBatchRef = useRef<string | null>(null);
+  const [finishedThemeRows, setFinishedThemeRows] = useState<ValidateRow[] | null>(null);
 
   // Mount only - fetch status once and route to the matching screen. Choose-
   // another does NOT come back through here: it goes straight from
@@ -235,15 +263,45 @@ export default function App() {
     if (state.kind === "finished" && wasRunning) setThemes(null);
   }, [state.kind]);
 
+  // Remember which theme is uploading, and once its run finishes fetch that
+  // theme's rows so the Finished screen can show the same per-row breakdown
+  // the Preview does (the run recorded its new uploads to the Sheet).
+  useEffect(() => {
+    if (state.kind === "running" || state.kind === "stopping") {
+      runningBatchRef.current = state.batch;
+      return;
+    }
+    if (state.kind !== "finished") {
+      setFinishedThemeRows(null);
+      return;
+    }
+    const batch = runningBatchRef.current;
+    if (batch === null) return;
+    let cancelled = false;
+    getPreview(batch)
+      .then((preview) => {
+        if (!cancelled) setFinishedThemeRows(preview.rows ?? []);
+      })
+      .catch(() => {
+        // A refused re-fetch just means no breakdown here; the summary still shows.
+        if (!cancelled) setFinishedThemeRows(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
   // Covers both a theme selection and Re-check - both land on "checking".
   useEffect(() => {
     if (state.kind !== "checking") return;
     let cancelled = false;
     getPreview(state.batch)
       .then((preview) => {
-        if (!cancelled) {
-          dispatch({ type: "preview/loaded", preview, checkedAt: new Date().toISOString() });
-        }
+        if (cancelled) return;
+        dispatch({ type: "preview/loaded", preview, checkedAt: new Date().toISOString() });
+        // Keep the persistent dropdown in step with this check: re-checking a
+        // theme (e.g. after fixing a row) changes its ready/not-ready counts.
+        setThemes((current) => (current ? withBatchFromPreview(current, preview) : current));
       })
       .catch((error: unknown) => {
         if (!cancelled) dispatch({ type: "preview/failed", message: describeError(error) });
@@ -317,6 +375,7 @@ export default function App() {
     const handlers: OutputHandlers = {
       onLine: (text, byteOffset) => {
         writeStoredOffset(startedAt, byteOffset);
+        linesSeenRef.current += 1;
         setLines((previous) => appendLineCapped(previous, text));
       },
       onProgress: (progress) => dispatch({ type: "sse/progress", ...progress }),
@@ -410,6 +469,7 @@ export default function App() {
         return (
           <RunningOutput
             lines={lines}
+            keyBase={linesSeenRef.current - lines.length}
             done={state.done}
             planned={state.planned}
             current={state.current}
@@ -419,7 +479,7 @@ export default function App() {
         );
 
       case "finished":
-        return <Finished ending={state.ending} />;
+        return <Finished ending={state.ending} themeRows={finishedThemeRows} />;
 
       case "terminal-run":
         return <TerminalRunView holder={state.holder} />;

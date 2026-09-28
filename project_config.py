@@ -47,6 +47,15 @@ class PlaceholderSheetId(ConfigError):
     pass
 
 
+def resolve_sheet_tab_override(override: str | None, default: str) -> str:
+    """The per-document metadata tab: the override when it names a tab, else
+    the shared default. Blank is unset - the same rule the log tabs follow.
+
+    The single home for this fallback, so ProjectConfig.sheet_tab_for and
+    e2e_sheet.check_reset_allowed cannot drift apart."""
+    return str(override or "").strip() or default
+
+
 def _log_tabs(block: dict, project_id: str) -> dict[str, str | None]:
     """The two optional log-tab names, normalized to None when unset.
 
@@ -60,14 +69,21 @@ def _log_tabs(block: dict, project_id: str) -> dict[str, str | None]:
     onto the canonical columns, one-directionally and permanently, and the
     first anyone knew of it would be a Sheet with run summaries interleaved
     among the photographs."""
+    # value -> the registry key that named it, so a collision names the exact
+    # key to edit. setdefault keeps the first, so sheet_tab wins a shared name.
+    metadata_tabs: dict[str, str] = {}
+    for key in ("sheet_tab", "live_sheet_tab", "test_sheet_tab"):
+        tab = str(block.get(key) or "").strip()
+        if tab:
+            metadata_tabs.setdefault(tab, key)
     tabs: dict[str, str | None] = {}
     for key in ("upload_log_tab", "sync_log_tab"):
         value = str(block.get(key) or "").strip()
-        if value and value == str(block.get("sheet_tab") or "").strip():
+        if value and value in metadata_tabs:
             raise ConfigError(
                 f"project '{project_id}': {key} is '{value}', which is the metadata tab "
-                "(sheet_tab). A log tab must be its own tab - run summaries appended onto "
-                "the metadata columns cannot be undone"
+                f"({metadata_tabs[value]}). A log tab must be its own tab - run summaries appended "
+                "onto the metadata columns cannot be undone"
             )
         tabs[key] = value or None
     return tabs
@@ -98,9 +114,30 @@ class ProjectConfig:
     # "The Sheet's log tabs are telemetry, never an input".
     upload_log_tab: str | None = None
     sync_log_tab: str | None = None
+    # Per-document overrides for the metadata tab name. The live and test
+    # sheet documents may name that tab differently; when an override is
+    # unset, sheet_tab serves as the shared default. See docs/decisions/
+    # SHEET-PROTOCOL.md, "The metadata tab may be named per document".
+    live_sheet_tab: str | None = None
+    test_sheet_tab: str | None = None
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
+
+    def sheet_tab_for(self, live: bool) -> str:
+        """The metadata tab name for the live or test document, falling back to
+        the shared sheet_tab when that document has no override - parallel to
+        sheet_id_for selecting the document itself."""
+        override = self.live_sheet_tab if live else self.test_sheet_tab
+        return resolve_sheet_tab_override(override, self.sheet_tab)
+
+    def sheet_tab_key_for(self, live: bool) -> str:
+        """The registry key that supplied sheet_tab_for(live)'s value, so an
+        error can name the exact key to edit rather than always 'sheet_tab'."""
+        override = self.live_sheet_tab if live else self.test_sheet_tab
+        if str(override or "").strip():
+            return "live_sheet_tab" if live else "test_sheet_tab"
+        return "sheet_tab"
 
     def sheet_id_is_placeholder(self, live: bool) -> bool:
         return is_placeholder_sheet_id(self.sheet_id_for(live))
@@ -201,6 +238,16 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
 
     # Validate all values are strings before processing
     for key in REQUIRED_KEYS:
+        value = block.get(key)
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(
+                f"project '{project_id}': {key} must be a string, "
+                f"got {type(value).__name__!r}"
+            )
+
+    # Optional, so absent from REQUIRED_KEYS' check above; validate the same way
+    # rather than coercing a non-string into a garbage tab name via str() below.
+    for key in ("live_sheet_tab", "test_sheet_tab"):
         value = block.get(key)
         if value is not None and not isinstance(value, str):
             raise ConfigError(
@@ -321,6 +368,8 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
         sheet_id=block["sheet_id"].strip(),
         test_sheet_id=block["test_sheet_id"].strip(),
         sheet_tab=block["sheet_tab"].strip(),
+        live_sheet_tab=(str(block.get("live_sheet_tab") or "").strip() or None),
+        test_sheet_tab=(str(block.get("test_sheet_tab") or "").strip() or None),
         files_dir=block["files_dir"].strip(),
         file_template=block["file_template"].strip(),
         required_for_upload=tuple(required_for_upload),
