@@ -14,7 +14,7 @@ export function UploadedList({ rows }: UploadedListProps) {
   const uploaded = rows.filter((row) => row.state === "done");
   return (
     <details className="mt-4">
-      <summary className="cursor-pointer text-sm font-semibold text-muted">
+      <summary className="caps cursor-pointer text-xs text-muted">
         {`Uploaded (${uploaded.length})`}
       </summary>
       {uploaded.length === 0 ? (
@@ -24,7 +24,7 @@ export function UploadedList({ rows }: UploadedListProps) {
           {uploaded.map((row) => (
             <li
               key={row.row}
-              className="rounded border border-border px-2 py-1 font-mono text-sm text-text"
+              className="rounded border border-border-strong bg-raised px-2 py-1 font-mono text-sm text-text"
             >
               {row.file || row.identifier || `row ${row.row}`}
             </li>

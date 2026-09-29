@@ -9,7 +9,7 @@ import { Header } from "./Header";
 afterEach(cleanup);
 
 // The exact banner wording is part of the contract (task brief) - a
-// screen reader user relies on this text alone, since the amber color is
+// screen reader user relies on this text alone, since the banner color is
 // not itself a signal (color-blind users, printouts, etc).
 const TEST_MODE_TEXT =
   "TEST MODE — uploads go to test_collection and expire in about 30 days";
@@ -38,5 +38,17 @@ describe("Header", () => {
       </Header>,
     );
     expect(screen.getByRole("button", { name: "theme picker slot" })).toBeInTheDocument();
+  });
+
+  it("renders the toolbar (the color-scheme toggle) inside the header", () => {
+    render(
+      <Header
+        project="astoriaphotos"
+        collection="lcps_astoria"
+        live
+        toolbar={<button type="button">toolbar slot</button>}
+      />,
+    );
+    expect(screen.getByRole("banner")).toContainElement(screen.getByRole("button", { name: "toolbar slot" }));
   });
 });

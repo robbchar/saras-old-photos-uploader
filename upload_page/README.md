@@ -64,11 +64,19 @@ never built — see
 
 ## Design tokens
 
-Every color, radius and font lives in `src/index.css`: CSS custom properties
-on `:root` for light mode, redefined inside a `prefers-color-scheme: dark`
-block for dark mode, then re-exposed to Tailwind's utilities through a
+Every color and font lives in `src/index.css`: CSS custom properties on
+`:root` for light mode, redefined under `:root[data-color-scheme="dark"]`
+for dark mode, then re-exposed to Tailwind's utilities through a
 `@theme inline` block. Change a token in that one pair of places — never a
-raw color value inside a component — so light and dark stay in sync.
+raw color value inside a component — so light and dark stay in sync. The
+same file defines the shared `caps`, `btn-primary` and `btn-secondary`
+utilities used for buttons and section labels.
+
+Which scheme applies is decided by `src/colorScheme/` (Auto follows the OS;
+Light or Dark is saved in `localStorage`) and, before first paint, by the
+inline script in `index.html` — see
+[`../docs/decisions/UPLOAD-PAGE.md`, "The color scheme follows the computer until someone picks one"](../docs/decisions/UPLOAD-PAGE.md#the-color-scheme-follows-the-computer-until-someone-picks-one).
+The display font (Josefin Sans) is bundled from `@fontsource/josefin-sans`.
 
 ## Tests and type-checking
 

@@ -67,7 +67,7 @@ export function RowBreakdown({ rows }: RowBreakdownProps) {
       <UploadedList rows={rows} />
 
       <div className="mt-4">
-        <h3 className="text-sm font-semibold text-muted">Needs fixing</h3>
+        <h3 className="caps text-xs text-muted">Needs fixing</h3>
         {needsFixing.length === 0 ? (
           <p className="text-muted">None</p>
         ) : (
@@ -85,7 +85,7 @@ export function RowBreakdown({ rows }: RowBreakdownProps) {
       </div>
 
       <div className="mt-4">
-        <h3 className="text-sm font-semibold text-muted">Not yet catalogued</h3>
+        <h3 className="caps text-xs text-muted">Not yet catalogued</h3>
         {notCatalogued.length === 0 ? (
           <p className="text-muted">None</p>
         ) : (
@@ -93,7 +93,7 @@ export function RowBreakdown({ rows }: RowBreakdownProps) {
             {notCatalogued.map((range) => (
               <li
                 key={`${range.start}-${range.end}`}
-                className="rounded border border-border px-2 py-1 font-mono text-sm text-text"
+                className="rounded border border-border-strong bg-raised px-2 py-1 font-mono text-sm text-text"
               >
                 {formatRange(range)}
               </li>

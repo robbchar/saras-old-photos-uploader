@@ -76,7 +76,7 @@ export function ThemePicker({ batches, value, disabled, loading, onSelect }: The
           <Select.Content
             position="popper"
             sideOffset={4}
-            className="min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded border border-border bg-raised text-text shadow-none"
+            className="min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded border border-border bg-raised text-text shadow-none outline-none"
           >
             <Select.Viewport className="p-1">
               {batches.map((batch) => {

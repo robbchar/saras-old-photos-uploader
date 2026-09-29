@@ -25,6 +25,8 @@ import { StartDialog } from "./components/StartDialog";
 import { RunningOutput } from "./components/RunningOutput";
 import { Finished } from "./components/Finished";
 import { LiveRegion } from "./components/LiveRegion";
+import { ColorSchemeToggle } from "./components/ColorSchemeToggle";
+import { useColorScheme } from "./colorScheme/useColorScheme";
 
 /** How often the page checks whether a newer build has been deployed. A
  * fresh `bundle_stamp` means the server was restarted with new code - the
@@ -193,6 +195,7 @@ function TerminalRunView({ holder }: { holder: TerminalRunHolder }) {
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, { kind: "loading" });
+  const colorScheme = useColorScheme();
   const [identity, setIdentity] = useState<PageIdentity | null>(null);
   const [lines, setLines] = useState<string[]>([]);
   // The theme list for the persistent picker. App-level (not in the reducer)
@@ -502,7 +505,12 @@ export default function App() {
     <main className="min-h-screen bg-bg p-4">
       <div className="mx-auto w-full max-w-[1000px]">
         {identity && (
-          <Header project={identity.project} collection={identity.collection} live={identity.live}>
+          <Header
+            project={identity.project}
+            collection={identity.collection}
+            live={identity.live}
+            toolbar={<ColorSchemeToggle preference={colorScheme.preference} onChange={colorScheme.setPreference} />}
+          >
             {themePickerVisible(state) && (
               <ThemePicker
                 batches={themes?.batches ?? []}

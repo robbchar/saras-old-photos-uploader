@@ -132,6 +132,7 @@ decision gets made.
 - [The server's request guard](decisions/UPLOAD-PAGE.md#the-servers-request-guard)
 - [The run-state model](decisions/UPLOAD-PAGE.md#the-run-state-model)
 - [The page agent is always-on, and one of two mutually exclusive models](decisions/UPLOAD-PAGE.md#the-page-agent-is-always-on-and-one-of-two-mutually-exclusive-models)
+- [The color scheme follows the computer until someone picks one](decisions/UPLOAD-PAGE.md#the-color-scheme-follows-the-computer-until-someone-picks-one)
 
 ## Still open
 
