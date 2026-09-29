@@ -4056,17 +4056,35 @@ def print_dry_run(
     columns: SheetColumns,
     write_back: bool,
     uploaded_at: str,
+    *,
     verbose: bool = False,
 ) -> None:
-    """Previews an upload. By default it reports counts - a line per item
-    buries the summary on a 500-item run (issue #81); -v restores the full
-    per-item and per-cell listing."""
+    """Previews an upload as a summary, which a line per item would bury on a
+    500-item run; verbose adds every item and cell under its count."""
     if not targets:
         print("nothing to upload")
         return
 
+    minted = [target for target in targets if target.newly_minted]
+    existing = len(targets) - len(minted)
+    # Raw counts beside a _pluralize line use its {:,} format - see _pluralize.
+    breakdown = []
+    if minted:
+        # Identifiers are permanent once uploaded, so the summary names these.
+        first = min(target.identifier for target in minted)
+        last = max(target.identifier for target in minted)
+        span = first if first == last else f"{first} to {last}"
+        breakdown.append(f"{len(minted):,} would mint a new identifier ({span})")
+    if existing:
+        breakdown.append(f"{existing:,} under an existing one")
+    print(f"would upload {_pluralize(len(targets), 'item')}: {', '.join(breakdown)}")
+    sample = targets[0]
+    if sample.uploaded_as != sample.identifier:
+        print(
+            f"test run: each goes up under a stamped name, new every run, e.g. '{sample.uploaded_as}'"
+        )
+
     if verbose:
-        print(f"would upload {_pluralize(len(targets), 'item')}:")
         for target in targets:
             if target.newly_minted:
                 print(
@@ -4080,38 +4098,21 @@ def print_dry_run(
                 )
         print()
 
-        if not write_back:
-            print(
-                "would write nothing to the Sheet - neither --live nor --write-identifier was passed"
-            )
-            return
-
-        print("would write these cells:")
-        for update in reserve_updates(targets, columns) + confirm_updates(targets, columns, uploaded_at):
-            print(f"  {update.a1} = {update.value}")
-        return
-
-    # Default: counts, not a line per item.
-    minted = sum(1 for target in targets if target.newly_minted)
-    existing = len(targets) - minted
-    # Raw counts beside a _pluralize line use its {:,} format - see _pluralize.
-    breakdown = []
-    if minted:
-        breakdown.append(f"{minted:,} would mint a new identifier")
-    if existing:
-        breakdown.append(f"{existing:,} under an existing one")
-    print(f"would upload {_pluralize(len(targets), 'item')}: {', '.join(breakdown)}")
-
     if not write_back:
         print(
             "would write nothing to the Sheet - neither --live nor --write-identifier was passed"
         )
-        print("(re-run with -v to list every item)")
+        if not verbose:
+            print("(re-run with -v to list every item)")
         return
 
     cells = reserve_updates(targets, columns) + confirm_updates(targets, columns, uploaded_at)
     print(f"would write {_pluralize(len(cells), 'cell')} across {_pluralize(len(targets), 'item')}")
-    print("(re-run with -v to list every item and cell)")
+    if verbose:
+        for update in cells:
+            print(f"  {update.a1} = {update.value}")
+    else:
+        print("(re-run with -v to list every item and cell)")
 
 
 def cmd_upload(args) -> int:
@@ -4357,7 +4358,7 @@ def upload_from_sheet(args) -> int:
     if dry_run:
         print_dry_run(
             targets, columns, write_back, upload_timestamp(),
-            bool(getattr(args, "verbose", False)),
+            verbose=bool(getattr(args, "verbose", False)),
         )
         return 1 if blocked else 0
 
@@ -5475,7 +5476,14 @@ def cmd_reconcile_files(args) -> int:
     log_path = None if dry_run else open_log(args.log_dir, "reconcile-files")
     pending: list[PendingCorrection] = []
     accepted = stopped = 0
-    dry_proposed = dry_no_candidate = dry_ambiguous = 0
+    # Rows behind each count in the dry run's closing summary.
+    proposed_rows: list[int] = []
+    repeat_proposal_rows: list[int] = []
+    no_candidate_rows: list[int] = []
+    ambiguous_rows: list[int] = []
+    # Dry run: the first row each file was proposed for. Only an accept claims a
+    # file, so a dry run can propose one file for two rows; a real run cannot.
+    first_proposed_for: dict[str, int] = {}
 
     def flush() -> bool:
         """Write what has been accepted, dropping anything whose row moved.
@@ -5543,8 +5551,7 @@ def cmd_reconcile_files(args) -> int:
             proposal = propose_match(wanted, candidates)
             reason = proposal.reason if proposal else ""
         except AmbiguousMatch as exc:
-            if dry_run:
-                dry_ambiguous += 1
+            ambiguous_rows.append(row_number)
             if verbose or not dry_run:
                 print(f"row {row_number}  '{wanted}'  matches {len(exc.matches)} files - "
                       f"leaving it alone: {', '.join(exc.matches)}")
@@ -5555,14 +5562,19 @@ def cmd_reconcile_files(args) -> int:
 
         if dry_run:
             if proposal:
-                dry_proposed += 1
+                proposed_rows.append(row_number)
+                detail = f"row {row_number}  '{wanted}' -> '{proposal.filename}'  ({reason})"
+                first_row = first_proposed_for.setdefault(
+                    claim_key(f"{folder}/{proposal.filename}"), row_number
+                )
+                if first_row != row_number:
+                    repeat_proposal_rows.append(row_number)
+                    detail += f"  - also proposed for row {first_row}"
             else:
-                dry_no_candidate += 1
+                no_candidate_rows.append(row_number)
+                detail = f"row {row_number}  '{wanted}'  no candidate in '{folder}'"
             if verbose:
-                if proposal:
-                    print(f"row {row_number}  '{wanted}' -> '{proposal.filename}'  ({reason})")
-                else:
-                    print(f"row {row_number}  '{wanted}'  no candidate in '{folder}'")
+                print(detail)
             continue
 
         decision = prompt_for_decision(
@@ -5607,19 +5619,25 @@ def cmd_reconcile_files(args) -> int:
         return 1
 
     if dry_run:
-        # A dry run corrects nothing, so the "N corrected" trailer below would
-        # read "0 corrected" and mislead. Report what the run WOULD do instead;
-        # -v already listed each row above, so it needs no closing count.
-        if not verbose:
+        # Not the "N corrected" trailer below: a dry run corrects nothing.
+        if verbose:
             print()
-            # Raw counts beside a _pluralize line use its {:,} format - see _pluralize.
-            parts = [
-                f"{_pluralize(dry_proposed, 'row')} would be corrected",
-                f"{dry_no_candidate:,} have no candidate",
-            ]
-            if dry_ambiguous:
-                parts.append(f"{dry_ambiguous:,} matched more than one file and were left alone")
-            print("; ".join(parts))
+        proposed = f"{_pluralize(len(proposed_rows), 'row')} with a proposed match"
+        if repeat_proposal_rows:
+            # A subset of the proposed rows, so contained in their clause.
+            proposed += (
+                f" ({len(repeat_proposal_rows):,} of them for a file already proposed for an "
+                f"earlier row: {format_row_numbers(repeat_proposal_rows)})"
+            )
+        summary = [proposed]
+        for rows, what in (
+            (no_candidate_rows, "with no candidate"),
+            (ambiguous_rows, "matching more than one file, which would be left alone"),
+        ):
+            if rows:
+                summary.append(f"{_pluralize(len(rows), 'row')} {what} ({format_row_numbers(rows)})")
+        print("; ".join(summary))
+        if not verbose:
             print("(re-run with -v to list each row)")
         return 0
 
@@ -5862,13 +5880,13 @@ def build_parser() -> argparse.ArgumentParser:
     upload_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Upload nothing and write nothing; print the identifiers that would be minted and the cells that would be written",
+        help="Upload nothing and write nothing; print a summary of what would be minted and written (-v lists every item and cell)",
     )
     upload_parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="With --dry-run, list every item and cell instead of a summary",
+        help="With --dry-run, list every item and cell under the summary",
     )
     upload_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
     upload_parser.add_argument(
@@ -5948,12 +5966,12 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser.add_argument("--project", required=True, help="Project ID from the registry")
     reconcile_parser.add_argument("--registry", default=DEFAULT_REGISTRY, help="Path to the project registry JSON")
     reconcile_parser.add_argument("--live", action="store_true", help="Read and write the project's real Sheet instead of its test Sheet")
-    reconcile_parser.add_argument("--dry-run", action="store_true", help="Print what would be proposed; prompt for nothing and write nothing")
+    reconcile_parser.add_argument("--dry-run", action="store_true", help="Print a summary of what would be proposed (-v lists each row); prompt for nothing and write nothing")
     reconcile_parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="With --dry-run, list every row instead of a summary",
+        help="With --dry-run, list each unresolved row as well as the summary",
     )
     reconcile_parser.add_argument("--log-dir", default="logs", help="Directory to write the timestamped run log to")
 
@@ -6036,6 +6054,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     # With --json, stdout carries only the document.
     start_run_output(args.command, sys.stderr if getattr(args, "json", False) else None)
+    if getattr(args, "verbose", False) and not getattr(args, "dry_run", False):
+        print("-v only changes --dry-run output; this run ignores it", file=sys.stderr)
 
     if args.command == "validate":
         return cmd_validate(args)

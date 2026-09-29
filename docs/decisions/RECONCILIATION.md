@@ -28,9 +28,9 @@ just the newest place that rule applies.
 `cmd_reconcile_files` keeps the same shape one level up. A proposal only
 ever reaches the Sheet after `prompt_for_decision()` returns
 `Decision(action="accept", ...)` — typed by a human at `[y]` or `[e]`.
-`--dry-run` makes the boundary visible: it prints exactly the proposals a
-real run would ask about and writes nothing at all, so "would propose" and
-"did apply" are never the same event even by accident.
+`--dry-run` makes the boundary visible: it counts the proposals a real run
+would ask about (`-v` prints each one) and writes nothing at all, so "would
+propose" and "did apply" are never the same event even by accident.
 
 ## Pass B requires identical digit sequences
 
