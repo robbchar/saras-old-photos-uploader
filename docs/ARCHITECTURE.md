@@ -708,11 +708,13 @@ archive.org confirms". The gap is what that check cannot see. A real
 collection that is the wrong one passes, such as the parent
 `lcpsdigitalcollection` in place of `sarasoldphotos`. So does a collection
 the org account may not add items to. So confirm the value by hand once, in
-version control, before a project's first `--live` run. See `DECISIONS.md`,
-"Technical configuration lives in the registry". (`ia_collection` for this
-project was confirmed by hand against archive.org on 2026-08-22; see
-`DECISIONS.md`, "Still open". A second project's registry entry needs the
-same reading.)
+version control, before a project's first `--live` run. `upload --live
+--dry-run` names the collection in its opening lines without uploading or
+writing anything (without `--live`, every `upload` names `test_collection`).
+See `DECISIONS.md`, "Technical configuration lives in the registry".
+(`ia_collection` for this project was confirmed by hand against archive.org
+on 2026-08-22; see `DECISIONS.md`, "Still open". A second project's registry
+entry needs the same reading.)
 
 `validate` cannot tell whether a well-formed header is *semantically* right:
 a misspelled header ships as a misspelled IA field on every item. The header

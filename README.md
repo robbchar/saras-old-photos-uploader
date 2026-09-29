@@ -623,10 +623,12 @@ tool can tell a right value from a wrong one (see
   [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)). A second project's
   registry entry needs the same one-time check.
 
-`upload --live --dry-run` is the cheapest way to check the second one. It
-asks archive.org about the collection and prints `Internet Archive collection
-'<name>' confirmed on archive.org`, and it uploads and writes nothing. Without
-`--live` it checks nothing, because test mode uploads into `test_collection`.
+`upload --live --dry-run` is the cheapest way to check the second one. Its
+opening lines name the Internet Archive collection the run would upload into.
+It then asks archive.org about that collection and prints `Internet Archive
+collection '<name>' confirmed on archive.org`, and it uploads and writes
+nothing. Without `--live` it names `test_collection` instead and checks
+nothing, because test mode uploads into IA's sandbox.
 
 Every command reads the Sheet live; there is no CSV export step. The
 offline CSV paths were removed on 2026-09-23 — see

@@ -417,9 +417,11 @@ real files in the wrong place under a permanent identifier.
 - [ ] The e2e rehearsal passes on this checkout
       (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
       `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
-      over the real Sheet printed `Internet Archive collection
-      'sarasoldphotos' confirmed on archive.org` and the identifiers and
-      cells you expected.
+      over the real Sheet named collection `sarasoldphotos` in its opening
+      lines and printed `Internet Archive collection 'sarasoldphotos'
+      confirmed on archive.org`, **and** the same command with `-v` plus the
+      `--batch` or `--limit` the real run will use printed the identifiers
+      and cells you expected. Without those, `-v` lists every ready row.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.
