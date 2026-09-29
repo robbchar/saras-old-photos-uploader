@@ -132,7 +132,9 @@ const COMPLETED_ENDING: Ending = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // Reset, not clear: clearing keeps queued *Once values, so a test that
+  // fails before consuming them would feed them to the tests after it.
+  vi.resetAllMocks();
   // The output-offset resume key lives in sessionStorage, which jsdom keeps
   // across tests in the same file - start each test with a clean slate so
   // one test's remembered offset can't leak into the next.
