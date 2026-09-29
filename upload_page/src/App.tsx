@@ -16,7 +16,7 @@ import {
   type OutputHandlers,
 } from "./api/client";
 import type { AppState, TerminalRunHolder } from "./state/types";
-import type { ValidateDoc, ValidateRow } from "./api/schemas";
+import type { Status, ValidateDoc, ValidateRow } from "./api/schemas";
 import { reducer } from "./state/reducer";
 import { Header } from "./components/Header";
 import { ThemePicker } from "./components/ThemePicker";
@@ -26,6 +26,7 @@ import { RunningOutput } from "./components/RunningOutput";
 import { Finished } from "./components/Finished";
 import { LiveRegion } from "./components/LiveRegion";
 import { ColorSchemeToggle } from "./components/ColorSchemeToggle";
+import { AppVersion } from "./components/AppVersion";
 import { useColorScheme } from "./colorScheme/useColorScheme";
 
 /** How often the page checks whether a newer build has been deployed. A
@@ -47,11 +48,7 @@ export function appendLineCapped(previous: string[], line: string): string[] {
   return previous.length < MAX_BUFFERED_LINES ? [...previous, line] : [...previous.slice(1), line];
 }
 
-interface PageIdentity {
-  project: string;
-  collection: string;
-  live: boolean;
-}
+type PageIdentity = Pick<Status, "project" | "collection" | "version" | "live">;
 
 // Last byte offset shown for a run, keyed by the run's `started_at`, so a
 // reload can resume the output stream instead of replaying it from the start.
@@ -227,7 +224,7 @@ export default function App() {
     getStatus()
       .then((status) => {
         if (cancelled) return;
-        setIdentity({ project: status.project, collection: status.collection, live: status.live });
+        setIdentity({ project: status.project, collection: status.collection, version: status.version, live: status.live });
         dispatch({ type: "status/received", run: status.run });
       })
       .catch((error: unknown) => {
@@ -502,7 +499,7 @@ export default function App() {
   }
 
   return (
-    <main className="min-h-screen bg-bg p-4">
+    <main className="min-h-screen bg-bg p-4 pb-10">
       <div className="mx-auto w-full max-w-[1000px]">
         {identity && (
           <Header
@@ -525,6 +522,7 @@ export default function App() {
         <div className="mt-4">{renderBody()}</div>
         <LiveRegion message={announcementFor(state, starting)} />
       </div>
+      {identity && <AppVersion version={identity.version} />}
     </main>
   );
 }

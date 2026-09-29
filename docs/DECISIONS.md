@@ -25,6 +25,7 @@ limit rather than missed.
 - [Technical configuration lives in the registry, not the command line](decisions/FOUNDATIONS.md#technical-configuration-lives-in-the-registry-not-the-command-line)
 - [A live upload goes only into a collection archive.org confirms](decisions/FOUNDATIONS.md#a-live-upload-goes-only-into-a-collection-archiveorg-confirms)
 - [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person)
+- [One version for the whole tool, kept on the Python side](decisions/FOUNDATIONS.md#one-version-for-the-whole-tool-kept-on-the-python-side)
 - [Accepted, not overlooked](decisions/FOUNDATIONS.md#accepted-not-overlooked)
 
 ## [Identifiers](decisions/IDENTIFIERS.md)

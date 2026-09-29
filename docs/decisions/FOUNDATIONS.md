@@ -162,6 +162,36 @@ here.
 An API key stays ruled out: it is read-only and reaches only publicly shared
 Sheets.
 
+## One version for the whole tool, kept on the Python side
+
+*Decided 2026-09-29.* The version is `APP_VERSION` in `app_version.py`,
+starting at `1.0.0` because the tool was already running live. The page gets
+it from `GET /api/status`, not from its bundle.
+
+Keeping it in `upload_page/package.json` was ruled out. `package.json` is a
+build-stamp input, so every bump would force a rebuild and a committed `dist/`,
+even for a Python-only fix. It would also version only the page when the page,
+server and CLI ship as one checkout. `package.json` has no `version` field, so
+there is only one version to read.
+
+The commit SHA is already on `GET /api/health`, and `doctor` shows it next to
+the version, so a version can be told apart from later untagged commits on
+`main`. The upload page shows the version alone, pinned to its bottom-right
+corner.
+
+`setup` records the version it ran against in `logs/installed-version` and
+prints `updating from X to Y` when the next run's version differs
+(`downgrading from X to Y` when it went back, such as a checkout of an older
+tag after a bad release). An upgrade
+is `git pull && ./install.sh`, so by the time `setup` runs the old checkout is
+gone; this marker is the only record of what came before. The line fires only
+on a version change, never on a commit change alone: every behavior change
+bumps the version in its own PR, so a commit-only difference is noise. The
+marker is written on every run that gets past the refusals and reads the
+registry, whatever the checks say, because the pull has already swapped the
+code. It is not written when the registry can't be read: the operator fixes
+the registry and re-runs `setup`, and that run still has to name the upgrade.
+
 ## Accepted, not overlooked
 
 The final build review named these and chose to leave them. They are recorded

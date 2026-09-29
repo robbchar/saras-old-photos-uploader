@@ -557,7 +557,8 @@ reads the project's own `files_dir`, and the e2e registry's is the in-repo
 dependencies, the Google key and the `ia` credentials and their permissions,
 the spreadsheet id, whether the Sheet answers, its sync columns, the files
 drive, and the LaunchAgent — one `PASS`/`FAIL`/`UNKNOWN` line each, and
-changes nothing. `setup` first fixes what it can on its own (the key file's
+changes nothing. The report opens with the tool's version and commit (see
+[Versioning](#versioning)). `setup` first fixes what it can on its own (the key file's
 permissions), then prints the same report; `./install.sh` ends by running it.
 Both check the test Sheet unless `--live` is passed, and `--offline` skips
 the checks that need the network.
@@ -638,6 +639,31 @@ nothing, because test mode uploads into IA's sandbox.
 Every command reads the Sheet live; there is no CSV export step. The
 offline CSV paths were removed on 2026-09-23 — see
 [`docs/DECISIONS.md`](docs/decisions/SHEET-PROTOCOL.md#the-sheet-is-read-live-the-csv-becomes-the-offline-path).
+
+## Versioning
+
+The tool has one semantic version, `APP_VERSION` in
+[`app_version.py`](app_version.py), covering the CLI, the server and the
+upload page together. It shows in three places:
+
+- the upload page's bottom-right corner (`v1.0.0`, from `GET /api/status`)
+- `python ia_bulk.py --version`
+- the top of `doctor`'s and `setup`'s output, with the checkout's short
+  commit; after a `git pull` that changed the version, `setup` adds
+  `updating from X to Y` (or `downgrading from X to Y`), read from the `logs/installed-version` the last
+  `setup` wrote
+
+Bump it in the same PR as the change it describes:
+
+- **major** — the identifier scheme or the Sheet's columns change, or an
+  operator has to do something differently
+- **minor** — a new command, flag or page feature
+- **patch** — a fix
+
+Tag the merge commit `vX.Y.Z` once it is on `main`. Bumping the version never
+needs a page rebuild: the page reads it from the server, not from its bundle.
+`upload_page/package.json` deliberately has no `version`. See
+[`docs/decisions/FOUNDATIONS.md`](docs/decisions/FOUNDATIONS.md#one-version-for-the-whole-tool-kept-on-the-python-side).
 
 ## Tests, linting and type checking
 

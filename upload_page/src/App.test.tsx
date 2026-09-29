@@ -46,6 +46,7 @@ const STATUS_IDLE: Status = {
   live: false,
   project: "astoriaphotos",
   collection: "sarasoldphotos",
+  version: "1.0.0",
   run: { kind: "idle" },
 };
 
@@ -56,6 +57,7 @@ const STATUS_RUNNING_MID_UPLOAD: Status = {
   live: false,
   project: "astoriaphotos",
   collection: "sarasoldphotos",
+  version: "1.0.0",
   run: {
     kind: "page_run_active",
     batch: "Fishing",
@@ -196,6 +198,12 @@ describe("App", () => {
     expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
     expect(mockGetStatus).toHaveBeenCalledTimes(1);
     expect(mockGetThemes).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the server-reported app version in the page corner, not the header", async () => {
+    render(<App />);
+    const version = await screen.findByText("v1.0.0");
+    expect(screen.getByRole("banner")).not.toContainElement(version);
   });
 
   it("selecting a theme fetches and shows its preview", async () => {
@@ -474,6 +482,7 @@ describe("App", () => {
       live: false,
       project: "astoriaphotos",
       collection: "sarasoldphotos",
+      version: "1.0.0",
       run: { kind: "finished", ending: COMPLETED_ENDING, page_run: null },
     });
 
@@ -491,6 +500,7 @@ describe("App", () => {
       live: false,
       project: "astoriaphotos",
       collection: "sarasoldphotos",
+      version: "1.0.0",
       run: { kind: "finished", ending: COMPLETED_ENDING, page_run: null },
     });
 
