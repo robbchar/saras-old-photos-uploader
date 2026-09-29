@@ -1,29 +1,29 @@
 """One e2e rehearsal at a time: a lock tab on the Test Sheet (test_e2e_rehearsal.py).
 
-A run owns the lock through the sheetId of the tab it created. Every write after
-that targets that id, so a lock another run has since taken over is never touched.
+Ownership is the sheetId of the tab this run last put there; each check-in swaps in a new one.
 """
 
 from __future__ import annotations
 
-import random
+import secrets
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, TypeGuard
 
 from googleapiclient.errors import HttpError
 
-from e2e_sheet import LOCK_TAB, E2ESheet, tab_ids
-from sheet_client import quote_tab
+from e2e_sheet import LOCK_TAB, E2ESheet
 from utc_time import format_utc as format_time
 from utc_time import parse_utc as parse_time
 from utc_time import utc_now
 
-# The lock tab's rows, in order; a check-in rewrites the rows from "checked in" on.
+# The lock tab's rows, in order.
 FIELDS = ("host", "pid", "checkout", "log dir", "started", "checked in", "expires")
-CHECK_IN_ROW = FIELDS.index("checked in")
 MAX_SHEET_ID = 2**31 - 1
+# Every tab's id and cells in one request; the Test Sheet holds a few rows.
+SNAPSHOT_FIELDS = "sheets(properties(sheetId,title),data(rowData(values(formattedValue))))"
 
 
 class LockHeld(Exception):
@@ -89,11 +89,24 @@ class _LockTab:
 
 
 def _read_lock_tab(service: Any, target: E2ESheet) -> _LockTab | None:
-    tab_id = tab_ids(service, target.sheet_id).get(LOCK_TAB)
-    if tab_id is None:
-        return None
-    response = service.spreadsheets().values().get(spreadsheetId=target.sheet_id, range=quote_tab(LOCK_TAB)).execute()
-    return _LockTab(tab_id, LockHolder.from_rows(response.get("values", [])))
+    """The tab's id and rows from one request, so both describe the same moment."""
+    response = service.spreadsheets().get(spreadsheetId=target.sheet_id, fields=SNAPSHOT_FIELDS).execute()
+    for sheet in response.get("sheets", []):
+        if sheet["properties"]["title"] != LOCK_TAB:
+            continue
+        grid = (sheet.get("data") or [{}])[0]
+        rows = [[cell.get("formattedValue", "") for cell in row.get("values", [])] for row in grid.get("rowData", [])]
+        return _LockTab(sheet["properties"]["sheetId"], LockHolder.from_rows(rows))
+    return None
+
+
+def _held_by(lock_tab: _LockTab | None, run: RunIdentity) -> TypeGuard[_LockTab]:
+    return lock_tab is not None and lock_tab.holder is not None and lock_tab.holder.run == run
+
+
+def _may_have_landed(error: Exception) -> bool:
+    """A lost response or a server error; a 4xx means the API refused the batch."""
+    return not isinstance(error, HttpError) or error.resp.status >= 500
 
 
 def _refusal(lock_tab: _LockTab, now: datetime) -> LockHeld | None:
@@ -110,14 +123,32 @@ def _refusal(lock_tab: _LockTab, now: datetime) -> LockHeld | None:
     return None
 
 
-def _write_rows(tab_id: int, first_row: int, rows: list[list[str]]) -> dict[str, Any]:
+def _new_tab_id(replacing: int | None) -> int:
+    """From the OS's randomness: a seeded `random` would hand two runs the same id."""
+    while True:
+        tab_id = secrets.randbelow(MAX_SHEET_ID) + 1
+        if tab_id != replacing:
+            return tab_id
+
+
+def _write_rows(tab_id: int, rows: list[list[str]]) -> dict[str, Any]:
     return {
         "updateCells": {
-            "start": {"sheetId": tab_id, "rowIndex": first_row, "columnIndex": 0},
+            "start": {"sheetId": tab_id, "rowIndex": 0, "columnIndex": 0},
             "rows": [{"values": [{"userEnteredValue": {"stringValue": value}} for value in row]} for row in rows],
             "fields": "userEnteredValue",
         }
     }
+
+
+def _swap_requests(old_tab_id: int | None, new_tab_id: int, holder: LockHolder) -> list[dict[str, Any]]:
+    """Deleting by the old id makes the swap fail if another run replaced that tab first."""
+    deletion = [] if old_tab_id is None else [{"deleteSheet": {"sheetId": old_tab_id}}]
+    return [
+        *deletion,
+        {"addSheet": {"properties": {"sheetId": new_tab_id, "title": LOCK_TAB}}},
+        _write_rows(new_tab_id, holder.rows()),
+    ]
 
 
 def _batch_update(service: Any, target: E2ESheet, requests: list[dict[str, Any]]) -> None:
@@ -147,24 +178,41 @@ class RehearsalLock:
         self.took_over_from = took_over_from
 
     def check_in(self) -> None:
-        """Extends the lease from now; raises LockLost if the tab is no longer this run's."""
+        """Swaps in a tab under a new id, with the lease extended from now; raises LockLost if the tab is no longer this run's."""
         now = self._clock()
         holder = replace(self.holder, checked_in=now, expires=now + self._lease)
-        self._on_own_tab([_write_rows(self.tab_id, CHECK_IN_ROW, holder.rows()[CHECK_IN_ROW:])])
-        self.holder = holder
+        new_tab_id = _new_tab_id(self.tab_id)
+        self._on_own_tab(lambda old_tab_id: _swap_requests(old_tab_id, new_tab_id, holder), leaves=new_tab_id)
+        self.tab_id, self.holder = new_tab_id, holder
 
     def release(self) -> None:
         """Deletes this run's lock tab; raises LockLost, touching nothing, if it is no longer this run's."""
-        self._on_own_tab([{"deleteSheet": {"sheetId": self.tab_id}}])
+        self._on_own_tab(lambda tab_id: [{"deleteSheet": {"sheetId": tab_id}}], leaves=None)
 
-    def _on_own_tab(self, requests: list[dict[str, Any]]) -> None:
+    def holds(self) -> bool:
+        """Whether the lock tab on the Sheet is still this run's; raises if the Sheet cannot be read."""
+        return _held_by(_read_lock_tab(self._service, self._target), self.holder.run)
+
+    def _on_own_tab(
+        self, requests_for: Callable[[int], list[dict[str, Any]]], leaves: int | None, retry: bool = True
+    ) -> None:
+        """`requests_for(tab_id)` builds the batch; `leaves` is the lock tab's id once it lands, None for a delete."""
+        tried_tab_id = self.tab_id
         try:
-            _batch_update(self._service, self._target, requests)
-        except HttpError:
+            _batch_update(self._service, self._target, requests_for(tried_tab_id))
+        except Exception as error:
             now_on_sheet = _read_lock_tab(self._service, self._target)
-            if now_on_sheet is None or now_on_sheet.tab_id != self.tab_id:
+            if now_on_sheet is None and leaves is None and _may_have_landed(error):
+                return  # The delete landed; only its response was lost.
+            if not _held_by(now_on_sheet, self.holder.run):
                 raise LockLost(self._lost_message(now_on_sheet)) from None
-            raise
+            if now_on_sheet.tab_id == leaves:
+                return
+            self.tab_id = now_on_sheet.tab_id
+            if now_on_sheet.tab_id == tried_tab_id or not retry:
+                raise
+            # An earlier swap whose re-read failed left a newer tab of this run's; retry from it once.
+            self._on_own_tab(requests_for, leaves, retry=False)
 
     def _lost_message(self, now_on_sheet: _LockTab | None) -> str:
         if now_on_sheet is None:
@@ -192,21 +240,23 @@ def acquire_lock(
 
     previous_tab_id = current.tab_id if current is not None else None
     holder = LockHolder(run, started=now, checked_in=now, expires=now + lease)
-    tab_id = random.randint(1, MAX_SHEET_ID)
-    # Deleting by the old id makes a takeover fail if another run replaced the tab first.
-    requests = [] if previous_tab_id is None else [{"deleteSheet": {"sheetId": previous_tab_id}}]
-    requests += [
-        {"addSheet": {"properties": {"sheetId": tab_id, "title": LOCK_TAB}}},
-        _write_rows(tab_id, 0, holder.rows()),
-    ]
+    tab_id = _new_tab_id(previous_tab_id)
     try:
-        _batch_update(service, target, requests)
+        _batch_update(service, target, _swap_requests(previous_tab_id, tab_id, holder))
     except Exception:
         # Either the batch landed and only its response was lost, or another run won a race for the lock.
-        now_on_sheet = _read_lock_tab(service, target)
-        if now_on_sheet is None or now_on_sheet.tab_id == previous_tab_id:
+        try:
+            now_on_sheet = _read_lock_tab(service, target)
+        except Exception:
+            # Whether the batch landed is unknown; a tab under the new id can only be this run's.
+            with suppress(Exception):
+                _batch_update(service, target, [{"deleteSheet": {"sheetId": tab_id}}])
             raise
-        if now_on_sheet.tab_id != tab_id:
+        if not (_held_by(now_on_sheet, run) and now_on_sheet.tab_id == tab_id):
+            if now_on_sheet is None and previous_tab_id is not None:
+                raise LockHeld(f"the '{LOCK_TAB}' tab was deleted while this run was taking it over; re-run") from None
+            if now_on_sheet is None or now_on_sheet.tab_id == previous_tab_id:
+                raise
             refusal = _refusal(now_on_sheet, clock())
             if refusal is None:
                 raise

@@ -19,10 +19,11 @@ import time
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
-from typing import IO, Any, TextIO, TypeVar
+from typing import IO, Any, Protocol, TextIO, TypeVar
 
 import internetarchive
 import pytest
+from googleapiclient.errors import HttpError
 
 import google_auth
 from e2e_lock import LockHeld, LockLost, RehearsalLock, RunIdentity, acquire_lock
@@ -37,6 +38,8 @@ from e2e_sheet import (
     set_cell,
     tab_ids,
 )
+from fake_sheets import FakeSheets, http_error
+from fake_sheets import TARGET as FAKE_TARGET
 from ia_bulk import (
     IA_HTTP_ADAPTER_KWARGS,
     ITEM_URL_PREFIX,
@@ -47,8 +50,6 @@ from ia_bulk import (
 )
 from log_tab import LOG_TAB_HEADER
 from sheet_client import SheetClient
-from test_e2e_lock import OTHER_RUN, FakeSheets
-from test_e2e_lock import TARGET as LOCK_TARGET
 
 # For test_upload_page_drives_a_real_run_end_to_end: a real upload_server,
 # reusing test_upload_server.py's own HTTP/SSE helpers rather than
@@ -71,7 +72,7 @@ IA_POLL_TIMEOUT_SECONDS = 600
 CLI_TIMEOUT_SECONDS = 900
 PUMP_CHUNK_BYTES = 4096
 PUMP_DRAIN_SECONDS = 10
-# Twice the longest gap between check-ins, which is one CLI call.
+# Twice the longest gap between check-ins, which is one CLI call; run_cli and wait_for_ia check in first.
 LOCK_LEASE = timedelta(seconds=2 * CLI_TIMEOUT_SECONDS)
 
 UPLOAD_COLUMNS = ("ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib")
@@ -102,6 +103,11 @@ STEP_11 = "step 11 - only expected cells changed (OPERATIONS 'Rehearsing the log
 STEP_12 = "step 12 - restore the broken filename (OPERATIONS 'Rehearsing the log tabs' step 2: put the cell back)"
 
 Found = TypeVar("Found")
+Returned = TypeVar("Returned")
+
+
+class Finalizers(Protocol):
+    def addfinalizer(self, finalizer: Callable[[], object]) -> None: ...
 
 
 def _write_to_console(text: str, stream: TextIO) -> None:
@@ -206,7 +212,10 @@ def cli_environment() -> dict[str, str]:
     return environment
 
 
-def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    step: str, command: str, *flags: str, lock: RehearsalLock, log_dir: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    check_in(lock, step)
     argv = [sys.executable, "ia_bulk.py", command, *flags, "--registry", str(E2E_REGISTRY), "--project", E2E_PROJECT]
     if log_dir is not None:
         argv += ["--log-dir", str(log_dir)]
@@ -246,7 +255,8 @@ def expect_run(step: str, result: subprocess.CompletedProcess[str], exit_code: i
             pytest.fail(f"{step}: expected {text!r} in stdout\n{output_of(result)}")
 
 
-def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None]) -> Found:
+def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], *, lock: RehearsalLock) -> Found:
+    check_in(lock, step)
     deadline = time.monotonic() + IA_POLL_TIMEOUT_SECONDS
     while True:
         found = probe()
@@ -308,36 +318,44 @@ def run_summary_timestamp(log_file: Path) -> str | None:
     return next((record["timestamp"] for record in records if record.get("record") == "run_summary"), None)
 
 
-def take_lock(service: Any, target: E2ESheet, log_dir: Path) -> RehearsalLock:
-    run = RunIdentity(host=socket.gethostname(), pid=os.getpid(), checkout=str(REPO_ROOT), log_dir=str(log_dir))
+def failing_on_lock_errors(label: str, action: Callable[[], Returned]) -> Returned:
+    """A held or lost lock fails `label` with the lock's message, not a traceback."""
     try:
-        lock = acquire_lock(service, target, run, LOCK_LEASE)
-    except LockHeld as held:
-        pytest.fail(f"{STEP_0}: {held}")
+        return action()
+    except (LockHeld, LockLost) as error:
+        pytest.fail(f"{label}: {error}")
+
+
+def take_lock(service: Any, target: E2ESheet, log_dir: Path, request: Finalizers) -> RehearsalLock:
+    """Registers the release at once, so it runs after every later finalizer; step 12's still needs the lock."""
+    run = RunIdentity(host=socket.gethostname(), pid=os.getpid(), checkout=str(REPO_ROOT), log_dir=str(log_dir))
+    lock = failing_on_lock_errors(STEP_0, lambda: acquire_lock(service, target, run, LOCK_LEASE))
+    request.addfinalizer(lambda: failing_on_lock_errors("teardown", lock.release))
     if lock.took_over_from is not None:
         _print_for_console(f"{STEP_0}: took over the expired lock of the rehearsal {lock.took_over_from.describe()}")
     return lock
 
 
 def check_in(lock: RehearsalLock, step: str) -> None:
-    try:
-        lock.check_in()
-    except LockLost as lost:
-        pytest.fail(f"{step}: {lost}")
-
-
-def release_lock(lock: RehearsalLock) -> None:
-    try:
-        lock.release()
-    except LockLost as lost:
-        pytest.fail(f"teardown: {lost}")
+    failing_on_lock_errors(step, lock.check_in)
 
 
 def restore_broken_filename(sheet: RehearsalSheet, lock: RehearsalLock, filename: str) -> None:
     # After a takeover the row is the other run's; restoring it would break that run.
-    check_in(lock, STEP_12)
+    check_in_error: Exception | None = None
+    try:
+        lock.check_in()
+    except LockLost as lost:
+        pytest.fail(f"{STEP_12}: {lost}")
+    except Exception as error:
+        check_in_error = error
+        # The error leaves the holder unknown; restore only once the Sheet shows the lock is still this run's.
+        if not lock.holds():
+            pytest.fail(f"{STEP_12}: the lock is no longer this run's, so the filename was left alone ({error!r})")
     sheet.edit(BROKEN_ROW, "File Name", filename)
     expect(STEP_12, sheet.cell(sheet.grid(), BROKEN_ROW, "File Name") == filename, "the broken filename was not restored")
+    if check_in_error is not None:
+        raise check_in_error
 
 
 # ---------------------------------------------------------------------------
@@ -404,21 +422,17 @@ def test_rehearsal(tmp_path, request):
     target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRY)
     service = build_sheets_service(REAL_KEY_PATH)
     sheet = RehearsalSheet(service, target, header)
-    lock = take_lock(service, target, log_dir)
-    # Registered first so it runs last: step 12's finalizer still needs the lock.
-    request.addfinalizer(lambda: release_lock(lock))
+    lock = take_lock(service, target, log_dir, request)
 
     reset_test_sheet(service, target, fixture)
     expect(STEP_0, sheet.grid() == fixture, "the data tab does not match the fixture after the reset")
     expect(STEP_0, sheet.tab_id(target.upload_log_tab) is None, "Upload Log survived the reset")
     expect(STEP_0, sheet.tab_id(target.sync_log_tab) is None, "Sync Log survived the reset")
 
-    check_in(lock, STEP_1)
-    result = run_cli(STEP_1, "validate")
+    result = run_cli(STEP_1, "validate", lock=lock)
     expect_run(STEP_1, result, 0, "7/7 rows passed", "missing theme")
 
-    check_in(lock, STEP_2)
-    result = run_cli(STEP_2, "upload", "--write-identifier", "--limit", "1", log_dir=log_dir)
+    result = run_cli(STEP_2, "upload", "--write-identifier", "--limit", "1", lock=lock, log_dir=log_dir)
     expect_run(STEP_2, result, 0, "1 file(s) uploaded successfully, 0 error(s)")
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_2, upload_log[:1] == [LOG_TAB_HEADER], f"Upload Log header is {upload_log[:1]}")
@@ -435,8 +449,7 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_2, all(sheet.cell(grid, FIRST_UPLOADED, column) for column in UPLOAD_COLUMNS), "row 2 upload cells incomplete")
     upload_log_id = sheet.tab_id(target.upload_log_tab)
 
-    check_in(lock, STEP_3)
-    result = run_cli(STEP_3, "upload", "--write-identifier", "--limit", "1", log_dir=log_dir)
+    result = run_cli(STEP_3, "upload", "--write-identifier", "--limit", "1", lock=lock, log_dir=log_dir)
     expect_run(STEP_3, result, 0, "1 file(s) uploaded successfully, 0 error(s)")
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_3, sheet.tab_id(target.upload_log_tab) == upload_log_id, "Upload Log was recreated, not appended to")
@@ -445,12 +458,13 @@ def test_rehearsal(tmp_path, request):
     grid = sheet.grid()
     expect(STEP_3, sheet.cell(grid, SECOND_UPLOADED, "ia_identifier") == "lcps-e2e-00002", "row 3 did not get lcps-e2e-00002")
 
+    # Before this run's own edit; run_cli checks in again before the CLI's writes.
     check_in(lock, STEP_4)
     restored_filename = fixture[BROKEN_ROW][header.index("File Name")]
     # A finalizer, so a failing later step still leaves the Test Sheet valid.
     request.addfinalizer(lambda: restore_broken_filename(sheet, lock, restored_filename))
     sheet.edit(BROKEN_ROW, "File Name", BROKEN_FILENAME)
-    result = run_cli(STEP_4, "upload", "--write-identifier", "--limit", "1", log_dir=log_dir)
+    result = run_cli(STEP_4, "upload", "--write-identifier", "--limit", "1", lock=lock, log_dir=log_dir)
     expect_run(STEP_4, result, 1, "1 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation)")
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_4, [row[2] for row in upload_log[3:]] == ["summary", "skipped"], f"Upload Log rows: {upload_log[3:]}")
@@ -459,8 +473,7 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_4, sheet.cell(grid, THIRD_UPLOADED, "ia_identifier") == "lcps-e2e-00003", "row 5 did not get lcps-e2e-00003")
     expect(STEP_4, not any(sheet.cell(grid, BROKEN_ROW, column) for column in UPLOAD_COLUMNS), "row 4 was marked uploaded")
 
-    check_in(lock, STEP_4B)
-    result = run_cli(STEP_4B, "upload", "--write-identifier", "--limit", "2", log_dir=log_dir)
+    result = run_cli(STEP_4B, "upload", "--write-identifier", "--limit", "2", lock=lock, log_dir=log_dir)
     # Row 4 is still broken, so it is skipped again.
     expect_run(STEP_4B, result, 1, "2 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation)")
     bars = re.findall(r"uploading (e2e-\d+\.jpg)", result.stderr)
@@ -474,12 +487,10 @@ def test_rehearsal(tmp_path, request):
 
     identifiers = {row: sheet.cell(grid, row, "ia_url").removeprefix(ITEM_URL_PREFIX) for row in UPLOADED_ROWS}
     for identifier in identifiers.values():
-        check_in(lock, STEP_5)
-        wait_for_ia(STEP_5, f"item {identifier}", lambda identifier=identifier: item_metadata(identifier))
+        wait_for_ia(STEP_5, f"item {identifier}", lambda identifier=identifier: item_metadata(identifier), lock=lock)
 
-    check_in(lock, STEP_6)
     grid_before_sync = sheet.grid()
-    result = run_cli(STEP_6, "sync-metadata", "--dry-run", log_dir=log_dir)
+    result = run_cli(STEP_6, "sync-metadata", "--dry-run", lock=lock, log_dir=log_dir)
     expect_run(STEP_6, result, 0)
     expect(STEP_6, sheet.grid() == grid_before_sync, "the dry run changed the Sheet")
     expect(STEP_6, sheet.tab_id(target.sync_log_tab) is None, "the dry run created Sync Log")
@@ -487,7 +498,7 @@ def test_rehearsal(tmp_path, request):
     check_in(lock, STEP_7)
     edited_title = f"E2E fixture 1 (edited {time.strftime('%Y%m%dT%H%M%S')})"
     sheet.edit(FIRST_UPLOADED, "Title", edited_title)
-    result = run_cli(STEP_7, "sync-metadata", log_dir=log_dir)
+    result = run_cli(STEP_7, "sync-metadata", lock=lock, log_dir=log_dir)
     expect_run(STEP_7, result, 0, "1 item(s) updated successfully, 4 unchanged, 0 error(s)")
     sync_log = sheet.log_rows(target.sync_log_tab)
     expect(STEP_7, sync_log[:1] == [LOG_TAB_HEADER], f"Sync Log header is {sync_log[:1]}")
@@ -499,21 +510,19 @@ def test_rehearsal(tmp_path, request):
         "sync columns not stamped on every uploaded row",
     )
 
-    check_in(lock, STEP_8)
     first_identifier = identifiers[FIRST_UPLOADED]
     wait_for_ia(
         STEP_8,
         f"the edited title on {first_identifier}",
         lambda: True if (item_metadata(first_identifier) or {}).get("title") == edited_title else None,
+        lock=lock,
     )
 
-    check_in(lock, STEP_9)
-    result = run_cli(STEP_9, "sync-metadata", log_dir=log_dir)
+    result = run_cli(STEP_9, "sync-metadata", lock=lock, log_dir=log_dir)
     expect_run(STEP_9, result, 0, "nothing to sync")
     expect(STEP_9, len(sheet.log_rows(target.sync_log_tab)) == len(sync_log), "the quiet run appended to Sync Log")
     expect(STEP_9, sheet.grid() == grid_after_sync, "the quiet run changed the Sheet")
 
-    check_in(lock, STEP_10)
     for tab in target.log_tabs:
         for when, run, *_ in sheet.log_rows(tab)[1:]:
             log_file = log_dir / run
@@ -522,7 +531,6 @@ def test_rehearsal(tmp_path, request):
             expect(STEP_10, summary_timestamp is not None, f"{tab} names {run}, which has no run_summary record")
             expect(STEP_10, summary_timestamp == when, f"{tab} row for {run}: when {when!r} is not its run_summary timestamp")
 
-    check_in(lock, STEP_11)
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
     final = sheet.grid()
@@ -556,14 +564,12 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
     target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRY)
     service = build_sheets_service(REAL_KEY_PATH)
     sheet = RehearsalSheet(service, target, header)
-    lock = take_lock(service, target, tmp_path / "logs")
-    request.addfinalizer(lambda: release_lock(lock))
+    lock = take_lock(service, target, tmp_path / "logs", request)
 
     reset_test_sheet(service, target, fixture)
     expect(STEP_UPLOAD_PAGE_PREDICT, sheet.grid() == fixture, "the data tab does not match the fixture after the reset")
 
-    check_in(lock, STEP_UPLOAD_PAGE_PREDICT)
-    prediction = run_cli(STEP_UPLOAD_PAGE_PREDICT, "validate", f"--batch={UPLOAD_PAGE_BATCH}", "--json")
+    prediction = run_cli(STEP_UPLOAD_PAGE_PREDICT, "validate", f"--batch={UPLOAD_PAGE_BATCH}", "--json", lock=lock)
     expect(STEP_UPLOAD_PAGE_PREDICT, prediction.returncode == 0, f"validate --json refused:\n{output_of(prediction)}")
     expected_succeeded = json.loads(prediction.stdout)["ready_to_upload"]
     expect(
@@ -646,6 +652,29 @@ def test_archive_org_answers_the_collection_check_as_it_assumes(monkeypatch):
     assert check_ia_collection("lcps-e2e-no-such-collection") == CollectionMissing()
 
 
+OTHER_RUN = RunIdentity(host="other-host", pid=222, checkout="C:/checkouts/other", log_dir="C:/tmp/other/logs")
+RESTORED_CELL = ("'Test Sheet'!A4", [["e2e-03.jpg"]])
+
+
+class RecordingRequest:
+    """Stands in for pytest's request; tear_down runs its finalizers last-registered first, as pytest does."""
+
+    def __init__(self) -> None:
+        self.finalizers: list[Callable[[], object]] = []
+
+    def addfinalizer(self, finalizer: Callable[[], object]) -> None:
+        self.finalizers.append(finalizer)
+
+    def tear_down(self) -> None:
+        for finalizer in reversed(self.finalizers):
+            finalizer()
+
+
+def held_lock(tmp_path: Path) -> tuple[FakeSheets, RehearsalLock, RecordingRequest]:
+    sheets, request = FakeSheets(), RecordingRequest()
+    return sheets, take_lock(sheets, FAKE_TARGET, tmp_path / "logs", request), request
+
+
 def test_print_for_console_survives_a_non_utf8_console(monkeypatch):
     """A cp1252 console can't encode ia's progress-bar block char; this must not raise."""
     monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="cp1252"))
@@ -676,14 +705,16 @@ def test_a_throttled_run_fails_as_ia_throttling_even_when_exit_1_was_expected():
         expect_run("step 4", throttled, 1, "1 file(s) uploaded successfully, 0 error(s)")
 
 
-def test_a_cli_timeout_fails_with_the_step_and_partial_output(monkeypatch):
+def test_a_cli_timeout_fails_with_the_step_and_partial_output(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+
     def time_out(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd="ia_bulk.py", timeout=1, output="uploading e2e-01.jpg", stderr=None)
 
     monkeypatch.setattr(sys.modules[__name__], "run_streaming", time_out)
 
     with pytest.raises(pytest.fail.Exception, match=r"(?s)step 2: ia_bulk.py upload did not finish.*uploading e2e-01\.jpg"):
-        run_cli("step 2", "upload")
+        run_cli("step 2", "upload", lock=lock)
 
 
 def _run_child(script: str, timeout: float = 30) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
@@ -821,19 +852,105 @@ def test_an_unthrottled_wrong_exit_still_fails_as_a_wrong_exit():
 
 
 def test_a_held_lock_fails_step_0_naming_the_other_run(tmp_path):
-    sheets = FakeSheets()
-    acquire_lock(sheets, LOCK_TARGET, OTHER_RUN, LOCK_LEASE)
+    sheets, request = FakeSheets(), RecordingRequest()
+    acquire_lock(sheets, FAKE_TARGET, OTHER_RUN, LOCK_LEASE)
 
     with pytest.raises(pytest.fail.Exception, match=re.escape(f"{STEP_0}: another e2e rehearsal holds the Test Sheet")):
-        take_lock(sheets, LOCK_TARGET, tmp_path / "logs")
+        take_lock(sheets, FAKE_TARGET, tmp_path / "logs", request)
+
+    assert request.finalizers == []
+
+
+def test_the_lock_is_released_after_the_step_12_restore_has_used_it(tmp_path):
+    sheets, lock, request = held_lock(tmp_path)
+    sheet = RehearsalSheet(sheets, FAKE_TARGET, ["File Name"])
+    request.addfinalizer(lambda: restore_broken_filename(sheet, lock, "e2e-03.jpg"))
+
+    request.tear_down()
+
+    assert sheets.value_updates == [RESTORED_CELL]
+    assert LOCK_TAB not in sheets.tabs
 
 
 def test_restoring_the_filename_writes_nothing_once_the_lock_is_lost(tmp_path):
-    sheets = FakeSheets()
-    lock = take_lock(sheets, LOCK_TARGET, tmp_path / "logs")
+    sheets, lock, _ = held_lock(tmp_path)
     sheets.delete_tab(LOCK_TAB)
 
     with pytest.raises(pytest.fail.Exception, match=re.escape(f"{STEP_12}: this run lost the Test Sheet lock")):
-        restore_broken_filename(RehearsalSheet(sheets, LOCK_TARGET, ["File Name"]), lock, "e2e-03.jpg")
+        restore_broken_filename(RehearsalSheet(sheets, FAKE_TARGET, ["File Name"]), lock, "e2e-03.jpg")
 
     assert sheets.value_updates == []
+
+
+def test_restoring_the_filename_still_restores_after_a_check_in_error_that_is_not_a_lost_lock(tmp_path):
+    sheets, lock, _ = held_lock(tmp_path)
+    sheets.fail_next_batch = http_error("Internal error encountered.", status=500)
+
+    with pytest.raises(HttpError):
+        restore_broken_filename(RehearsalSheet(sheets, FAKE_TARGET, ["File Name"]), lock, "e2e-03.jpg")
+
+    assert sheets.value_updates == [RESTORED_CELL]
+
+
+def test_restoring_the_filename_after_a_check_in_whose_re_read_failed_restores_a_lock_still_held(tmp_path):
+    sheets, lock, _ = held_lock(tmp_path)
+    sheets.fail_next_batch = http_error("Internal error encountered.", status=500)
+    sheets.fail_next_get = TimeoutError("timed out")
+
+    with pytest.raises(TimeoutError):
+        restore_broken_filename(RehearsalSheet(sheets, FAKE_TARGET, ["File Name"]), lock, "e2e-03.jpg")
+
+    assert sheets.value_updates == [RESTORED_CELL]
+
+
+def test_restoring_the_filename_after_a_check_in_whose_re_read_failed_leaves_another_runs_row_alone(tmp_path):
+    sheets, lock, _ = held_lock(tmp_path)
+    sheets.delete_tab(LOCK_TAB)
+    acquire_lock(sheets, FAKE_TARGET, OTHER_RUN, LOCK_LEASE)
+    sheets.fail_next_get = TimeoutError("timed out")
+
+    with pytest.raises(pytest.fail.Exception, match=re.escape(f"{STEP_12}: the lock is no longer this run's")):
+        restore_broken_filename(RehearsalSheet(sheets, FAKE_TARGET, ["File Name"]), lock, "e2e-03.jpg")
+
+    assert sheets.value_updates == []
+
+
+def test_running_the_cli_checks_in_first(tmp_path, monkeypatch):
+    sheets, lock, _ = held_lock(tmp_path)
+    first_tab_id = lock.tab_id
+    tab_id_at_start: list[int] = []
+
+    def started(argv, **_kwargs):
+        tab_id_at_start.append(sheets.tabs[LOCK_TAB])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    # run_streaming, not subprocess: an unstubbed spawn would start a real upload.
+    monkeypatch.setattr(sys.modules[__name__], "run_streaming", started)
+
+    run_cli("step 2", "upload", lock=lock)
+
+    assert tab_id_at_start == [lock.tab_id]
+    assert lock.tab_id != first_tab_id
+
+
+def test_running_the_cli_after_the_lock_was_lost_fails_before_the_cli_starts(tmp_path, monkeypatch):
+    sheets, lock, _ = held_lock(tmp_path)
+    sheets.delete_tab(LOCK_TAB)
+    started: list = []
+    monkeypatch.setattr(sys.modules[__name__], "run_streaming", lambda argv, **_kwargs: started.append(argv))
+
+    with pytest.raises(pytest.fail.Exception, match=re.escape("step 2: this run lost the Test Sheet lock")):
+        run_cli("step 2", "upload", lock=lock)
+
+    assert started == []
+
+
+def test_waiting_for_ia_after_the_lock_was_lost_fails_before_probing(tmp_path):
+    sheets, lock, _ = held_lock(tmp_path)
+    sheets.delete_tab(LOCK_TAB)
+    probes: list = []
+
+    with pytest.raises(pytest.fail.Exception, match=re.escape("step 5: this run lost the Test Sheet lock")):
+        wait_for_ia("step 5", "item zztest-x", lambda: probes.append(1) or True, lock=lock)
+
+    assert probes == []

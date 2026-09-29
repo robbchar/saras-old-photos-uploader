@@ -14,9 +14,10 @@ from e2e_sheet import (
     set_cell,
     tab_ids,
 )
+from fake_sheets import TARGET
 from project_config import load_project_config
 
-TEST_SHEET_ID = "test-sheet-id"
+TEST_SHEET_ID = TARGET.sheet_id
 
 REPO_ROOT = Path(__file__).resolve().parent
 FIXTURES = REPO_ROOT / "e2e_fixtures"
@@ -152,9 +153,6 @@ def test_guard_refuses_a_live_registry_without_projects(tmp_path):
 
     with pytest.raises(ResetRefused, match="no projects"):
         check_reset_allowed(e2e_path, live_path)
-
-
-TARGET = E2ESheet(sheet_id=TEST_SHEET_ID, data_tab="Test Sheet", upload_log_tab="Upload Log", sync_log_tab="Sync Log")
 
 
 class FakeRequest:

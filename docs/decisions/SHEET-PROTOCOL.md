@@ -550,30 +550,51 @@ thing every checkout and machine shares; a lock file would reach neither
 another worktree's path nor the Mac. The code is `e2e_lock.py`, test code
 only.
 
+A rehearsal started while another holds the lock fails at step 0 with
+"another e2e rehearsal holds the Test Sheet", naming that run and when its
+lock expires. Wait for it to finish, then re-run.
+
 - **Taking it is atomic.** One `batchUpdate` adds the tab under a sheetId the
-  run picks and writes the holder into it. The API applies a batch whole or
-  not at all, and refuses a second tab with the same name, so two runs racing
-  for a free lock cannot both win. If the batch lands but its response is
-  lost, the run re-reads the Sheet and keeps a lock that carries its own
-  sheetId.
-- **The sheetId is the ownership.** Check-ins and the delete at teardown
-  target that id. A run whose lock was taken over gets "No grid with id"
-  instead of writing into the new holder's tab, and it fails naming the new
-  holder. Its step-12 restore is skipped, since the row is no longer its to
-  restore.
+  run draws from the OS's randomness, and writes the holder into it. The API
+  applies a batch whole or not at all, and refuses a second tab with the same
+  name, so two runs racing for a free lock cannot both win. If the batch lands
+  but its response is lost, the run re-reads the Sheet and keeps a tab that
+  carries its new sheetId and names this run. If that re-read fails too, it
+  tries to delete the tab under its new id before failing; if the delete fails
+  as well, the lock is left behind to expire.
+- **The sheetId is the ownership.** Every check-in swaps the tab for one under
+  a new sheetId, in one batch that deletes by the old id. Check-ins and the
+  delete at teardown target the id this run last put there. A run whose lock
+  was taken over, or whose tab was deleted or replaced by hand, gets "No grid
+  with id" instead of writing into that tab, and fails with "this run lost the
+  Test Sheet lock", naming the cause. From then on it writes nothing: the
+  step-12 restore is skipped, and the release at teardown touches nothing. A
+  takeover planned against a tab that its holder has since checked in deletes
+  an id that is gone, so its batch fails and the taker is refused.
+- **A lost response is settled by re-reading the Sheet.** After any error, a
+  check-in or release re-reads the lock tab. A swap that landed is kept, and a
+  delete that landed counts as a release. If an earlier check-in's outcome was
+  never learned, the next one finds this run's newer tab and retries from it.
+  The step-12 restore goes ahead after a check-in error only once the Sheet
+  shows the lock is still this run's, then fails the run with that error.
+- **Check-ins come before every CLI call, IA wait and Sheet edit.** `run_cli`
+  and `wait_for_ia` check in themselves, so a new CLI call or IA wait cannot
+  leave it out. The rehearsal's own Sheet edits, at steps 4, 7 and 12, check in
+  explicitly. So does the upload-page test before and after its run: its wait
+  is an SSE stream, not `run_cli`, bounded by the same `CLI_TIMEOUT_SECONDS`.
 - **A lost lock is noticed at the next check-in, not sooner.** A run is taken
-  over only after 30 minutes without checking in; a laptop asleep mid-step is
-  the likely cause. The CLI step it was in can still finish and write into the
-  new holder's rows before the next check-in fails. A check-in keeps the tab's
-  id, so a takeover that lands just after one still succeeds. The old holder
-  finds out one step later.
-- **A stale lock expires.** A run checks in at every step, extending its lease
-  to 30 minutes from then: twice the longest gap between check-ins, which is
-  one CLI call's timeout. The next run takes over an expired lock in one batch
-  that deletes by the old sheetId, so only one of two racing runs succeeds.
-  Deleting the tab by hand clears it at once. Ctrl-C still runs teardown. A
-  killed process, or an API error at teardown, leaves the lock behind to
-  expire.
+  over only after its lease runs out; a laptop asleep mid-step is the likely
+  cause. The CLI step it was in can still finish and write into the new
+  holder's rows before the next check-in fails.
+- **A stale lock expires.** Each check-in extends the lease to `LOCK_LEASE`
+  from then, 30 minutes: twice `CLI_TIMEOUT_SECONDS`, one CLI call's timeout,
+  which is the longest gap between check-ins. Expiry compares the holder's
+  clock with the next run's, so it assumes both machines keep network time.
+  The next run takes over an expired lock in one batch that deletes by the old
+  sheetId, so only one of two racing runs succeeds. Once you know its run is
+  gone, deleting the tab by hand clears it at once. Ctrl-C still runs
+  teardown. A killed process, or an API error at step 0 or at teardown, leaves
+  the lock behind to expire.
 - **A held lock fails the run; it does not wait.** Waiting would make one
   run's length depend on another's.
 
