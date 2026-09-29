@@ -255,6 +255,44 @@ def expect_run(step: str, result: subprocess.CompletedProcess[str], exit_code: i
             pytest.fail(f"{step}: expected {text!r} in stdout\n{output_of(result)}")
 
 
+def expect_only_allowed_changes(step: str, fixture: list[list[str]], final: list[list[str]], allowed: set[tuple[int, str]]) -> None:
+    """`allowed` holds (grid index, column) pairs that may differ from the fixture."""
+    header = fixture[0]
+    expect(step, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
+    # grid() pads to the header's width, so a longer row has a cell past the header.
+    wider = [row_index + 1 for row_index, row in enumerate(final) if len(row) > len(header)]
+    expect(step, not wider, f"rows {wider} have cells past the header")
+    unexpected = [
+        f"row {row_index + 1} {column!r}: {fixture[row_index][column_index]!r} -> {final[row_index][column_index]!r}"
+        for row_index in range(len(fixture))
+        for column_index, column in enumerate(header)
+        if final[row_index][column_index] != fixture[row_index][column_index] and (row_index, column) not in allowed
+    ]
+    expect(step, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
+
+
+def e2e_identifier(number: int) -> str:
+    return f"lcps-{E2E_PROJECT}-{number:05d}"
+
+
+def expect_recorded(step: str, sheet: RehearsalSheet, grid: list[list[str]], row_index: int, number: int) -> None:
+    """The row holds its minted identifier, a zztest- item URL for it, and every upload cell."""
+    identifier = e2e_identifier(number)
+    recorded = sheet.cell(grid, row_index, "ia_identifier")
+    expect(step, recorded == identifier, f"row {row_index + 1} ia_identifier is {recorded!r}, expected {identifier!r}")
+    url = sheet.cell(grid, row_index, "ia_url")
+    expect(
+        step,
+        url.startswith(f"{ITEM_URL_PREFIX}zztest-") and url.endswith(f"-{identifier}"),
+        f"row {row_index + 1} ia_url is {url!r}",
+    )
+    expect(
+        step,
+        all(sheet.cell(grid, row_index, column) for column in UPLOAD_COLUMNS),
+        f"row {row_index + 1} upload cells incomplete",
+    )
+
+
 def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], *, lock: RehearsalLock) -> Found:
     check_in(lock, step)
     deadline = time.monotonic() + IA_POLL_TIMEOUT_SECONDS
@@ -375,6 +413,8 @@ def _put_back_filename(sheet: RehearsalSheet, filename: str) -> None:
 # names "theme" as this project's batch_column. Row 5 has no Theme and rows 6-7
 # are step 4b's own batch, so all three are out of scope for this batch.
 UPLOAD_PAGE_BATCH = "E2E"
+# Grid indexes of the batch's rows, all ready after the reset; only test_rehearsal breaks BROKEN_ROW.
+UPLOAD_PAGE_ROWS = (FIRST_UPLOADED, SECOND_UPLOADED, BROKEN_ROW, THIRD_UPLOADED)
 
 STEP_UPLOAD_PAGE_PREDICT = "upload page e2e - predict via validate --json (Task 16)"
 STEP_UPLOAD_PAGE_RUN = "upload page e2e - drive a real run through the server (Task 16)"
@@ -445,14 +485,7 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_2, [row[2] for row in upload_log[1:]] == ["summary"], f"Upload Log rows: {upload_log[1:]}")
     expect(STEP_2, upload_log[1][4] in result.stdout, f"summary detail {upload_log[1][4]!r} is not the console line")
     grid = sheet.grid()
-    expect(STEP_2, sheet.cell(grid, FIRST_UPLOADED, "ia_identifier") == "lcps-e2e-00001", "row 2 did not get lcps-e2e-00001")
-    first_url = sheet.cell(grid, FIRST_UPLOADED, "ia_url")
-    expect(
-        STEP_2,
-        first_url.startswith(f"{ITEM_URL_PREFIX}zztest-") and first_url.endswith("-lcps-e2e-00001"),
-        f"row 2 ia_url is {first_url!r}",
-    )
-    expect(STEP_2, all(sheet.cell(grid, FIRST_UPLOADED, column) for column in UPLOAD_COLUMNS), "row 2 upload cells incomplete")
+    expect_recorded(STEP_2, sheet, grid, FIRST_UPLOADED, 1)
     upload_log_id = sheet.tab_id(target.upload_log_tab)
 
     result = run_cli(STEP_3, "upload", "--write-identifier", "--limit", "1", lock=lock, log_dir=log_dir)
@@ -542,18 +575,7 @@ def test_rehearsal(tmp_path, request):
     check_in(lock, STEP_11)
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
-    final = sheet.grid()
-    expect(STEP_11, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
-    # grid() pads to the header's width, so a longer row has a cell past the header.
-    wider = [row_index + 1 for row_index, row in enumerate(final) if len(row) > len(header)]
-    expect(STEP_11, not wider, f"rows {wider} have cells past the header")
-    unexpected = [
-        f"row {row_index + 1} {column!r}: {fixture[row_index][column_index]!r} -> {final[row_index][column_index]!r}"
-        for row_index in range(len(fixture))
-        for column_index, column in enumerate(header)
-        if final[row_index][column_index] != fixture[row_index][column_index] and (row_index, column) not in allowed
-    ]
-    expect(STEP_11, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
+    expect_only_allowed_changes(STEP_11, fixture, sheet.grid(), allowed)
     # Step 12 runs as the finalizer registered at step 4.
 
 
@@ -564,6 +586,7 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
     /api/runs/current/output to `finished`. The page's own reported result
     must equal what validate --json independently predicts for the same
     batch - i.e. the page's result equals reality, not just its own say-so.
+    The run records the batch's rows to the Test Sheet and touches nothing else.
     """
     fixture = load_fixture_grid(FIXTURE_SHEET)
     header = fixture[0]
@@ -583,8 +606,9 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
     expected_succeeded = json.loads(prediction.stdout)["ready_to_upload"]
     expect(
         STEP_UPLOAD_PAGE_PREDICT,
-        expected_succeeded > 0,
-        f"validate --json predicts 0 rows ready for batch {UPLOAD_PAGE_BATCH!r}; the fixture may have changed",
+        expected_succeeded == len(UPLOAD_PAGE_ROWS),
+        f"validate --json predicts {expected_succeeded} rows ready for batch {UPLOAD_PAGE_BATCH!r}, "
+        f"expected {len(UPLOAD_PAGE_ROWS)}; the fixture may have changed",
     )
 
     check_in(lock, STEP_UPLOAD_PAGE_RUN)
@@ -631,15 +655,19 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
         f"validate --json predicted {expected_succeeded} ready to upload, 0 failed",
     )
 
-    # write_back (ia_bulk.py's upload_from_sheet) is only true for --live or
-    # --write-identifier; the page's own _upload_argv passes neither in test
-    # mode, so a test-mode page run must leave the data tab untouched - only
-    # the Upload Log tab (telemetry, always mirrored) records it.
-    expect(
-        STEP_UPLOAD_PAGE_RUN,
-        sheet.grid() == fixture,
-        "a test-mode page run wrote to the data tab, but write-back needs --live or --write-identifier",
-    )
+    # The page's _upload_argv adds --write-identifier in test mode, so the run
+    # records the batch's rows; nothing else in the data tab may change.
+    final = sheet.grid()
+    for number, row in enumerate(UPLOAD_PAGE_ROWS, start=1):
+        expect_recorded(STEP_UPLOAD_PAGE_RUN, sheet, final, row, number)
+    allowed = {(row, column) for row in UPLOAD_PAGE_ROWS for column in UPLOAD_COLUMNS}
+    expect_only_allowed_changes(STEP_UPLOAD_PAGE_RUN, fixture, final, allowed)
+
+    # The recorded rows must read as done, so the page stops offering the batch.
+    after = run_cli(STEP_UPLOAD_PAGE_RUN, "validate", f"--batch={UPLOAD_PAGE_BATCH}", "--json", lock=lock)
+    expect(STEP_UPLOAD_PAGE_RUN, after.returncode == 0, f"validate --json refused after the run:\n{output_of(after)}")
+    still_ready = json.loads(after.stdout)["ready_to_upload"]
+    expect(STEP_UPLOAD_PAGE_RUN, still_ready == 0, f"validate --json still predicts {still_ready} rows ready after the run")
 
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_UPLOAD_PAGE_RUN, upload_log[:1] == [LOG_TAB_HEADER], f"Upload Log header is {upload_log[:1]}")
@@ -713,6 +741,34 @@ def test_a_throttled_run_fails_as_ia_throttling_even_when_exit_1_was_expected():
 
     with pytest.raises(pytest.fail.Exception, match="step 4: Internet Archive is throttling uploads"):
         expect_run("step 4", throttled, 1, "1 file(s) uploaded successfully, 0 error(s)")
+
+
+CHANGES_FIXTURE = [["File Name", "ia_identifier"], ["a.jpg", ""], ["b.jpg", ""]]
+
+
+def test_expect_only_allowed_changes_accepts_an_allowed_change():
+    final = [["File Name", "ia_identifier"], ["a.jpg", "lcps-e2e-00001"], ["b.jpg", ""]]
+
+    expect_only_allowed_changes("step 11", CHANGES_FIXTURE, final, {(1, "ia_identifier")})
+
+
+def test_expect_only_allowed_changes_names_an_unexpected_cell_by_its_sheet_row():
+    final = [["File Name", "ia_identifier"], ["a.jpg", "lcps-e2e-00001"], ["b.jpg", "lcps-e2e-00002"]]
+
+    with pytest.raises(pytest.fail.Exception, match=r"step 11: unexpected changes:\nrow 3 'ia_identifier': '' -> 'lcps-e2e-00002'$"):
+        expect_only_allowed_changes("step 11", CHANGES_FIXTURE, final, {(1, "ia_identifier")})
+
+
+def test_expect_only_allowed_changes_rejects_a_missing_row():
+    with pytest.raises(pytest.fail.Exception, match=r"step 11: the data tab has 2 rows, expected 3"):
+        expect_only_allowed_changes("step 11", CHANGES_FIXTURE, CHANGES_FIXTURE[:2], set())
+
+
+def test_expect_only_allowed_changes_rejects_a_cell_past_the_header():
+    final = [["File Name", "ia_identifier"], ["a.jpg", "", "stray"], ["b.jpg", ""]]
+
+    with pytest.raises(pytest.fail.Exception, match=r"step 11: rows \[2\] have cells past the header"):
+        expect_only_allowed_changes("step 11", CHANGES_FIXTURE, final, set())
 
 
 def test_a_cli_timeout_fails_with_the_step_and_partial_output(tmp_path, monkeypatch):
