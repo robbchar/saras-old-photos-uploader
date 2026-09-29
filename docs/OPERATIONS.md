@@ -907,6 +907,9 @@ record.
 python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
 ```
 
+Each command's output streams live under its step header, upload progress
+bars included, as it would in a terminal (`-s` is what lets it through).
+
 It rewrites the Test Sheet from `e2e_fixtures/` first, so the Test Sheet now
 belongs to the `e2e` project; a hand rehearsal after it uses
 `--registry e2e_fixtures/registry.json --project e2e` in place of
@@ -922,7 +925,7 @@ re-run. How a stale lock clears is in README's
 rehearsal (the steps below) takes no lock, so check that the Test Sheet has
 no `E2E Lock` tab before starting one.
 
-After a passing run, rows 2, 3 and 5 are uploaded and synced, row 2's
+After a passing run, rows 2, 3, 5, 7 and 8 are uploaded and synced, row 2's
 `Title` is edited, and row 6 is still not ready (no theme); reset rows per
 ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done)
 (§2) before a hand upload.
@@ -933,7 +936,7 @@ After a passing run, rows 2, 3 and 5 are uploaded and synced, row 2's
 | Delete `Upload Log` / `Sync Log` to re-exercise creation | 0 |
 | §1 / DEPLOYMENT §16 step 1: `python ia_bulk.py validate --registry e2e_fixtures/registry.json --project e2e` | 1 |
 | Step 1: `python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 1`, twice | 2, 3 |
-| Step 2: break a filename, `python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 2` (automated step uses `--limit 1`) | 4 |
+| Step 2: break a filename, `python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --write-identifier --limit 2` | 4 (`--limit 1`), then 4b (`--limit 2`: two files, one progress bar each) |
 | Pre-live checklist: open a `zztest-…` item and read it | 5, 8 |
 | DEPLOYMENT §16 step 2: `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e --dry-run` | 6 |
 | Step 3: edit a Title, `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e`, twice | 7, 9 |

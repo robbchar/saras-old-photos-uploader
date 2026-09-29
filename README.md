@@ -675,7 +675,7 @@ writes nothing to the Sheet. Hand test-mode commands take no lock; see
 use `--registry e2e_fixtures/registry.json --project e2e`; `--project
 sarasoldphotos` without `--live` now reads those same rows, so save it for
 `--live` against the real Sheet, and for `doctor`/`setup`, which check its
-files drive. After a passing run, rows 2, 3 and 5 are
+files drive. After a passing run, rows 2, 3, 5, 7 and 8 are
 uploaded and synced, row 2's `Title` is edited, and row 6 is still not ready
 (no theme) — reset rows per
 [`docs/OPERATIONS.md`, "Re-rehearsing a row that is already done"](docs/OPERATIONS.md#re-rehearsing-a-row-that-is-already-done)

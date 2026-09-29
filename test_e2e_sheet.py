@@ -322,11 +322,11 @@ def test_checked_in_grid_keeps_the_real_header_quirks():
     assert all(quirk in header for quirk in REAL_HEADER_QUIRKS)
 
 
-def test_checked_in_grid_has_four_ready_rows_and_one_without_a_theme():
+def test_checked_in_grid_has_one_row_without_a_theme_between_the_ready_rows():
     grid = load_fixture_grid(FIXTURES / "sheet.json")
     theme = grid[0].index("Theme")
 
-    assert [bool(row[theme]) for row in grid[1:]] == [True, True, True, True, False]
+    assert [bool(row[theme]) for row in grid[1:]] == [True, True, True, True, False, True, True]
 
 
 def test_every_checked_in_row_names_a_file_that_exists():
