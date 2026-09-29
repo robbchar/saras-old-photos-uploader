@@ -573,7 +573,8 @@ lock expires. Wait for it to finish, then re-run.
   an id that is gone, so its batch fails and the taker is refused.
 - **A lost response is settled by re-reading the Sheet.** After any error, a
   check-in or release re-reads the lock tab. A swap that landed is kept, and a
-  delete that landed counts as a release. If an earlier check-in's outcome was
+  delete that landed counts as a release, even if another run has taken the
+  freed lock by the time of the re-read. If an earlier check-in's outcome was
   never learned, the next one finds this run's newer tab and retries from it.
   The step-12 restore goes ahead after a check-in error only once the Sheet
   shows the lock is still this run's, then fails the run with that error.

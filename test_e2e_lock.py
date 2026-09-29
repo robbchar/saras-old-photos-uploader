@@ -364,6 +364,18 @@ def test_releasing_succeeds_when_the_delete_landed_though_its_response_was_lost(
     assert LOCK_TAB not in sheets.tabs
 
 
+@pytest.mark.parametrize("error", [http_error("Internal error encountered.", status=500), TimeoutError("timed out")])
+def test_releasing_succeeds_when_another_run_takes_the_lock_its_lost_delete_freed(sheets, clock, error):
+    lock = acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
+    others = []
+    sheets.after_next_batch = lambda: others.append(acquire_lock(sheets, TARGET, OTHER_RUN, LEASE, clock))
+    sheets.fail_after_next_batch = error
+
+    lock.release()
+
+    assert sheets.tabs[LOCK_TAB] == others[0].tab_id
+
+
 def test_holder_rows_read_back_as_the_same_holder():
     holder = LockHolder(THIS_RUN, started=START, checked_in=START, expires=START + LEASE)
 

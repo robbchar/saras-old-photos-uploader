@@ -99,6 +99,8 @@ class FakeSheets:
         self.fail_next_batch: Exception | None = None
         # The batch lands, but its response is lost.
         self.fail_after_next_batch: Exception | None = None
+        # Another run's move, made just after this run's next batchUpdate lands.
+        self.after_next_batch: Callable[[], None] | None = None
         # Another run's move, made just after this run's next spreadsheets().get is answered.
         self.after_next_get: Callable[[], None] | None = None
         self.fail_next_get: Exception | None = None
@@ -149,6 +151,7 @@ class FakeSheets:
         move, self.before_next_batch = self.before_next_batch, None
         failure, self.fail_next_batch = self.fail_next_batch, None
         lost_response, self.fail_after_next_batch = self.fail_after_next_batch, None
+        move_after, self.after_next_batch = self.after_next_batch, None
         if move is not None:
             move()
         if failure is not None:
@@ -157,6 +160,8 @@ class FakeSheets:
         for request in requests:
             _apply_one(request, tabs, cells)
         self.tabs, self.cells = tabs, cells
+        if move_after is not None:
+            move_after()
         if lost_response is not None:
             raise lost_response
         return {}

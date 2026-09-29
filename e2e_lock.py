@@ -202,8 +202,9 @@ class RehearsalLock:
             _batch_update(self._service, self._target, requests_for(tried_tab_id))
         except Exception as error:
             now_on_sheet = _read_lock_tab(self._service, self._target)
-            if now_on_sheet is None and leaves is None and _may_have_landed(error):
-                return  # The delete landed; only its response was lost.
+            if leaves is None and _may_have_landed(error) and not _held_by(now_on_sheet, self.holder.run):
+                # The delete landed; only its response was lost, and another run may already hold the freed lock.
+                return
             if not _held_by(now_on_sheet, self.holder.run):
                 raise LockLost(self._lost_message(now_on_sheet)) from None
             if now_on_sheet.tab_id == leaves:
