@@ -650,8 +650,8 @@ The Test Sheet holds the `e2e` project's grid — steps 1 and 2 below target it
 with `--registry e2e_fixtures/registry.json --project e2e`, not
 `<project>`/`sarasoldphotos`.
 
-1. **Read the test Sheet.** Expect a readiness report that includes `5/5
-   rows passed`, followed by more summary lines (after a rehearsal, `3
+1. **Read the test Sheet.** Expect a readiness report that includes `7/7
+   rows passed`, followed by more summary lines (after a rehearsal, `5
    already uploaded`, `1 row ready to upload`, `1` not yet catalogued for
    the no-theme row) and no sign-in prompt:
 
@@ -660,8 +660,8 @@ with `--registry e2e_fixtures/registry.json --project e2e`, not
    ```
 
 2. **Preview a sync.** Expect a summary line, for example
-   `3 uploaded rows; 0 with no push on record, 0 changed since their last
-   push, 3 already in sync and would not be sent`:
+   `5 uploaded rows; 0 with no push on record, 0 changed since their last
+   push, 5 already in sync and would not be sent`:
 
    ```bash
    .venv/bin/python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e --dry-run < /dev/null

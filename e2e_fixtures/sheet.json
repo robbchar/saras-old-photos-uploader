@@ -13,7 +13,7 @@
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-03.jpg", "Title": "E2E fixture 3", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-04.jpg", "Title": "E2E fixture 4", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-05.jpg", "Title": "E2E fixture 5", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
-    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-06.jpg", "Title": "E2E fixture 6", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
-    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-07.jpg", "Title": "E2E fixture 7", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."}
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-06.jpg", "Title": "E2E fixture 6", "Theme": "E2E two-file", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-07.jpg", "Title": "E2E fixture 7", "Theme": "E2E two-file", "Description": "Synthetic image for the e2e rehearsal; not a photograph."}
   ]
 }

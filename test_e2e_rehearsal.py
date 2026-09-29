@@ -116,14 +116,28 @@ def _echo_stderr(text: str) -> None:
     _write_to_console(text, sys.stderr)
 
 
+def _echo_quietly(echo: Callable[[str], None], text: str) -> None:
+    """A console that fails to write must not stop the pipe draining, or the child blocks."""
+    try:
+        echo(text.replace("\r\n", "\n"))
+    except (OSError, ValueError):
+        pass
+
+
 def _pump(source: IO[bytes], echo: Callable[[str], None], captured: list[str]) -> None:
     """Chunks, not lines, so a progress bar's in-place redraws reach the console as they happen."""
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # A trailing CR waits for the next read: it may be half of a CRLF.
+    held_back = ""
     while chunk := source.read(PUMP_CHUNK_BYTES):
         text = decoder.decode(chunk)
         captured.append(text)
-        echo(text.replace("\r\n", "\n"))
-    captured.append(decoder.decode(b"", final=True))
+        pending = held_back + text
+        held_back = "\r" if pending.endswith("\r") else ""
+        _echo_quietly(echo, pending.removesuffix(held_back))
+    tail = decoder.decode(b"", final=True)
+    captured.append(tail)
+    _echo_quietly(echo, held_back + tail)
 
 
 def _joined(parts: list[str]) -> str:
@@ -141,28 +155,37 @@ def run_streaming(
     echo_stderr: Callable[[str], None] = _echo_stderr,
 ) -> subprocess.CompletedProcess[str]:
     """subprocess.run(capture_output=True) that also echoes the child's output live; TimeoutExpired carries the partial output."""
-    # bufsize=0: each read returns whatever the child has written so far.
-    process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-    assert process.stdout is not None and process.stderr is not None
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
-    pumps = [
-        threading.Thread(target=_pump, args=(process.stdout, echo_stdout, stdout_parts), daemon=True),
-        threading.Thread(target=_pump, args=(process.stderr, echo_stderr, stderr_parts), daemon=True),
-    ]
-    for pump in pumps:
-        pump.start()
-    try:
-        returncode = process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+    # bufsize=0: each read returns whatever the child has written so far.
+    with subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0) as process:
+        assert process.stdout is not None and process.stderr is not None
+        pumps = [
+            threading.Thread(target=_pump, args=(process.stdout, echo_stdout, stdout_parts), daemon=True),
+            threading.Thread(target=_pump, args=(process.stderr, echo_stderr, stderr_parts), daemon=True),
+        ]
         for pump in pumps:
-            pump.join(timeout=PUMP_DRAIN_SECONDS)
-        raise subprocess.TimeoutExpired(argv, timeout, output=_joined(stdout_parts), stderr=_joined(stderr_parts)) from None
-    for pump in pumps:
-        pump.join()
+            pump.start()
+        try:
+            returncode = process.wait(timeout=timeout)
+        except BaseException as interrupted:
+            # As subprocess.run does: an interrupted step must not leave an upload running.
+            process.kill()
+            process.wait()
+            _join_pumps(pumps)
+            if isinstance(interrupted, subprocess.TimeoutExpired):
+                raise subprocess.TimeoutExpired(
+                    argv, timeout, output=_joined(stdout_parts), stderr=_joined(stderr_parts)
+                ) from None
+            raise
+        # Bounded: a grandchild holding the pipe open must not hang the step.
+        _join_pumps(pumps)
     return subprocess.CompletedProcess(argv, returncode, _joined(stdout_parts), _joined(stderr_parts))
+
+
+def _join_pumps(pumps: list[threading.Thread]) -> None:
+    for pump in pumps:
+        pump.join(timeout=PUMP_DRAIN_SECONDS)
 
 
 def cli_environment() -> dict[str, str]:
@@ -174,13 +197,6 @@ def cli_environment() -> dict[str, str]:
         else:
             environment[name] = value
     return environment
-
-
-def _decoded(output: str | bytes | None) -> str:
-    """TimeoutExpired's partial output can be bytes even in text mode."""
-    if isinstance(output, bytes):
-        return output.decode("utf-8", errors="replace")
-    return output or ""
 
 
 def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -196,7 +212,7 @@ def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -
     except subprocess.TimeoutExpired as exc:
         pytest.fail(
             f"{step}: ia_bulk.py {command} did not finish within {CLI_TIMEOUT_SECONDS // 60} min\n"
-            f"--- stdout ---\n{_decoded(exc.stdout)}\n--- stderr ---\n{_decoded(exc.stderr)}"
+            f"--- stdout ---\n{exc.output or ''}\n--- stderr ---\n{exc.stderr or ''}"
         )
 
 
@@ -324,9 +340,9 @@ def restore_broken_filename(sheet: RehearsalSheet, lock: RehearsalLock, filename
 # test_rehearsal already exercises directly.
 # ---------------------------------------------------------------------------
 
-# e2e_fixtures/sheet.json's Theme value for rows 1-4, 6 and 7; e2e_fixtures/registry.json
-# names "theme" as this project's batch_column. Row 5 has no Theme, so it is
-# out of scope for this batch - see e2e_fixtures/sheet.json.
+# e2e_fixtures/sheet.json's Theme value for rows 1-4; e2e_fixtures/registry.json
+# names "theme" as this project's batch_column. Row 5 has no Theme and rows 6-7
+# are step 4b's own batch, so all three are out of scope for this batch.
 UPLOAD_PAGE_BATCH = "E2E"
 
 STEP_UPLOAD_PAGE_PREDICT = "upload page e2e - predict via validate --json (Task 16)"
@@ -703,13 +719,60 @@ def test_run_streaming_echoes_before_the_child_exits_and_a_timeout_keeps_the_par
             [sys.executable, "-c", script],
             cwd=REPO_ROOT,
             env=dict(os.environ),
-            timeout=2,
+            # Room for a slow interpreter start on a loaded machine.
+            timeout=10,
             echo_stdout=echoed.append,
             echo_stderr=echoed.append,
         )
 
     assert "uploading e2e-01.jpg" in "".join(echoed)
-    assert "uploading e2e-01.jpg" in _decoded(timed_out.value.stdout)
+    assert "uploading e2e-01.jpg" in timed_out.value.output
+
+
+def test_run_streaming_echoes_a_crlf_split_across_reads_as_one_newline():
+    script = "import sys, time; out = sys.stdout.buffer; out.write(b'done\\r'); out.flush(); time.sleep(0.3); out.write(b'\\n')"
+
+    result, echoed_stdout, _ = _run_child(script)
+
+    assert result.stdout == "done\n"
+    assert "".join(echoed_stdout) == "done\n"
+
+
+def test_run_streaming_keeps_draining_when_the_console_write_fails():
+    def broken_console(_text: str) -> None:
+        raise OSError("console gone")
+
+    # Larger than a pipe buffer: an undrained pipe would block the child.
+    script = "import sys; sys.stderr.buffer.write(b'x' * 200_000)"
+
+    result = run_streaming(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=dict(os.environ),
+        timeout=30,
+        echo_stdout=broken_console,
+        echo_stderr=broken_console,
+    )
+
+    assert len(result.stderr) == 200_000
+
+
+def test_run_streaming_kills_the_child_when_interrupted(monkeypatch):
+    children: list[subprocess.Popen[bytes]] = []
+    original_wait = subprocess.Popen.wait
+
+    def interrupted_wait(self: subprocess.Popen[bytes], timeout: float | None = None) -> int:
+        if timeout is None:
+            return original_wait(self)
+        children.append(self)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "wait", interrupted_wait)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run_child("import time; time.sleep(60)")
+
+    assert children[0].poll() is not None
 
 
 def test_cli_environment_uses_the_real_ia_settings_and_the_current_proxy(monkeypatch):
