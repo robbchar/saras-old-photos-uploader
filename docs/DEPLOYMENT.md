@@ -558,6 +558,14 @@ converges whatever the new checkout needs (new dependencies, key permissions)
 and leaves the agent alone: an enabled agent stays loaded, and one never
 enabled stays that way.
 
+`setup` opens with the tool's version and commit, e.g.
+`ia_bulk 1.1.0 (commit def5678)`. When the pull moved the version it adds
+`updating from 1.0.0 to 1.1.0` on the next line (`downgrading from 1.1.0 to
+1.0.0` after checking out an older tag); a pull that did not change
+the version, and the very first `setup` on a machine, print no such line. The
+previous version is whatever the last `setup` in this checkout recorded in
+`logs/installed-version`.
+
 `internetarchive` is pinned to an exact version, so the library changes only
 when a `git pull` moves that pin, never just because a newer release is out.
 Why, and how the pin is bumped: [QUOTA-AND-RUNS.md](decisions/QUOTA-AND-RUNS.md#internetarchive-is-pinned-exactly).

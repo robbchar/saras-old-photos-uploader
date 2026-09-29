@@ -21,6 +21,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
+import app_version
 import deployment
 import google_auth
 import ia_bulk
@@ -3055,6 +3056,118 @@ def test_cmd_doctor_returns_zero_when_everything_passes(monkeypatch):
     )
     args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
     assert ia_bulk.cmd_doctor(args) == 0
+
+
+def test_cmd_doctor_prints_the_version_and_short_commit_first(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    ia_bulk.cmd_doctor(args)
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line == f"ia_bulk {app_version.APP_VERSION} (commit 0123456)"
+
+
+def test_cmd_doctor_version_line_survives_an_unknown_commit(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "unknown")
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    ia_bulk.cmd_doctor(args)
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line == f"ia_bulk {app_version.APP_VERSION} (commit unknown)"
+
+
+def _passing_setup_checks(monkeypatch):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: [
+            deployment.Check(
+                name="already fine",
+                probe=lambda: deployment.CheckOutcome(deployment.Status.PASS, "fine"),
+                remedy="none",
+            )
+        ],
+    )
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+
+
+def test_cmd_setup_prints_the_version_and_short_commit_first(monkeypatch, capsys):
+    _passing_setup_checks(monkeypatch)
+    ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"]))
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line == f"ia_bulk {app_version.APP_VERSION} (commit 0123456)"
+
+
+def test_cmd_setup_says_nothing_about_updating_on_a_first_setup(monkeypatch, capsys):
+    _passing_setup_checks(monkeypatch)
+    ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"]))
+    assert "updating from" not in capsys.readouterr().out
+
+
+def test_cmd_setup_names_the_previous_version_after_an_upgrade(monkeypatch, capsys):
+    _passing_setup_checks(monkeypatch)
+    marker_path = app_version.INSTALLED_VERSION_PATH
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("0.9.0\n", encoding="utf-8")
+    assert ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])) == 0
+    output_lines = capsys.readouterr().out.splitlines()
+    assert output_lines[1] == f"updating from 0.9.0 to {app_version.APP_VERSION}"
+    # The upgrade line is not a change setup made, so the quiet-path message still shows.
+    assert any("nothing to change" in line for line in output_lines)
+
+
+def test_cmd_setup_records_the_version_it_ran_against(monkeypatch):
+    _passing_setup_checks(monkeypatch)
+    ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"]))
+    assert app_version.read_installed_version(app_version.INSTALLED_VERSION_PATH) == app_version.APP_VERSION
+
+
+def test_cmd_setup_still_runs_when_the_version_cannot_be_recorded(monkeypatch, capsys):
+    _passing_setup_checks(monkeypatch)
+    # A directory where the marker file should be makes the write fail.
+    app_version.INSTALLED_VERSION_PATH.mkdir(parents=True)
+    assert ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])) == 0
+    captured = capsys.readouterr()
+    assert "could not record the installed version" in captured.err
+    assert "nothing to change" in captured.out
+
+
+def test_cmd_doctor_does_not_record_the_installed_version(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+    ia_bulk.cmd_doctor(ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"]))
+    assert not app_version.INSTALLED_VERSION_PATH.exists()
+
+
+def test_cmd_setup_refusal_does_not_record_the_installed_version(monkeypatch):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
+    )
+    assert ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo", "--enable-agent"])) == 1
+    assert not app_version.INSTALLED_VERSION_PATH.exists()
+
+
+def test_cmd_setup_with_a_broken_registry_keeps_the_previous_version(monkeypatch, capsys):
+    def unreadable_registry(args, include_network):
+        raise ValueError("malformed registry")
+
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", unreadable_registry)
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+    marker_path = app_version.INSTALLED_VERSION_PATH
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("0.9.0\n", encoding="utf-8")
+    assert ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])) == 1
+    assert f"updating from 0.9.0 to {app_version.APP_VERSION}" in capsys.readouterr().out
+    assert app_version.read_installed_version(marker_path) == "0.9.0"
+
+
+def test_version_flag_prints_the_app_version(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        ia_bulk.build_parser().parse_args(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"ia_bulk {app_version.APP_VERSION}"
 
 
 def test_build_parser_accepts_setup_with_enable_agent():

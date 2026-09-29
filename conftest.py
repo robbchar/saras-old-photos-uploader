@@ -35,6 +35,12 @@ def _no_test_reads_the_real_ia_config(monkeypatch, _empty_ia_config_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_test_writes_the_real_installed_version(monkeypatch, tmp_path):
+    """setup records the version in the checkout's logs/; a test doing so would hide a real upgrade line."""
+    monkeypatch.setattr("app_version.INSTALLED_VERSION_PATH", tmp_path / "installed-version-logs" / "installed-version")
+
+
+@pytest.fixture(autouse=True)
 def _no_test_takes_the_real_upload_lock(monkeypatch, tmp_path):
     """The real lock is the checkout's .ignored/upload.lock; a test holding it would refuse a real upload."""
     monkeypatch.setattr("upload_lock.UPLOAD_LOCK_PATH", tmp_path / "upload-lock" / "upload.lock")
