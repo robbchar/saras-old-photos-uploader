@@ -721,3 +721,34 @@ cross-process lock (`test_a_lock_held_by_another_process...`); the `flock`
 branch runs only against a fake `fcntl` there, since the Mac never runs
 pytest. Two terminals running `upload` on the Mac is its real check, so it is a
 pre-live gate in [`OPERATIONS.md`](../OPERATIONS.md#pre-live-checklist).
+
+## Dry-run output is a summary by default; `-v` restores per-item detail
+
+*Decided 2026-09-28 (#81).*
+
+`upload --dry-run` printed one line per item — the identifier it would mint
+and the file behind it — then one line per cell it would write. On a full
+500-item run that is a thousand lines that bury the counts an operator
+actually reads, and there was no verbosity control anywhere in the CLI. So the
+default is now a summary, and `-v`/`--verbose` restores the old per-item
+listing.
+
+Weighed against the alternative of keeping the detail and adding a
+`--quiet`/`--summary` opt-out: the operator running a real upload wants the
+counts, not the listing, so the flood is the thing you ask for, not the thing
+you suppress.
+
+- **`upload`**: the default prints how many items would upload (newly minted
+  versus under an existing identifier) and how many cells would be written;
+  `-v` restores the per-item and per-cell lines.
+- **`reconcile-files`**: the default prints how many rows would be corrected,
+  how many have no candidate, and how many matched more than one file and
+  would be left alone; `-v` restores the per-row proposals. Its dry run no
+  longer prints the interactive "N corrected" trailer, which always read
+  "0 corrected" because a dry run corrects nothing.
+- **Scope is those two commands.** `sync-metadata --dry-run` and
+  `append-rows --dry-run` already open with a summary line and are left as
+  they are, so `-v` is not defined for them. `validate --json` is a format
+  toggle, not a verbosity control, and is untouched.
+- **`-v` only shapes dry-run output.** Outside `--dry-run` it does nothing; a
+  real run's output is its own concern.
