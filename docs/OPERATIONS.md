@@ -413,7 +413,7 @@ real files in the wrong place under a permanent identifier.
       export step to redo, and nothing local to go stale.
 - [ ] The e2e rehearsal passes on this checkout
       (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
-      `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
+      `python ia_bulk.py upload --project sarasoldphotos --live --dry-run -v`
       over the real Sheet named collection `sarasoldphotos` and printed the
       identifiers and cells you expected.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
