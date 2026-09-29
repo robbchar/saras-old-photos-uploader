@@ -284,7 +284,7 @@ upload fails with what looks like Internet Archive's rate limit, the run
 stops rather than grinding through the rest of the batch as unexplained
 failures — everything already uploaded that run, in this chunk or an earlier
 one, is still confirmed in the Sheet first. Re-run later to resume: a busy IA
-queue can clear in minutes to hours, the 5,000/day cap only tomorrow, and
+queue can clear in minutes to hours, the 5,000/day cap within 24 hours, and
 the stop cannot tell which one it hit. This detector is best-effort: it has
 fired on one real response so far, and it may miss a limit IA signals some
 other way — see `docs/DECISIONS.md`, "Still open".
@@ -317,12 +317,17 @@ the two combine literally, as shown above. Both are recorded in the
 `docs/ARCHITECTURE.md`).
 
 **The 5,000/day cap is enforced.** Internet Archive allows 5,000 items per
-account per day. A run planning more than that is refused before anything is
-uploaded, naming the fix: `--limit 5000`. It refuses rather than silently capping, because a run that
+account per day. A run that would take the last 24 hours past that, counting
+the uploads the Sheet's `ia_uploaded` column shows, is refused before anything
+is uploaded. The refusal names the room left as a `--limit` and when the whole
+run fits. It refuses rather than silently capping, because a run that
 quietly stopped short would read as a complete one. `--allow-over-daily-cap`
 overrides it, and is only correct if you know IA has raised this account's
-cap. The refusal applies in test mode too: a rehearsal uploads through the
-same account and spends the same quota.
+cap. The refusal applies in test mode too, since a rehearsal uploads through
+the same account and spends the same quota — but each run counts only its
+own Sheet's uploads, so live and test runs on the same day do not see each
+other's. A `--dry-run` still shows its preview, followed by the refusal a
+real run would get.
 
 **One upload at a time.** A run refuses to start while another upload is
 running from the same checkout, and names it (project, batch, mode, start
