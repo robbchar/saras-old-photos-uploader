@@ -920,8 +920,8 @@ real Sheet only. Test data is ephemeral — see
 
 Only one rehearsal runs at a time. Step 0 takes the Test Sheet's `E2E Lock`
 tab, and a second run fails at step 0 naming the first; wait for it, then
-re-run. How a stale lock clears is in README's
-["E2E rehearsal (opt-in)"](../README.md#e2e-rehearsal-opt-in). A hand
+re-run. How a stale lock clears is in
+[`decisions/SHEET-PROTOCOL.md`, "One rehearsal at a time"](decisions/SHEET-PROTOCOL.md#one-rehearsal-at-a-time). A hand
 rehearsal (the steps below) takes no lock, so check that the Test Sheet has
 no `E2E Lock` tab before starting one.
 
