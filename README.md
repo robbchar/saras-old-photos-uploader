@@ -616,21 +616,24 @@ python ia_bulk.py upload --project sarasoldphotos --live
 ```
 
 **Before any `--live` run**, check both of these by hand — nothing in the
-tool pins either value (see
+tool can tell a right value from a wrong one (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps)):
 - `projects_registry.json`'s `collection_key` still reads `"lcps"` — see
   [The collection key is `lcps`](docs/decisions/IDENTIFIERS.md#the-collection-key-is-lcps).
   This value never reaches Internet Archive.
-- the project's `ia_collection` in `projects_registry.json`, which nothing
-  checks against Internet Archive — for
-  `sarasoldphotos`, already confirmed by hand against archive.org on
-  2026-08-22 (see [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)); a
-  second project's registry entry would need the same one-time check.
+- the project's `ia_collection` in `projects_registry.json`. `upload --live`
+  refuses unless archive.org confirms it is a collection, but a real
+  collection that is the wrong one still passes. For `sarasoldphotos` it was
+  already confirmed by hand against archive.org on 2026-08-22 (see
+  [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)). A second project's
+  registry entry needs the same one-time check.
 
-`upload --live --dry-run` is the cheapest way to check the second one: its
-opening lines name the Internet Archive collection the run would upload into,
-and it touches nothing. Without `--live` it names `test_collection` instead,
-which checks nothing.
+`upload --live --dry-run` is the cheapest way to check the second one. Its
+opening lines name the Internet Archive collection the run would upload into.
+It then asks archive.org about that collection and prints `Internet Archive
+collection '<name>' confirmed on archive.org`, and it uploads and writes
+nothing. Without `--live` it names `test_collection` instead and checks
+nothing, because test mode uploads into IA's sandbox.
 
 Every command reads the Sheet live; there is no CSV export step. The
 offline CSV paths were removed on 2026-09-23 — see

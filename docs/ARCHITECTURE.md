@@ -704,15 +704,20 @@ The target IA collection is the project's `ia_collection` in
 `projects_registry.json`, and only there: there is no collection flag. (The
 old `--collection` flag defaulted to `"lcps"`, which is not a real Internet
 Archive collection; it was removed with the CSV paths on 2026-09-23.)
-Nothing still validates `ia_collection` against IA itself at
-runtime, so confirm it by hand once, in version control, before the first
-`--live` run — `upload --live --dry-run` names the collection in its opening
-lines without uploading or writing anything (without `--live`, every `upload`
-names `test_collection`). See `DECISIONS.md`, "Technical configuration lives
-in the registry". (`ia_collection` for this project was confirmed by hand
-against archive.org on 2026-08-22 — see `DECISIONS.md`, "Still open" — but
-the tool itself still does not check this automatically, and a second
-project's registry entry would need the same manual confirmation.)
+`upload --live`, and `upload --live --dry-run`, refuse before reading the
+Sheet unless archive.org confirms that `ia_collection` exists with mediatype
+`collection`. See `DECISIONS.md`, "A live upload goes only into a collection
+archive.org confirms". The gap is what that check cannot see. A real
+collection that is the wrong one passes, such as the parent
+`lcpsdigitalcollection` in place of `sarasoldphotos`. So does a collection
+the org account may not add items to. So confirm the value by hand once, in
+version control, before a project's first `--live` run. `upload --live
+--dry-run` names the collection in its opening lines without uploading or
+writing anything (without `--live`, every `upload` names `test_collection`).
+See `DECISIONS.md`, "Technical configuration lives in the registry".
+(`ia_collection` for this project was confirmed by hand against archive.org
+on 2026-08-22; see `DECISIONS.md`, "Still open". A second project's registry
+entry needs the same reading.)
 
 `validate` cannot tell whether a well-formed header is *semantically* right:
 a misspelled header ships as a misspelled IA field on every item. The header

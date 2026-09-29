@@ -61,6 +61,72 @@ and never checked against the registry. They were removed with that path.
 The registry is now the only source of the collection and the files
 directory, with no flag to override either.
 
+## A live upload goes only into a collection archive.org confirms
+
+*Decided 2026-09-29.*
+
+A live upload sends items to the project's `ia_collection` from the
+registry. Before this change, nothing checked that value against Internet
+Archive. If a second project's entry had a typo, real files would go up
+under permanent, unrenameable identifiers into a collection that does not
+exist. The only guard was a person reading the value.
+
+`upload --live` now reads the collection's metadata from archive.org before
+it reads the Sheet. It exits 1 unless the item exists, its `mediatype` is
+`collection`, and archive.org's answer is for exactly the string the upload
+will send. The check and every upload take that string from one place,
+`ProjectConfig.ia_collection_for(live)`.
+
+- **Every unconfirmed result is refused.** That covers a missing item, an
+  item that is not a collection, and a read that gave no verdict. A read
+  gives no verdict when archive.org is unreachable, times out or answers
+  with an error status. It also gives none when the answer lacks the item's
+  metadata (`{"error": ...}`, or a sub-path's answer when `ia_collection`
+  holds a `/`), or is for another identifier (archive.org answers `x/`,
+  `./x` and `x?` with `x`'s item). It is refused anyway, because identifiers
+  are permanent and a re-run costs nothing. The refusal names the parsed
+  HTTP status, the exception's class when there is no status, or what was
+  wrong with the answer, never an exception's message text (see "Rate-limit
+  detection uses a parsed status code, never message text"). There is no
+  override flag.
+- **The refusal says whether waiting helps.** A 429, a 5xx or a failure with
+  no status at all says to run it again later. A 4xx other than 429, or an
+  answer that is not the item, will come back the same, so it points at
+  `ia_collection` and the account's `ia configure` credentials instead.
+- **It runs after the local flag checks and before the Sheet read.** A bad
+  `--limit` or `--chunk-size`, or a blank `--batch`, still fails without a
+  network call. A bad collection fails before the Sheet is read and before
+  the run's log opens.
+- **It says what it is waiting for.** It prints `asking archive.org whether
+  Internet Archive collection '<name>' exists...` before the request, which
+  retries like every other Internet Archive call and can take minutes while
+  archive.org throttles. A Ctrl-C while it waits, or the page's Stop on the
+  Mac, stops the run at once, as one during the Sheet read does (see "An
+  interrupt stops a run after the current item"), with one line instead of a
+  traceback.
+- **The dry run runs it too.** `upload --live --dry-run` is the pre-live
+  check, and it prints `Internet Archive collection '<name>' confirmed on
+  archive.org` when the check passes. The upload page never runs a dry run.
+- **Test mode skips it.** A test run uploads into `test_collection`, IA's
+  sandbox, which no registry value controls.
+- **Only `upload` runs it.** `validate` does not: it checks rows, and the
+  upload page runs `validate` on every load. `doctor` could report the
+  collection, but does not yet.
+- **Some mistakes still pass.** A real collection that is the wrong one
+  passes: the parent `lcpsdigitalcollection` would pass where
+  `sarasoldphotos` is meant. So does a collection the org account may not
+  add items to. So the registry value is still read by hand once, before a
+  project's first live run
+  ([`OPERATIONS.md`](../OPERATIONS.md#pre-live-checklist)).
+
+The read uses the same retry policy as every other Internet Archive call
+(`IA_HTTP_ADAPTER_KWARGS`). The metadata endpoint answers an unknown
+identifier with an empty JSON object, `{}`, not a 404. `internetarchive`
+5.11.1 reports that as `item.exists` being false. The opt-in e2e run
+(`--run-e2e`) pins both answers the verdicts rest on against archive.org
+itself: `test_collection` is confirmed, and an identifier nobody holds is
+missing.
+
 ## The Sheet is reached as a service account, not as a person
 
 **Settled 2026-09-18, reversing 2026-08-08.** Every Sheet read and write

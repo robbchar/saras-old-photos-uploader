@@ -57,6 +57,10 @@ from ia_bulk import (
     UploadFailed,
     batch_row_numbers,
     BatchScopeError,
+    CollectionConfirmed,
+    CollectionMissing,
+    CollectionUnchecked,
+    NotACollection,
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
 from utc_time import format_utc
@@ -4078,6 +4082,8 @@ class SheetUploadRecorder:
 
     def __init__(self):
         self.events = []
+        # Kept out of `events`, so the exact-sequence assertions stay about the Sheet and uploads.
+        self.collection_checks = []
 
     @property
     def kinds(self):
@@ -4229,10 +4235,13 @@ def setup_sheet_upload(
     raise_on_read=None,
     raise_on_log_tab=False,
     timestamps=None,
+    collection_check=None,
 ):
     """Builds the whole Sheet-upload world: files on disk, a registry, a
     recording client monkeypatched over build_sheet_client (the single seam),
-    and upload_row stubbed so nothing touches the network. Also pins the
+    and upload_row and check_ia_collection stubbed so nothing touches the
+    network. The collection check confirms unless `collection_check` is
+    given. Also pins the
     confirm timestamp so a confirm batch can be asserted as an exact ordered
     sequence rather than 'a cell whose value is some string', and pins
     run_stamp() to FIXED_STAMP for the same reason - a caller that needs to
@@ -4269,7 +4278,14 @@ def setup_sheet_upload(
     def fake_upload_timestamp():
         return remaining.pop(0) if remaining else FIXED_TIMESTAMP
 
+    def fake_check_ia_collection(collection):
+        recorder.collection_checks.append(collection)
+        if collection_check is None:
+            return CollectionConfirmed()
+        return collection_check
+
     monkeypatch.setattr("ia_bulk.build_sheet_client", fake_build_sheet_client)
+    monkeypatch.setattr("ia_bulk.check_ia_collection", fake_check_ia_collection)
     monkeypatch.setattr("ia_bulk.upload_row", make_upload_stub(recorder, fail_for, captured))
     monkeypatch.setattr("ia_bulk.upload_timestamp", fake_upload_timestamp)
     monkeypatch.setattr("ia_bulk.run_stamp", lambda: FIXED_STAMP)
@@ -5382,6 +5398,181 @@ def test_cmd_upload_sheet_path_refuses_an_unreplaced_placeholder_sheet_id(
     assert build_calls == []
     assert recorder.events == []
     assert "placeholder" in captured.err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cmd_upload_live_confirms_the_projects_collection_on_archive_org(
+    tmp_path, monkeypatch, capsys, dry_run
+):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, dry_run=dry_run))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.collection_checks == ["lcpsociety"]
+    asking = out.index("asking archive.org whether Internet Archive collection 'lcpsociety' exists...")
+    confirmed = out.index("Internet Archive collection 'lcpsociety' confirmed on archive.org")
+    assert asking < confirmed
+
+
+def test_cmd_upload_live_checks_the_collection_it_uploads_into(tmp_path, monkeypatch):
+    """One resolution, ia_collection_for(live), feeds both the check and every upload."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    uploads = []
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=uploads
+    )
+    monkeypatch.setattr(ProjectConfig, "ia_collection_for", lambda self, live: "resolved-collection")
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 0
+    assert recorder.collection_checks == ["resolved-collection"]
+    assert [upload["collection"] for upload in uploads] == ["resolved-collection"]
+
+
+@pytest.mark.parametrize(
+    "bad_flag,expected_err",
+    [
+        ({"limit": 0}, "--limit must be a positive number"),
+        ({"chunk_size": 0}, "--chunk-size must be a positive number"),
+        ({"batch": "  "}, "--batch needs the value to scope the run to"),
+    ],
+    ids=["limit", "chunk-size", "batch"],
+)
+def test_cmd_upload_live_refuses_a_bad_flag_before_asking_archive_org(
+    tmp_path, monkeypatch, capsys, bad_flag, expected_err
+):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, **bad_flag))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert expected_err in captured.err
+    assert recorder.collection_checks == []
+    assert "asking archive.org" not in captured.out
+
+
+def test_cmd_upload_live_interrupted_while_asking_archive_org_stops_without_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """Retries can hold the check for minutes; a Ctrl-C there (or the page's Stop on the Mac) ends
+    the run in one line. The asking line is already out, so the operator saw what it waited on."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, build_calls = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    def interrupted_check(collection):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ia_bulk.check_ia_collection", interrupted_check)
+
+    try:
+        exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True))
+    except KeyboardInterrupt:
+        pytest.fail("the interrupt escaped cmd_upload as a traceback")
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert build_calls == []
+    assert recorder.events == []
+    assert "asking archive.org whether Internet Archive collection 'lcpsociety' exists..." in captured.out
+    assert captured.err.splitlines() == [
+        "interrupted while asking archive.org. The Sheet was not read; nothing was uploaded."
+    ]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cmd_upload_test_mode_never_checks_the_collection(tmp_path, monkeypatch, capsys, dry_run):
+    """test_collection is IA's own sandbox; only a live run's collection can be mistyped."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, dry_run=dry_run))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.collection_checks == []
+    assert "asking archive.org" not in out
+    assert "confirmed on archive.org" not in out
+
+
+UNCONFIRMED_LCPSOCIETY = (
+    "could not confirm Internet Archive collection 'lcpsociety' exists ({reason}), and a live "
+    "upload goes only into a confirmed collection. Nothing was uploaded"
+)
+RETRY_LATER = "; archive.org was unreachable or busy, so run this again later."
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "collection_check,expected_err",
+    [
+        (
+            CollectionMissing(),
+            "project 'astoriaphotos' sends items to Internet Archive collection 'lcpsociety', "
+            "but archive.org has no item by that name",
+        ),
+        (
+            NotACollection("image"),
+            "but 'lcpsociety' is an item with mediatype 'image', not a collection",
+        ),
+        (
+            NotACollection(None),
+            "but 'lcpsociety' is an item with no mediatype, not a collection",
+        ),
+        (
+            CollectionUnchecked("HTTP 503", retry_later=True),
+            UNCONFIRMED_LCPSOCIETY.format(reason="HTTP 503") + RETRY_LATER,
+        ),
+        (
+            CollectionUnchecked("ConnectionError", retry_later=True),
+            UNCONFIRMED_LCPSOCIETY.format(reason="ConnectionError") + RETRY_LATER,
+        ),
+        (
+            CollectionUnchecked("HTTP 403", retry_later=False),
+            UNCONFIRMED_LCPSOCIETY.format(reason="HTTP 403")
+            + ". Check ia_collection in the registry; if archive.org refused the account, "
+            + deployment.IA_CONFIGURE_REMEDY
+            + ".",
+        ),
+    ],
+    ids=["missing", "wrong-mediatype", "no-mediatype", "http-status", "no-status", "refused"],
+)
+def test_cmd_upload_live_refuses_before_the_sheet_when_the_collection_is_not_confirmed(
+    tmp_path, monkeypatch, capsys, collection_check, expected_err, dry_run
+):
+    """Identifiers are permanent, so a collection that cannot be confirmed -
+    archive.org unreachable included - stops the run before anything is read or sent."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, build_calls = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, collection_check=collection_check
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, dry_run=dry_run))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert build_calls == []
+    assert recorder.events == []
+    assert expected_err in captured.err
+    assert "Nothing was uploaded" in captured.err
+    assert "confirmed on archive.org" not in captured.out
 
 
 def test_cmd_upload_records_a_failed_upload_without_confirming_it(tmp_path, monkeypatch, capsys):
@@ -6601,6 +6792,143 @@ def test_fetch_current_metadata_asks_for_the_status_preserving_adapter(monkeypat
     monkeypatch.setattr(internetarchive, "get_item", fake_get_item)
 
     assert fetch_current_metadata("zztest-x") == {"title": "Existing"}
+    assert captured["http_adapter_kwargs"] == {"max_retries": IA_RETRY}
+
+
+# --- a live upload's collection is confirmed on archive.org first -------------
+
+
+def answer_metadata_read(monkeypatch, answer):
+    """Stands in for the metadata endpoint under the real get_item(): a dict
+    is the response body, an exception is raised the way get_metadata() raises."""
+
+    def fake_get_metadata(self, identifier, request_kwargs=None):
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(internetarchive.session.ArchiveSession, "get_metadata", fake_get_metadata)
+
+
+def test_check_ia_collection_confirms_an_item_whose_mediatype_is_collection(monkeypatch):
+    from ia_bulk import check_ia_collection
+
+    answer_metadata_read(
+        monkeypatch, {"metadata": {"identifier": "sarasoldphotos", "mediatype": "collection"}}
+    )
+
+    assert check_ia_collection("sarasoldphotos") == CollectionConfirmed()
+
+
+def test_check_ia_collection_reports_an_identifier_archive_org_does_not_have(monkeypatch):
+    """archive.org answers an unknown identifier with an empty JSON object, not a 404."""
+    from ia_bulk import check_ia_collection
+
+    answer_metadata_read(monkeypatch, {})
+
+    assert check_ia_collection("sarahsoldphotos") == CollectionMissing()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"error": "Couldn't get 'nope' for item sarasoldphotos"},
+        {"result": {"identifier": "sarasoldphotos", "mediatype": "collection"}},
+    ],
+    ids=["error", "sub-path-result"],
+)
+def test_check_ia_collection_cannot_judge_an_answer_without_item_metadata(monkeypatch, answer):
+    """What archive.org sends for `sarasoldphotos/nope` and `sarasoldphotos/metadata`: not a registry verdict."""
+    from ia_bulk import check_ia_collection
+
+    answer_metadata_read(monkeypatch, answer)
+
+    assert check_ia_collection("sarasoldphotos") == CollectionUnchecked(
+        "an answer without the item's metadata", retry_later=False
+    )
+
+
+@pytest.mark.parametrize("collection", ["sarasoldphotos/", "./sarasoldphotos", "sarasoldphotos?"])
+def test_check_ia_collection_refuses_an_answer_for_a_different_identifier(monkeypatch, collection):
+    """archive.org answers each of these with sarasoldphotos' item, but the upload sends the raw string."""
+    from ia_bulk import check_ia_collection
+
+    answer_metadata_read(
+        monkeypatch, {"metadata": {"identifier": "sarasoldphotos", "mediatype": "collection"}}
+    )
+
+    assert check_ia_collection(collection) == CollectionUnchecked(
+        "archive.org answered for 'sarasoldphotos'", retry_later=False
+    )
+
+
+@pytest.mark.parametrize("mediatype", ["image", None])
+def test_check_ia_collection_rejects_an_item_that_is_not_a_collection(monkeypatch, mediatype):
+    from ia_bulk import check_ia_collection
+
+    metadata = {"identifier": "lcps-sarasoldphotos-00001"}
+    if mediatype is not None:
+        metadata["mediatype"] = mediatype
+    answer_metadata_read(monkeypatch, {"metadata": metadata})
+
+    assert check_ia_collection("lcps-sarasoldphotos-00001") == NotACollection(mediatype)
+
+
+@pytest.mark.parametrize(
+    "status_code,retry_later",
+    [(503, True), (429, True), (502, True), (501, True), (403, False), (400, False)],
+)
+def test_check_ia_collection_keeps_the_status_the_metadata_call_stripped(
+    monkeypatch, status_code, retry_later
+):
+    """A 4xx other than 429 is archive.org's answer, and asking again gets it again."""
+    from ia_bulk import check_ia_collection
+
+    answer_metadata_read(monkeypatch, stripped_like_get_metadata(status_code))
+
+    assert check_ia_collection("sarasoldphotos") == CollectionUnchecked(
+        f"HTTP {status_code}", retry_later=retry_later
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        requests.exceptions.ConnectionError("connection refused"),
+        requests.exceptions.ChunkedEncodingError("connection dropped mid-body"),
+        # get_metadata() calls resp.json() outside its try, so a maintenance page arrives as this.
+        requests.exceptions.JSONDecodeError("Expecting value", "<html>", 0),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_check_ia_collection_names_a_failure_that_carries_no_status(monkeypatch, failure):
+    """No status means archive.org never answered, so waiting is the remedy."""
+    from ia_bulk import check_ia_collection
+
+    answer_metadata_read(monkeypatch, failure)
+
+    assert check_ia_collection("sarasoldphotos") == CollectionUnchecked(
+        type(failure).__name__, retry_later=True
+    )
+
+
+def test_check_ia_collection_asks_for_the_status_preserving_adapter(monkeypatch):
+    from ia_bulk import check_ia_collection, IA_RETRY
+
+    captured = {}
+
+    class FakeItem:
+        exists = True
+        metadata = {"mediatype": "collection"}
+
+    def fake_get_item(identifier, **kwargs):
+        captured.update(kwargs)
+        return FakeItem()
+
+    monkeypatch.setattr(internetarchive, "get_item", fake_get_item)
+
+    check_ia_collection("sarasoldphotos")
+
     assert captured["http_adapter_kwargs"] == {"max_retries": IA_RETRY}
 
 
