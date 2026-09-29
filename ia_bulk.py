@@ -4329,7 +4329,7 @@ def upload_from_sheet(args) -> int:
         return 1
 
     # FOUNDATIONS.md, "A live upload goes only into a collection archive.org confirms".
-    if live and not confirm_collection_on_archive_org(config.project_id, config.ia_collection):
+    if live and not confirm_collection_on_archive_org(config.project_id, collection):
         return 1
 
     try:

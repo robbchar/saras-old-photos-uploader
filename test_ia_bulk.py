@@ -5417,6 +5417,24 @@ def test_cmd_upload_live_confirms_the_projects_collection_on_archive_org(
     assert asking < confirmed
 
 
+def test_cmd_upload_live_checks_the_collection_it_uploads_into(tmp_path, monkeypatch):
+    """One resolution, ia_collection_for(live), feeds both the check and every upload."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    uploads = []
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=uploads
+    )
+    monkeypatch.setattr(ProjectConfig, "ia_collection_for", lambda self, live: "resolved-collection")
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 0
+    assert recorder.collection_checks == ["resolved-collection"]
+    assert [upload["collection"] for upload in uploads] == ["resolved-collection"]
+
+
 @pytest.mark.parametrize(
     "bad_flag,expected_err",
     [

@@ -74,7 +74,8 @@ exist. The only guard was a person reading the value.
 `upload --live` now reads the collection's metadata from archive.org before
 it reads the Sheet. It exits 1 unless the item exists, its `mediatype` is
 `collection`, and archive.org's answer is for exactly the string the upload
-will send.
+will send. The check and every upload take that string from one place,
+`ProjectConfig.ia_collection_for(live)`.
 
 - **Every unconfirmed result is refused.** That covers a missing item, an
   item that is not a collection, and a read that gave no verdict. A read
