@@ -16,7 +16,7 @@ import {
   type OutputHandlers,
 } from "./api/client";
 import type { AppState, TerminalRunHolder } from "./state/types";
-import type { ValidateDoc, ValidateRow } from "./api/schemas";
+import type { Status, ValidateDoc, ValidateRow } from "./api/schemas";
 import { reducer } from "./state/reducer";
 import { Header } from "./components/Header";
 import { ThemePicker } from "./components/ThemePicker";
@@ -45,12 +45,7 @@ export function appendLineCapped(previous: string[], line: string): string[] {
   return previous.length < MAX_BUFFERED_LINES ? [...previous, line] : [...previous.slice(1), line];
 }
 
-interface PageIdentity {
-  project: string;
-  collection: string;
-  version: string;
-  live: boolean;
-}
+type PageIdentity = Pick<Status, "project" | "collection" | "version" | "live">;
 
 // Last byte offset shown for a run, keyed by the run's `started_at`, so a
 // reload can resume the output stream instead of replaying it from the start.

@@ -2751,17 +2751,19 @@ def report_unreadable_registry(args, exc: Exception) -> int:
 
 
 def version_line(commit: str) -> str:
-    short_commit = commit if commit == "unknown" else commit[:7]
-    return f"ia_bulk {app_version.APP_VERSION} (commit {short_commit})"
+    return f"ia_bulk {app_version.APP_VERSION} (commit {deployment.short_commit(commit)})"
 
 
 def report_version_update() -> None:
-    """Print the version line, name the previous version after an upgrade, then record this one."""
+    """Print the version line, then name the previous version after an upgrade."""
     print(version_line(deployment.read_head_commit(REPO_ROOT)))
-    marker_path = app_version.INSTALLED_VERSION_PATH
-    update = app_version.update_line(app_version.read_installed_version(marker_path))
+    update = app_version.update_line(app_version.read_installed_version(app_version.INSTALLED_VERSION_PATH))
     if update is not None:
         print(update)
+
+
+def record_installed_version() -> None:
+    marker_path = app_version.INSTALLED_VERSION_PATH
     try:
         app_version.record_installed_version(marker_path)
     except OSError as exc:
@@ -2800,6 +2802,8 @@ def cmd_setup(args) -> int:
         checks = build_deployment_checks(args, include_network=not args.offline)
     except REGISTRY_READ_ERRORS as exc:
         return report_unreadable_registry(args, exc)
+    # After the registry read: a broken registry is fixed and re-run, and the upgrade line must survive that.
+    record_installed_version()
     results = deployment.converge(checks, announce)
     agent_failed = False
     upload_page_failed = False

@@ -24,7 +24,12 @@ def record_installed_version(marker_path: Path) -> None:
     marker_path.write_text(f"{APP_VERSION}\n", encoding="utf-8", newline="\n")
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
 def update_line(previous_version: str | None) -> str | None:
     if previous_version is None or previous_version == APP_VERSION:
         return None
-    return f"updating from {previous_version} to {APP_VERSION}"
+    direction = "updating" if _version_key(previous_version) < _version_key(APP_VERSION) else "downgrading"
+    return f"{direction} from {previous_version} to {APP_VERSION}"

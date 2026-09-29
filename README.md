@@ -650,7 +650,7 @@ upload page together. It shows in three places:
 - `python ia_bulk.py --version`
 - the top of `doctor`'s and `setup`'s output, with the checkout's short
   commit; after a `git pull` that changed the version, `setup` adds
-  `updating from X to Y`, read from the `logs/installed-version` the last
+  `updating from X to Y` (or `downgrading from X to Y`), read from the `logs/installed-version` the last
   `setup` wrote
 
 Bump it in the same PR as the change it describes:

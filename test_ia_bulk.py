@@ -3132,6 +3132,37 @@ def test_cmd_setup_still_runs_when_the_version_cannot_be_recorded(monkeypatch, c
     assert "nothing to change" in captured.out
 
 
+def test_cmd_doctor_does_not_record_the_installed_version(monkeypatch):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+    ia_bulk.cmd_doctor(ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"]))
+    assert not app_version.INSTALLED_VERSION_PATH.exists()
+
+
+def test_cmd_setup_refusal_does_not_record_the_installed_version(monkeypatch):
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: pytest.fail("setup ran checks before refusing"),
+    )
+    assert ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo", "--enable-agent"])) == 1
+    assert not app_version.INSTALLED_VERSION_PATH.exists()
+
+
+def test_cmd_setup_with_a_broken_registry_keeps_the_previous_version(monkeypatch, capsys):
+    def unreadable_registry(args, include_network):
+        raise ValueError("malformed registry")
+
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", unreadable_registry)
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+    marker_path = app_version.INSTALLED_VERSION_PATH
+    marker_path.parent.mkdir(parents=True)
+    marker_path.write_text("0.9.0\n", encoding="utf-8")
+    assert ia_bulk.cmd_setup(ia_bulk.build_parser().parse_args(["setup", "--project", "demo"])) == 1
+    assert f"updating from 0.9.0 to {app_version.APP_VERSION}" in capsys.readouterr().out
+    assert app_version.read_installed_version(marker_path) == "0.9.0"
+
+
 def test_version_flag_prints_the_app_version(capsys):
     with pytest.raises(SystemExit) as exit_info:
         ia_bulk.build_parser().parse_args(["--version"])

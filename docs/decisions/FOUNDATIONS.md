@@ -179,13 +179,17 @@ the version, so a version can be told apart from later untagged commits on
 `main`. The page header shows the version alone.
 
 `setup` records the version it ran against in `logs/installed-version` and
-prints `updating from X to Y` when the next run's version differs. An upgrade
+prints `updating from X to Y` when the next run's version differs
+(`downgrading from X to Y` when it went back, such as a checkout of an older
+tag after a bad release). An upgrade
 is `git pull && ./install.sh`, so by the time `setup` runs the old checkout is
 gone; this marker is the only record of what came before. The line fires only
 on a version change, never on a commit change alone: every behavior change
 bumps the version in its own PR, so a commit-only difference is noise. The
-marker is written on every run past the refusals, whatever the checks say,
-because the pull has already swapped the code.
+marker is written on every run that gets past the refusals and reads the
+registry, whatever the checks say, because the pull has already swapped the
+code. It is not written when the registry can't be read: the operator fixes
+the registry and re-runs `setup`, and that run still has to name the upgrade.
 
 ## Accepted, not overlooked
 

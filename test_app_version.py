@@ -49,3 +49,12 @@ def test_update_line_is_none_when_the_version_is_unchanged():
 
 def test_update_line_names_both_versions_when_they_differ():
     assert app_version.update_line("0.9.0") == f"updating from 0.9.0 to {app_version.APP_VERSION}"
+
+
+def test_update_line_calls_a_rollback_a_downgrade():
+    assert app_version.update_line("99.0.0") == f"downgrading from 99.0.0 to {app_version.APP_VERSION}"
+
+
+def test_update_line_compares_versions_numerically(monkeypatch):
+    monkeypatch.setattr(app_version, "APP_VERSION", "1.10.0")
+    assert app_version.update_line("1.9.0") == "updating from 1.9.0 to 1.10.0"

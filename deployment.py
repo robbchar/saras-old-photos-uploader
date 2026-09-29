@@ -689,8 +689,11 @@ def _default_read_health(port: int) -> "dict | None":
         return None
 
 
+UNKNOWN_COMMIT = "unknown"
+
+
 def read_head_commit(repo_root: Path) -> str:
-    """`git rev-parse HEAD` for repo_root, "unknown" on any failure.
+    """`git rev-parse HEAD` for repo_root, UNKNOWN_COMMIT on any failure.
 
     Deliberately its own copy of upload_server._default_read_commit's exact
     git command, not an import of it: doctor stays decoupled from the
@@ -706,8 +709,12 @@ def read_head_commit(repo_root: Path) -> str:
             check=True,
         )
     except (OSError, subprocess.CalledProcessError):
-        return "unknown"
-    return result.stdout.strip() or "unknown"
+        return UNKNOWN_COMMIT
+    return result.stdout.strip() or UNKNOWN_COMMIT
+
+
+def short_commit(commit: str) -> str:
+    return commit if commit == UNKNOWN_COMMIT else commit[:7]
 
 
 def bundle_current_check(page_dir: Path) -> Check:
