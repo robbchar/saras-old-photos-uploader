@@ -616,14 +616,17 @@ tool pins either value (see
 - `projects_registry.json`'s `collection_key` still reads `"lcps"` — see
   [The collection key is `lcps`](docs/decisions/IDENTIFIERS.md#the-collection-key-is-lcps).
   This value never reaches Internet Archive.
-- the project's `ia_collection` in `projects_registry.json`, which nothing
-  checks against Internet Archive — for
-  `sarasoldphotos`, already confirmed by hand against archive.org on
-  2026-08-22 (see [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)); a
-  second project's registry entry would need the same one-time check.
+- the project's `ia_collection` in `projects_registry.json`. `upload --live`
+  refuses unless archive.org confirms it is a collection, but a real
+  collection that is the wrong one still passes. For `sarasoldphotos` it was
+  already confirmed by hand against archive.org on 2026-08-22 (see
+  [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)). A second project's
+  registry entry needs the same one-time check.
 
-`--dry-run` is the cheapest way to check the second one: it prints every
-identifier it would mint and every cell it would write, and touches nothing.
+`upload --live --dry-run` is the cheapest way to check the second one. It
+asks archive.org about the collection and prints `Internet Archive collection
+'<name>' confirmed on archive.org`, and it uploads and writes nothing. Without
+`--live` it checks nothing, because test mode uploads into `test_collection`.
 
 Every command reads the Sheet live; there is no CSV export step. The
 offline CSV paths were removed on 2026-09-23 — see

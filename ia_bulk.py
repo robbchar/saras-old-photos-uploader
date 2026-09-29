@@ -4115,6 +4115,65 @@ def print_dry_run(
         print("(re-run with -v to list every item and cell)")
 
 
+class CollectionVerdict(Enum):
+    """What archive.org says about the collection a live upload targets."""
+
+    CONFIRMED = "confirmed"
+    MISSING = "missing"
+    NOT_A_COLLECTION = "not_a_collection"
+    UNCHECKED = "unchecked"
+
+
+@dataclass(frozen=True)
+class CollectionCheck:
+    collection: str
+    verdict: CollectionVerdict
+    mediatype: str | None = None
+    # UNCHECKED only: the parsed status when there is one, and the exception's class name.
+    http_status: int | None = None
+    failure: str | None = None
+
+
+COLLECTION_MEDIATYPE = "collection"
+
+
+def check_ia_collection(collection: str) -> CollectionCheck:
+    """Reads `collection` from archive.org's metadata endpoint; never raises."""
+    try:
+        item = internetarchive.get_item(collection, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    except Exception as exc:
+        return CollectionCheck(
+            collection,
+            CollectionVerdict.UNCHECKED,
+            http_status=parsed_status_code(exc),
+            failure=type(exc).__name__,
+        )
+    # The endpoint answers an unknown identifier with an empty body, not a 404.
+    if not item.exists:
+        return CollectionCheck(collection, CollectionVerdict.MISSING)
+    mediatype = item.metadata.get("mediatype")
+    if mediatype != COLLECTION_MEDIATYPE:
+        return CollectionCheck(collection, CollectionVerdict.NOT_A_COLLECTION, mediatype=mediatype)
+    return CollectionCheck(collection, CollectionVerdict.CONFIRMED, mediatype=mediatype)
+
+
+def collection_refusal(check: CollectionCheck, project: str) -> str:
+    """The stderr message for any verdict but CONFIRMED."""
+    target = f"project '{project}' sends items to Internet Archive collection '{check.collection}'"
+    fix = "Check ia_collection in the registry. Nothing was uploaded."
+    if check.verdict is CollectionVerdict.MISSING:
+        return f"{target}, but archive.org has no item by that name. {fix}"
+    if check.verdict is CollectionVerdict.NOT_A_COLLECTION:
+        found = f"mediatype '{check.mediatype}'" if check.mediatype else "no mediatype"
+        return f"{target}, but '{check.collection}' is an item with {found}, not a collection. {fix}"
+    reason = f"HTTP {check.http_status}" if check.http_status is not None else check.failure
+    return (
+        f"could not confirm Internet Archive collection '{check.collection}' exists ({reason}), "
+        "and a live upload goes only into a confirmed collection. Nothing was uploaded; run this "
+        "again once archive.org responds."
+    )
+
+
 def cmd_upload(args) -> int:
     # A dry run writes nothing, so it may preview while a real run is going.
     if getattr(args, "dry_run", False):
@@ -4223,6 +4282,14 @@ def upload_from_sheet(args) -> int:
     except BatchScopeError as exc:
         print(exc, file=sys.stderr)
         return 1
+
+    # QUOTA-AND-RUNS.md, "A live upload goes only into a collection archive.org confirms".
+    if live:
+        collection_check = check_ia_collection(config.ia_collection)
+        if collection_check.verdict is not CollectionVerdict.CONFIRMED:
+            print(collection_refusal(collection_check, args.project), file=sys.stderr)
+            return 1
+        print(f"Internet Archive collection '{config.ia_collection}' confirmed on archive.org")
 
     try:
         sheet = read_sheet(args, registry, config, live, "upload")

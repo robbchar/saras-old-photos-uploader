@@ -378,10 +378,12 @@ real files in the wrong place under a permanent identifier.
       **Do not confuse this with `collection_key` above; they are unrelated
       values, and it is a coincidence of spelling — not a code relationship —
       that `ia_collection` and the project id now share the same string.**
-      What nothing in this
-      tool does is confirm `ia_collection` **exists on archive.org** — that
-      confirmation has to happen by hand, once, before the first `--live`
-      run. **Done 2026-08-22**: `archive.org/details/sarasoldphotos` was
+      Before it reads the Sheet, `upload --live` asks archive.org whether
+      `ia_collection` **exists as a collection**. It refuses if it does not,
+      and also if archive.org cannot be reached. What it cannot confirm is
+      that it is the *right* collection: the parent `lcpsdigitalcollection`
+      would pass too. That confirmation has to happen by hand, once, before
+      the first `--live` run. **Done 2026-08-22**: `archive.org/details/sarasoldphotos` was
       checked by hand — it exists (title "Sara's Old Photos") and is already
       a child of the LCPS parent collection, `lcpsdigitalcollection`. Items
       are tagged into this subcollection alone; membership in the parent (and
@@ -415,7 +417,9 @@ real files in the wrong place under a permanent identifier.
 - [ ] The e2e rehearsal passes on this checkout
       (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
       `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
-      over the real Sheet printed the identifiers and cells you expected.
+      over the real Sheet printed `Internet Archive collection
+      'sarasoldphotos' confirmed on archive.org` and the identifiers and
+      cells you expected.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.

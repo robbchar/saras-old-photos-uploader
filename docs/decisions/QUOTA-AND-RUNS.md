@@ -764,3 +764,48 @@ you suppress.
   toggle, not a verbosity control, and is untouched.
 - **`-v` only shapes dry-run output.** Outside `--dry-run` it changes nothing,
   and says so on stderr rather than being silently ignored.
+
+## A live upload goes only into a collection archive.org confirms
+
+*Decided 2026-09-29.*
+
+A live upload sends items to the project's `ia_collection` from the
+registry. Before this change, nothing checked that value against Internet
+Archive. If a second project's entry had a typo, real files would go up
+under permanent, unrenameable identifiers into a collection that does not
+exist. The only guard was a person reading the value.
+
+`upload --live` now reads the collection's metadata from archive.org before
+it reads the Sheet. It exits 1 unless the item exists and its `mediatype` is
+`collection`.
+
+- **Every unconfirmed result is refused.** That covers a missing item, an
+  item that is not a collection, and a metadata read that failed:
+  unreachable, a 503, a timeout. A failed read says nothing about the
+  registry. It is refused anyway, because identifiers are permanent and a
+  re-run costs nothing. The refusal names the parsed HTTP status when there
+  is one, and the exception's class otherwise, never its message text (see
+  "Rate-limit detection uses a parsed status code, never message text").
+  There is no override flag.
+- **It runs after the local flag checks and before the Sheet read.** A
+  mistyped `--limit` still fails without a network call. A bad collection
+  fails before the Sheet is read and before the run's log opens.
+- **The dry run runs it too.** `upload --live --dry-run` is the pre-live
+  check, and it prints `Internet Archive collection '<name>' confirmed on
+  archive.org` when the check passes. That is one read-only request. The
+  upload page never runs a dry run.
+- **Test mode skips it.** A test run uploads into `test_collection`, IA's
+  sandbox, which no registry value controls.
+- **Only `upload` runs it.** `validate` checks rows, and the upload page runs
+  it on every load. `doctor` could report it, but does not yet.
+- **Some mistakes still pass.** A real collection that is the wrong one
+  passes: the parent `lcpsdigitalcollection` would pass where
+  `sarasoldphotos` is meant. So does a collection the org account may not
+  add items to. So the registry value is still read by hand once, before a
+  project's first live run
+  ([`OPERATIONS.md`](../OPERATIONS.md#pre-live-checklist)).
+
+The read uses the same retry policy as every other Internet Archive call
+(`IA_HTTP_ADAPTER_KWARGS`). The metadata endpoint answers an unknown
+identifier with an empty body, not a 404. `internetarchive` 5.11.1 reports
+that as `item.exists` being false.
