@@ -51,7 +51,7 @@ where the decision that needs it is made: the Start button's own label
 ("Upload 42 items to Internet Archive") and the confirmation dialog that
 follows it, which in live mode adds that the upload cannot be undone or
 renamed. Test mode is the unusual one — a volunteer rehearsing, or someone
-testing the page itself — and gets a persistent amber banner ("TEST MODE —
+testing the page itself — and gets a persistent teal banner ("TEST MODE —
 uploads go to test_collection and expire in about 30 days") for the whole
 session, not only at the moment of starting.
 
@@ -196,3 +196,33 @@ separate `--enable-upload-page` re-run. See
 port and both run `serve --live`; whichever starts second fails to bind.
 This is a deployment choice made once per Mac — neither mechanism detects or
 refuses the other on its own.
+
+## The color scheme follows the computer until someone picks one
+
+*Decided 2026-09-29 (#83).*
+
+The page has a light and a dark color scheme, drawn from lcpsociety.org
+(warm paper, near-black, the logo's gold), and a three-way control in the
+header: **Auto**, **Light**, **Dark**. Auto is the default and follows the
+computer's own setting, live. Picking Light or Dark saves that choice in the
+browser (`localStorage`, key `upload-page:color-scheme`) and it wins from
+then on; picking Auto again forgets it. Other open tabs of the page follow
+the change. Auto exists because a volunteer who
+flips the page to try it out otherwise has no way back to "whatever this Mac
+does".
+
+The scheme is an attribute (`data-color-scheme`) on the page root, not a
+`prefers-color-scheme` media query, so a saved choice can override the OS.
+`index.html` sets it with a small inline script before the first paint —
+without it the page would flash the wrong scheme while the bundle loads —
+and `useColorScheme` keeps it current afterwards. The two read the same
+storage key; a test runs the inline script to hold them together. A
+`prefers-color-scheme` block survives only as a fallback for a page where
+that script never ran (no attribute set), so a dark Mac still gets dark.
+
+Gold stays decorative in light mode (a rule along the header's top edge)
+because it is too pale for text on a light background; in dark mode it
+becomes the accent. Test mode moved from amber to teal so its banner never
+reads as the brand color. The display font, Josefin Sans (the society
+site's), is bundled into `dist/` rather than loaded from Google, so the page
+makes no third-party requests.

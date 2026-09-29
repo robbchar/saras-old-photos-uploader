@@ -200,9 +200,10 @@ describe("App", () => {
     expect(mockGetThemes).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the server-reported app version in the header", async () => {
+  it("shows the server-reported app version in the page corner, not the header", async () => {
     render(<App />);
-    expect(await screen.findByText("v1.0.0")).toBeInTheDocument();
+    const version = await screen.findByText("v1.0.0");
+    expect(screen.getByRole("banner")).not.toContainElement(version);
   });
 
   it("selecting a theme fetches and shows its preview", async () => {

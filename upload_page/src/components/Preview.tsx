@@ -32,7 +32,7 @@ export function Preview({ doc, checkedAt, onRecheck }: PreviewProps) {
         <button
           type="button"
           onClick={onRecheck}
-          className="rounded border border-border-strong px-3 py-1.5 text-text"
+          className="btn-secondary"
         >
           Re-check
         </button>

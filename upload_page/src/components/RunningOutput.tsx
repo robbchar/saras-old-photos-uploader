@@ -94,7 +94,7 @@ export function RunningOutput({ lines, keyBase = 0, done, planned, current, stop
           <button
             type="button"
             disabled
-            className="rounded border border-border-strong px-3 py-1.5 text-faint"
+            className="btn-secondary"
           >
             Stopping after the current item…
           </button>
@@ -107,14 +107,14 @@ export function RunningOutput({ lines, keyBase = 0, done, planned, current, stop
             <button
               type="button"
               onClick={handleConfirmStop}
-              className="rounded border border-border-strong px-3 py-1.5 text-text"
+              className="btn-secondary"
             >
               Stop
             </button>
             <button
               type="button"
               onClick={handleCancelStop}
-              className="rounded border border-border-strong px-3 py-1.5 text-text"
+              className="btn-secondary"
             >
               Cancel
             </button>
@@ -123,7 +123,7 @@ export function RunningOutput({ lines, keyBase = 0, done, planned, current, stop
           <button
             type="button"
             onClick={handleStopClick}
-            className="rounded border border-border-strong px-3 py-1.5 text-text"
+            className="btn-secondary"
           >
             Stop
           </button>

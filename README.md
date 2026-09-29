@@ -646,7 +646,7 @@ The tool has one semantic version, `APP_VERSION` in
 [`app_version.py`](app_version.py), covering the CLI, the server and the
 upload page together. It shows in three places:
 
-- the upload page's header (`v1.0.0`, from `GET /api/status`)
+- the upload page's bottom-right corner (`v1.0.0`, from `GET /api/status`)
 - `python ia_bulk.py --version`
 - the top of `doctor`'s and `setup`'s output, with the checkout's short
   commit; after a `git pull` that changed the version, `setup` adds

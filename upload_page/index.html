@@ -4,6 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Upload</title>
+    <script>
+      // Pre-paint copy of src/colorScheme/colorScheme.ts: saved choice, else the OS.
+      (function () {
+        var stored = null;
+        try {
+          stored = localStorage.getItem("upload-page:color-scheme");
+        } catch (e) {}
+        var scheme =
+          stored === "light" || stored === "dark"
+            ? stored
+            : matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        document.documentElement.dataset.colorScheme = scheme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -27,10 +27,10 @@ function RowFailureList({
   const itemClassName =
     tone === "danger"
       ? "rounded border border-danger-border bg-danger-bg px-2 py-1 text-sm text-danger"
-      : "rounded border border-border px-2 py-1 text-sm text-text";
+      : "rounded border border-border-strong bg-raised px-2 py-1 text-sm text-text";
   return (
     <div className="mt-4">
-      <h3 className="text-sm font-semibold text-muted">{`${title} (${items.length})`}</h3>
+      <h3 className="caps text-xs text-muted">{`${title} (${items.length})`}</h3>
       {items.length === 0 ? (
         <p className="text-muted">None</p>
       ) : (

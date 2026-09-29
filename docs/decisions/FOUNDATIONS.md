@@ -176,7 +176,8 @@ there is only one version to read.
 
 The commit SHA is already on `GET /api/health`, and `doctor` shows it next to
 the version, so a version can be told apart from later untagged commits on
-`main`. The page header shows the version alone.
+`main`. The upload page shows the version alone, pinned to its bottom-right
+corner.
 
 `setup` records the version it ran against in `logs/installed-version` and
 prints `updating from X to Y` when the next run's version differs

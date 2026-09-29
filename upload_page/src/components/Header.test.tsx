@@ -9,39 +9,46 @@ import { Header } from "./Header";
 afterEach(cleanup);
 
 // The exact banner wording is part of the contract (task brief) - a
-// screen reader user relies on this text alone, since the amber color is
+// screen reader user relies on this text alone, since the banner color is
 // not itself a signal (color-blind users, printouts, etc).
 const TEST_MODE_TEXT =
   "TEST MODE — uploads go to test_collection and expire in about 30 days";
 
 describe("Header", () => {
   it("shows the project and collection", () => {
-    render(<Header project="astoriaphotos" collection="lcps_astoria" version="1.0.0" live />);
+    render(<Header project="astoriaphotos" collection="lcps_astoria" live />);
     expect(screen.getByText("astoriaphotos")).toBeInTheDocument();
     expect(screen.getByText("lcps_astoria")).toBeInTheDocument();
   });
 
-  it("shows the app version with a v prefix", () => {
-    render(<Header project="astoriaphotos" collection="lcps_astoria" version="1.2.3" live />);
-    expect(screen.getByText("v1.2.3")).toBeInTheDocument();
-  });
-
   it("shows the test-mode banner with the exact wording when not live", () => {
-    render(<Header project="astoriaphotos" collection="test_collection" version="1.0.0" live={false} />);
+    render(<Header project="astoriaphotos" collection="test_collection" live={false} />);
     expect(screen.getByText(TEST_MODE_TEXT)).toBeInTheDocument();
   });
 
   it("shows no banner at all in live mode", () => {
-    render(<Header project="astoriaphotos" collection="lcps_astoria" version="1.0.0" live />);
+    render(<Header project="astoriaphotos" collection="lcps_astoria" live />);
     expect(screen.queryByText(/TEST MODE/)).not.toBeInTheDocument();
   });
 
   it("renders children (the persistent theme picker) inside the header", () => {
     render(
-      <Header project="astoriaphotos" collection="test_collection" version="1.0.0" live={false}>
+      <Header project="astoriaphotos" collection="test_collection" live={false}>
         <button type="button">theme picker slot</button>
       </Header>,
     );
     expect(screen.getByRole("button", { name: "theme picker slot" })).toBeInTheDocument();
+  });
+
+  it("renders the toolbar (the color-scheme toggle) inside the header", () => {
+    render(
+      <Header
+        project="astoriaphotos"
+        collection="lcps_astoria"
+        live
+        toolbar={<button type="button">toolbar slot</button>}
+      />,
+    );
+    expect(screen.getByRole("banner")).toContainElement(screen.getByRole("button", { name: "toolbar slot" }));
   });
 });
