@@ -5,6 +5,7 @@ import pytest
 
 from project_config import (
     REQUIRED_KEYS,
+    TEST_COLLECTION,
     ConfigError,
     PlaceholderSheetId,
     is_placeholder_sheet_id,
@@ -59,6 +60,14 @@ def test_live_and_test_runs_select_different_sheets():
 
     assert config.sheet_id_for(live=True) == "REAL_SHEET"
     assert config.sheet_id_for(live=False) == "TEST_SHEET"
+
+
+def test_live_and_test_runs_select_different_collections():
+    """A test run never uploads into the registry's real collection."""
+    config = load_project_config(REGISTRY, "sarasoldphotos")
+
+    assert config.ia_collection_for(live=True) == "lcpsociety"
+    assert config.ia_collection_for(live=False) == TEST_COLLECTION
 
 
 def test_sheet_tab_for_falls_back_to_the_shared_default():

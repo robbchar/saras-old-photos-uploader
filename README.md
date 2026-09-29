@@ -622,8 +622,10 @@ tool pins either value (see
   2026-08-22 (see [`docs/DECISIONS.md`](docs/DECISIONS.md#still-open)); a
   second project's registry entry would need the same one-time check.
 
-`--dry-run` is the cheapest way to check the second one: it prints every
-identifier it would mint and every cell it would write, and touches nothing.
+`upload --live --dry-run` is the cheapest way to check the second one: its
+opening lines name the Internet Archive collection the run would upload into,
+and it touches nothing. Without `--live` it names `test_collection` instead,
+which checks nothing.
 
 Every command reads the Sheet live; there is no CSV export step. The
 offline CSV paths were removed on 2026-09-23 — see

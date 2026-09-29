@@ -5,10 +5,9 @@ frontend polls and drives. Runs under `ia_bulk.py serve` (Task 9), which is
 why this module must NEVER `import ia_bulk` at module top: Task 9 adds
 `import upload_server` to the top of ia_bulk.py, and a top-level
 `import ia_bulk` here would make the two modules import each other before
-either has finished loading. The two things this module needs from ia_bulk
--- load_registry (a plain json.load) and the TEST_COLLECTION constant -- are
-obtained without a module-top import; see _load_registry and
-_test_collection.
+either has finished loading. The one thing this module needs from ia_bulk
+-- load_registry (a plain json.load) -- is obtained without a module-top
+import; see _load_registry.
 
 Binds 127.0.0.1 only. Every request is checked by a small guard (Host,
 Origin, POST Content-Type) before it reaches any route -- see
@@ -289,15 +288,6 @@ def _last_nonempty_line(text: str) -> str | None:
     return non_empty[-1] if non_empty else None
 
 
-def _test_collection() -> str:
-    """ia_bulk.TEST_COLLECTION, fetched lazily so this module never imports
-    ia_bulk at load time (ia_bulk imports upload_server at ITS module top,
-    added in Task 9) -- see the module docstring."""
-    import ia_bulk  # local: see the module docstring
-
-    return ia_bulk.TEST_COLLECTION
-
-
 def _check_startup(config: ServerConfig) -> project_config.ProjectConfig:
     """The four refusals a restart can't fix, checked in order.
 
@@ -571,7 +561,7 @@ class UploadPageHandler(BaseHTTPRequestHandler):
     def _handle_status(self) -> None:
         server = self.app_server
         config = server.config
-        collection = server.project_config.ia_collection if config.live else _test_collection()
+        collection = server.project_config.ia_collection_for(config.live)
         run_state = page_runs.compute_run_state(upload_lock.UPLOAD_LOCK_PATH, config.logs_base)
         run_state = self._reclassify_starting_run(run_state)
         self._send_json(
