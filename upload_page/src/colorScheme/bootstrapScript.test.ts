@@ -2,12 +2,13 @@
 // paints in the right scheme before React loads; these run that exact script.
 
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { COLOR_SCHEME_STORAGE_KEY } from "./colorScheme";
 import { setSystemPrefersDark } from "../test/matchMedia";
 
-const indexHtml = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
+const indexHtml = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../index.html"), "utf8");
 const inlineScript = /<script>([\s\S]*?)<\/script>/.exec(indexHtml)?.[1];
 
 function runBootstrapScript(): void {

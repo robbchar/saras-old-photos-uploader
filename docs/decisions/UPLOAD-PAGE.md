@@ -206,7 +206,8 @@ The page has a light and a dark color scheme, drawn from lcpsociety.org
 header: **Auto**, **Light**, **Dark**. Auto is the default and follows the
 computer's own setting, live. Picking Light or Dark saves that choice in the
 browser (`localStorage`, key `upload-page:color-scheme`) and it wins from
-then on; picking Auto again forgets it. Auto exists because a volunteer who
+then on; picking Auto again forgets it. Other open tabs of the page follow
+the change. Auto exists because a volunteer who
 flips the page to try it out otherwise has no way back to "whatever this Mac
 does".
 
@@ -215,7 +216,9 @@ The scheme is an attribute (`data-color-scheme`) on the page root, not a
 `index.html` sets it with a small inline script before the first paint —
 without it the page would flash the wrong scheme while the bundle loads —
 and `useColorScheme` keeps it current afterwards. The two read the same
-storage key; a test runs the inline script to hold them together.
+storage key; a test runs the inline script to hold them together. A
+`prefers-color-scheme` block survives only as a fallback for a page where
+that script never ran (no attribute set), so a dark Mac still gets dark.
 
 Gold stays decorative in light mode (a rule along the header's top edge)
 because it is too pale for text on a light background; in dark mode it

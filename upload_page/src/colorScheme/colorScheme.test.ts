@@ -2,12 +2,23 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   COLOR_SCHEME_STORAGE_KEY,
   applyColorScheme,
+  isColorSchemePreference,
   readStoredPreference,
   resolveColorScheme,
   storePreference,
 } from "./colorScheme";
 
 afterEach(() => localStorage.clear());
+
+describe("isColorSchemePreference", () => {
+  it.each(["system", "light", "dark"])("accepts %s", (value) => {
+    expect(isColorSchemePreference(value)).toBe(true);
+  });
+
+  it.each(["", "sepia", null])("rejects %s", (value) => {
+    expect(isColorSchemePreference(value)).toBe(false);
+  });
+});
 
 describe("readStoredPreference", () => {
   it.each(["light", "dark"] as const)("returns a stored %s choice", (choice) => {

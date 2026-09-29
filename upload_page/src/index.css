@@ -29,6 +29,19 @@
   --test:#6cc4cc; --test-bg:#0f2a2d; --test-border:#2b7078;
   --danger:#f2836f; --danger-bg:#3a1712; --danger-border:#9c3223;
 }
+/* Fallback when the pre-paint script never ran; copy of the block above (index.css.test.ts). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-color-scheme]) {
+    color-scheme: dark;
+    --bg:#14120e; --surface:#1c1914; --raised:#24211b;
+    --border:#373128; --border-strong:#4d4639;
+    --text:#eee7d8; --muted:#b1a791; --faint:#7c7362;
+    --accent:#f0b21c; --accent-hover:#f7c448; --on-accent:#14120e;
+    --brand:#f0b21c; --focus:#f0b21c; --overlay:rgb(0 0 0 / 0.6);
+    --test:#6cc4cc; --test-bg:#0f2a2d; --test-border:#2b7078;
+    --danger:#f2836f; --danger-bg:#3a1712; --danger-border:#9c3223;
+  }
+}
 /* expose the runtime-flipping vars to Tailwind utilities */
 @theme inline {
   --color-bg:var(--bg); --color-surface:var(--surface); --color-raised:var(--raised);
@@ -41,7 +54,10 @@
   --font-sans:var(--font-ui); --font-display:var(--font-display); --font-mono:var(--font-mono);
 }
 body { background:var(--bg); color:var(--text); font-family:var(--font-ui); }
-:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+/* In base so outline-* utilities can override it. */
+@layer base {
+  :focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+}
 
 /* Small uppercase display text: buttons, section labels, the project name. */
 @utility caps {

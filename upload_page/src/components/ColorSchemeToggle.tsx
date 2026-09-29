@@ -1,10 +1,9 @@
-// Auto / light / dark segmented control. Presentational: the owner decides
-// what a choice means (see useColorScheme). "Color scheme", not "theme" -
-// a theme in this app is an upload batch.
+// Auto/Light/Dark segmented control; presentational, useColorScheme owns the meaning.
+// "Color scheme", not "theme": a theme here is an upload batch.
 
 import { ToggleGroup } from "radix-ui";
 import type { ReactNode } from "react";
-import type { ColorSchemePreference } from "../colorScheme/colorScheme";
+import { isColorSchemePreference, type ColorSchemePreference } from "../colorScheme/colorScheme";
 
 export interface ColorSchemeToggleProps {
   preference: ColorSchemePreference;
@@ -61,10 +60,6 @@ const OPTIONS: readonly SchemeOption[] = [
   },
 ];
 
-function isPreference(value: string): value is ColorSchemePreference {
-  return OPTIONS.some((option) => option.value === value);
-}
-
 export function ColorSchemeToggle({ preference, onChange }: ColorSchemeToggleProps) {
   return (
     <ToggleGroup.Root
@@ -72,7 +67,7 @@ export function ColorSchemeToggle({ preference, onChange }: ColorSchemeTogglePro
       value={preference}
       // Radix reports "" when the checked item is clicked again; keep the current choice.
       onValueChange={(value) => {
-        if (isPreference(value) && value !== preference) onChange(value);
+        if (isColorSchemePreference(value) && value !== preference) onChange(value);
       }}
       aria-label="Color scheme"
       className="inline-flex rounded border border-border-strong bg-surface p-0.5"

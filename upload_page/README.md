@@ -67,8 +67,10 @@ never built — see
 Every color and font lives in `src/index.css`: CSS custom properties on
 `:root` for light mode, redefined under `:root[data-color-scheme="dark"]`
 for dark mode, then re-exposed to Tailwind's utilities through a
-`@theme inline` block. Change a token in that one pair of places — never a
-raw color value inside a component — so light and dark stay in sync. The
+`@theme inline` block. Change a token in those places — never a raw color
+value inside a component — so light and dark stay in sync. The dark block is
+repeated once under `@media (prefers-color-scheme: dark)` as a no-script
+fallback; `src/index.css.test.ts` fails if the two copies drift. The
 same file defines the shared `caps`, `btn-primary` and `btn-secondary`
 utilities used for buttons and section labels.
 

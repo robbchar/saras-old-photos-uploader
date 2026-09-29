@@ -38,11 +38,34 @@ describe("useColorScheme", () => {
   it("saves an explicit choice and stops following the OS", () => {
     setSystemPrefersDark(false);
     const { result } = renderHook(() => useColorScheme());
-    act(() => result.current.setPreference("dark"));
-    expect(localStorage.getItem(COLOR_SCHEME_STORAGE_KEY)).toBe("dark");
-    act(() => setSystemPrefersDark(false));
-    expect(result.current.scheme).toBe("dark");
+    act(() => result.current.setPreference("light"));
+    expect(localStorage.getItem(COLOR_SCHEME_STORAGE_KEY)).toBe("light");
+    act(() => setSystemPrefersDark(true));
+    expect(result.current.scheme).toBe("light");
+    expect(document.documentElement.dataset.colorScheme).toBe("light");
+  });
+
+  it("adopts a choice another tab saves", () => {
+    setSystemPrefersDark(false);
+    const { result } = renderHook(() => useColorScheme());
+    localStorage.setItem(COLOR_SCHEME_STORAGE_KEY, "dark");
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: COLOR_SCHEME_STORAGE_KEY, newValue: "dark" }));
+    });
+    expect(result.current.preference).toBe("dark");
     expect(document.documentElement.dataset.colorScheme).toBe("dark");
+  });
+
+  it("returns to system when another tab forgets the choice", () => {
+    localStorage.setItem(COLOR_SCHEME_STORAGE_KEY, "dark");
+    setSystemPrefersDark(false);
+    const { result } = renderHook(() => useColorScheme());
+    localStorage.removeItem(COLOR_SCHEME_STORAGE_KEY);
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: COLOR_SCHEME_STORAGE_KEY, newValue: null }));
+    });
+    expect(result.current.preference).toBe("system");
+    expect(result.current.scheme).toBe("light");
   });
 
   it("forgets the saved choice when set back to system", () => {

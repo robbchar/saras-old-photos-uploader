@@ -1,6 +1,5 @@
-// Light/dark color scheme rules. "system" follows the OS; an explicit choice
-// is saved and wins until set back to "system". index.html repeats the read
-// side of this inline so the first paint is already correct - keep them in step.
+// Color-scheme rules: "system" follows the OS; a saved "light"/"dark" wins.
+// index.html inlines the read side for first paint - keep in step.
 
 export type ColorScheme = "light" | "dark";
 export type ColorSchemePreference = ColorScheme | "system";
@@ -10,6 +9,10 @@ export const SYSTEM_DARK_QUERY = "(prefers-color-scheme: dark)";
 
 function isColorScheme(value: unknown): value is ColorScheme {
   return value === "light" || value === "dark";
+}
+
+export function isColorSchemePreference(value: unknown): value is ColorSchemePreference {
+  return value === "system" || isColorScheme(value);
 }
 
 /** localStorage, or undefined where the browser blocks it. */
