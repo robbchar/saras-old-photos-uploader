@@ -5352,6 +5352,22 @@ def test_cmd_upload_live_confirms_the_projects_collection_on_archive_org(
     assert "Internet Archive collection 'lcpsociety' confirmed on archive.org" in out
 
 
+def test_cmd_upload_live_refuses_a_bad_limit_before_asking_archive_org(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, limit=0))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "--limit must be a positive number" in captured.err
+    assert recorder.collection_checks == []
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_cmd_upload_test_mode_never_checks_the_collection(tmp_path, monkeypatch, capsys, dry_run):
     """test_collection is IA's own sandbox; only a live run's collection can be mistyped."""

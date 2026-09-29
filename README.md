@@ -611,7 +611,7 @@ python ia_bulk.py upload --project sarasoldphotos --live
 ```
 
 **Before any `--live` run**, check both of these by hand — nothing in the
-tool pins either value (see
+tool can tell a right value from a wrong one (see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#known-gaps)):
 - `projects_registry.json`'s `collection_key` still reads `"lcps"` — see
   [The collection key is `lcps`](docs/decisions/IDENTIFIERS.md#the-collection-key-is-lcps).

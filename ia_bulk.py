@@ -4169,8 +4169,8 @@ def collection_refusal(check: CollectionCheck, project: str) -> str:
     reason = f"HTTP {check.http_status}" if check.http_status is not None else check.failure
     return (
         f"could not confirm Internet Archive collection '{check.collection}' exists ({reason}), "
-        "and a live upload goes only into a confirmed collection. Nothing was uploaded; run this "
-        "again once archive.org responds."
+        "and a live upload goes only into a confirmed collection. Nothing was uploaded; if "
+        "archive.org was unreachable or busy, run this again later."
     )
 
 
