@@ -157,6 +157,53 @@ the same account and spends the same quota.
 paths" above now mean one `upload`, and the CSV path's fix (split the file)
 is gone. `--limit` is the one fix named.
 
+**2026-09-29 (#75):** the check counts earlier runs too. A run is refused
+when the uploads already in the window plus this run's would exceed
+`DAILY_ITEM_CAP`. Two choices went into that:
+
+- **The window is a rolling 24 hours, not a calendar day.** Whether IA
+  resets at UTC midnight, Pacific midnight, or counts a rolling window is
+  unknown, and only real traffic can say. Every upload since any midnight is
+  also inside the last 24 hours, so the rolling count is never lower than a
+  calendar-day count: it never lets through a run a calendar-day rule would
+  refuse. The one exception is a DST fall-back day, whose local calendar day
+  runs 25 hours. The cost is refusing some runs IA would take — 5,000 at
+  23:00 UTC, then more at 01:00 UTC — which waits at most a day. If real
+  traffic shows a calendar-day reset, relaxing it means counting from IA's
+  midnight in `measure_daily_quota` and naming the next midnight in
+  `room_opens_at`. No `DAILY_WINDOW` length can express a midnight reset.
+- **The count comes from the Sheet's `ia_uploaded` cells, not the JSONL
+  logs.** The logs only see the machine that wrote them, split across
+  `logs/` and `logs/page-runs/<UTC>/`. The Sheet sees every run from every
+  machine, and `upload` has already read all of it before the check, so the
+  count costs no extra API call. Only the tool's own `YYYY-MM-DDTHH:MM:SSZ`
+  values count; blanks, stray values and the naive local times written
+  before 2026-08-23 are ignored.
+
+What the count cannot see, accepted rather than built around — IA's own
+throttle stays the backstop:
+
+- Uploads recorded in a different Sheet. A live run reads the live Sheet and
+  a test run the test Sheet, but both spend the same account's quota. Test
+  runs are small, and a plain test run (no `--write-identifier`) writes no
+  `ia_uploaded` at all. A second registered project's Sheet is not read
+  either.
+- An upload whose Sheet write-back failed, which has no timestamp.
+- A run still going on another machine. Its uploads count only as each
+  500-item chunk is confirmed, and what it has yet to upload not at all. The
+  upload lock covers one machine, not two.
+- When exactly each item was created. `ia_uploaded` is stamped as its chunk
+  starts, so a chunk's items leave the window up to that chunk's upload time
+  early, and "fits after" can be early by as much. Padding the window would
+  trade that for refusing runs IA would take; the stamp's meaning is a
+  separate decision.
+
+The refusal names the room left as a `--limit` and when the whole run fits.
+The second half exists for the upload page (`serve`), which shows the
+refusal text but cannot pass `--limit`. A `--dry-run` spends nothing, so it
+still prints its preview, then the refusal a real run would get, and exits
+non-zero.
+
 ## Rate-limit detection uses a parsed status code, never message text
 
 *Decided 2026-08-22. Revised 2026-08-22 after review found the first version
@@ -249,15 +296,16 @@ closing line said "resume by re-running tomorrow" — advice for the daily cap,
 given for a throttle that can clear in minutes to hours.
 
 The tool cannot tell the two apart. It never sees a daily-cap signal of its
-own: the only cap it enforces is the refusal to *start* a run over 5,000
-items, and it keeps no count across a day's runs. Both limits can arrive as a
+own: the only cap it enforces is the refusal to *start* a run that would pass
+5,000 items, which counted only that run until #75 (2026-09-29) added the
+last 24 hours of the Sheet's uploads. Both limits can arrive as a
 503, and telling them apart by IA's message would reintroduce exactly the
 text-reading the decision above rejected. So the stop now names what it knows
 and both possible causes:
 
 ```
 stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
-2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, up to 24 hours if the 5,000/day cap was reached
 ```
 
 The operator decides from IA's own message, which the log already keeps in

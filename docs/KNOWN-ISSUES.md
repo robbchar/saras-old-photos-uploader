@@ -27,14 +27,19 @@ upload, not after.
 
 ## 2. Batch pacing is manual, though the daily total is enforced
 
-**Severity: low. Daily cap enforced 2026-08-23; pacing still manual.**
+**Severity: low. Daily cap enforced per run 2026-08-23 and across runs
+2026-09-29 (#75); pacing still manual.**
 
 `chunk_rows()` groups rows into 500s to match IA's per-run limit, but the loop
-still has no pacing (no sleep between batches) and no running counter *across*
-a day's separate runs — a second run started the same day does not know what
-the first one spent. What a single run can no longer do is exceed the
-5,000/day cap by itself: `upload` refuses to start such a run and names the
-fix (`--limit`), with `--allow-over-daily-cap` as the explicit override.
+still has no pacing (no sleep between batches). What `upload` does enforce is
+the 5,000/day cap: it counts the uploads the Sheet's `ia_uploaded` column
+shows in the last 24 hours, and refuses to start a run that would take that
+total over the cap. The refusal names the room left (`--limit`) and when the
+whole run fits, with `--allow-over-daily-cap` as the explicit override.
+The count cannot see uploads recorded only in a different Sheet — a test
+run's, or another project's — or an upload whose Sheet write-back failed; see
+[`decisions/QUOTA-AND-RUNS.md`, "A run may not exceed Internet Archive's daily
+item cap"](decisions/QUOTA-AND-RUNS.md#a-run-may-not-exceed-internet-archives-daily-item-cap).
 Beyond that: `upload --limit N`
 now caps how many items a single invocation uploads at all (an operator can
 size a day's runs by hand with a number the tool enforces), `--chunk-size` makes the 500-per-run batch size an
@@ -44,17 +49,9 @@ unexplained failures — though that detector is unverified against a real
 response; see `DECISIONS.md`, "Rate-limit detection matches a status
 code...".
 
-**Mitigation today:** pace `--limit` across the day's runs by hand — the tool
-enforces the cap per run, not per day; see
+**Mitigation today:** only a day that mixes large test and live runs needs
+pacing by hand, since each Sheet counts only its own uploads; see
 [`OPERATIONS.md`](OPERATIONS.md#pacing-and-batch-limits).
-
-Tracked as its own, non-blocking issue: **#75**. Whatever counts a day's
-uploads must look in both places a run can log to: a terminal run's
-`logs/upload-*.jsonl` and a page run's
-`logs/page-runs/<UTC>/upload-*.jsonl` — the local upload page (`ia_bulk.py
-serve`) spends the same daily quota through the same account, just logged
-under its own per-run folder. See
-[`ARCHITECTURE.md`, "`serve` and the upload page"](ARCHITECTURE.md#serve-and-the-upload-page).
 
 ## 5. `check_file_exists`'s `is_file()` catch has no test for the case it exists for
 

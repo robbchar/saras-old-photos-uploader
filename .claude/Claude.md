@@ -28,8 +28,9 @@ they go in the `identifier-bib` metadata field instead.
   already-uploaded items — fully decoupled from upload, safe to run
   repeatedly.
 - IA batch limits: 500 items per upload run, 5000/day — `ia_bulk.py upload`
-  chunks by 500 and refuses a run over 5000 unless
-  `--allow-over-daily-cap` is passed; never submit the full set in one call.
+  chunks by 500 and refuses a run that would take the Sheet's last 24 hours
+  of `ia_uploaded` past 5000 unless `--allow-over-daily-cap` is passed;
+  never submit the full set in one call.
 - Testing: `ia_bulk.py` targets `collection:test_collection` (IA's sandbox,
   auto-expires ~30 days) by default, and automatically prepends
   `zztest-<run's stamp>-` to the real identifier for every network call

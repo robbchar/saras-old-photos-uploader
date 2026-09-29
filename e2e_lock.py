@@ -9,15 +9,17 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from googleapiclient.errors import HttpError
 
 from e2e_sheet import LOCK_TAB, E2ESheet, tab_ids
 from sheet_client import quote_tab
+from utc_time import format_utc as format_time
+from utc_time import parse_utc as parse_time
+from utc_time import utc_now
 
-TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # The lock tab's rows, in order; a check-in rewrites the rows from "checked in" on.
 FIELDS = ("host", "pid", "checkout", "log dir", "started", "checked in", "expires")
 CHECK_IN_ROW = FIELDS.index("checked in")
@@ -30,18 +32,6 @@ class LockHeld(Exception):
 
 class LockLost(Exception):
     """This run's lock tab is gone: another run took it over, or it was deleted."""
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def format_time(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT)
-
-
-def parse_time(text: str) -> datetime:
-    return datetime.strptime(text, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)

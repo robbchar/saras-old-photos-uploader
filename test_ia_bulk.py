@@ -10,6 +10,7 @@ import shlex
 import signal
 import tempfile
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import internetarchive
@@ -58,6 +59,7 @@ from ia_bulk import (
     BatchScopeError,
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
+from utc_time import format_utc
 
 
 class FakeResponse:
@@ -6086,7 +6088,7 @@ def test_is_rate_limit_error_reads_the_structured_status_from_requests_httperror
 # transport failure must be absorbed, and a real refusal must NOT be, because
 # retrying a refusal costs the operator time and tells them nothing new.
 # 429/503 are deliberately NOT retryable - they already have a stronger
-# response than retrying (stop the run, resume tomorrow); see
+# response than retrying (stop the run, resume later); see
 # is_rate_limit_error() and docs/decisions/QUOTA-AND-RUNS.md.
 
 
@@ -6874,7 +6876,7 @@ def test_cmd_upload_stops_the_run_on_a_rate_limit_instead_of_grinding_through_fa
 ):
     """Without this the run would attempt all 5 rows against a server that
     has already said 'slow down', reporting 3 more unexplained failures and
-    burning through however much of today's 5,000-item quota happens to
+    burning through however much of the 5,000-item daily quota happens to
     remain."""
     from ia_bulk import cmd_upload
 
@@ -6910,7 +6912,7 @@ def test_cmd_upload_stops_the_run_on_a_rate_limit_instead_of_grinding_through_fa
     )
     assert (
         "2 uploaded this run - re-run later to resume: minutes to hours if IA's "
-        "queue is busy, tomorrow if today's 5,000 cap was reached"
+        "queue is busy, up to 24 hours if the 5,000/day cap was reached"
     ) in captured.out.splitlines()
     assert exit_code == 1
 
@@ -8435,6 +8437,194 @@ def test_cmd_upload_daily_cap_can_be_overridden_explicitly(tmp_path, monkeypatch
         monkeypatch,
         _three_ready_row_grid(),
         files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(
+            tmp_path, registry_path, write_identifier=True, allow_over_daily_cap=True
+        )
+    )
+
+    assert len(recorder.uploads) == 3
+    assert "over Internet Archive's" not in capsys.readouterr().err
+    assert exit_code == 0
+
+
+DAILY_CAP_NOW = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _uploaded_hours_ago(hours):
+    return format_utc(DAILY_CAP_NOW - timedelta(hours=hours))
+
+
+def _grid_after_earlier_uploads(*uploaded_at):
+    """One done row per `uploaded_at` value, then three ready rows."""
+    done_rows = [
+        [f"Done {n}", f"done{n}.jpg", f"lcps-astoriaphotos-{n:05d}", value, "u", f"done{n}.jpg"]
+        for n, value in enumerate(uploaded_at, start=1)
+    ]
+    return [SHEET_HEADER, *done_rows, *_three_ready_row_grid()[1:]]
+
+
+def setup_daily_cap_upload(tmp_path, monkeypatch, *uploaded_at):
+    monkeypatch.setattr("ia_bulk.DAILY_ITEM_CAP", 4)
+    monkeypatch.setattr("ia_bulk.utc_now", lambda: DAILY_CAP_NOW)
+    return setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _grid_after_earlier_uploads(*uploaded_at),
+        files=(
+            "photo1.jpg",
+            "photo2.jpg",
+            "photo3.jpg",
+            *(f"done{n}.jpg" for n in range(1, len(uploaded_at) + 1)),
+        ),
+    )
+
+
+def test_cmd_upload_refuses_a_run_that_would_take_the_last_24_hours_over_the_daily_cap(
+    tmp_path, monkeypatch, capsys
+):
+    """Two runs that each fit under the cap alone must not both go through in one day."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    err = capsys.readouterr().err
+
+    assert recorder.uploads == []
+    assert recorder.writes == []
+    assert "this Sheet shows 2 uploaded in the last 24 hours, leaving room for 2" in err
+    assert "--limit 2" in err
+    # The oldest upload leaves the window 24 hours after it was made.
+    assert "2026-09-30 09:00 UTC" in err
+    assert exit_code == 1
+
+
+def test_cmd_upload_dry_run_over_the_daily_cap_still_previews_and_names_the_refusal(
+    tmp_path, monkeypatch, capsys
+):
+    """A dry run spends no quota, so a full window must not hide the preview."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, dry_run=True)
+    )
+    captured = capsys.readouterr()
+
+    assert recorder.uploads == []
+    assert recorder.writes == []
+    assert "would upload 3 items" in captured.out
+    assert "--dry-run: a real run would be refused now:" in captured.err
+    assert "--limit 2" in captured.err
+    assert exit_code == 1
+
+
+def test_cmd_upload_override_skips_measuring_the_daily_cap(tmp_path, monkeypatch, capsys):
+    """The count cannot change an overridden run's outcome, so it is not paid for."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(tmp_path, monkeypatch)
+
+    def measure_must_not_run(*args, **kwargs):
+        raise AssertionError("measured the daily cap despite --allow-over-daily-cap")
+
+    monkeypatch.setattr("ia_bulk.measure_daily_quota", measure_must_not_run)
+
+    exit_code = cmd_upload(
+        make_upload_args(
+            tmp_path, registry_path, write_identifier=True, allow_over_daily_cap=True
+        )
+    )
+
+    assert len(recorder.uploads) == 3
+    assert exit_code == 0
+
+
+def test_the_daily_cap_reads_the_timestamp_upload_writes():
+    """A stamp the cap cannot parse would count as no upload at all."""
+    from daily_quota import parse_uploaded_at
+    from ia_bulk import upload_timestamp
+
+    assert parse_uploaded_at(upload_timestamp()) is not None
+
+
+def test_cmd_upload_counts_earlier_uploads_from_other_batches(tmp_path, monkeypatch, capsys):
+    """The cap is the account's, so --batch narrows what is uploaded, not what is counted."""
+    from ia_bulk import cmd_upload
+
+    monkeypatch.setattr("ia_bulk.DAILY_ITEM_CAP", 3)
+    monkeypatch.setattr("ia_bulk.utc_now", lambda: DAILY_CAP_NOW)
+    grid = [
+        BATCH_SHEET_HEADER,
+        ["Done 1", "done1.jpg", "lcps-astoriaphotos-00001", _uploaded_hours_ago(1), "u", "done1.jpg", "Fishing"],
+        ["Done 2", "done2.jpg", "lcps-astoriaphotos-00002", _uploaded_hours_ago(2), "u", "done2.jpg", "Fishing"],
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Logging"],
+    ]
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg", "done1.jpg", "done2.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, batch="Logging")
+    )
+
+    assert recorder.uploads == []
+    assert "this Sheet shows 2 uploaded in the last 24 hours" in capsys.readouterr().err
+    assert exit_code == 1
+
+
+def test_cmd_upload_room_left_in_the_last_24_hours_is_reachable_with_limit(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, limit=2)
+    )
+
+    assert len(recorder.uploads) == 2
+    assert "over Internet Archive's" not in capsys.readouterr().err
+    assert exit_code == 0
+
+
+def test_cmd_upload_does_not_count_uploads_older_than_24_hours(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(25), _uploaded_hours_ago(30)
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+
+    assert len(recorder.uploads) == 3
+    assert "over Internet Archive's" not in capsys.readouterr().err
+    assert exit_code == 0
+
+
+def test_cmd_upload_override_also_covers_uploads_earlier_in_the_last_24_hours(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
     )
 
     exit_code = cmd_upload(
@@ -12809,7 +12999,7 @@ def test_a_row_held_back_by_validation_is_skipped_not_failed(tmp_path, monkeypat
 def test_a_rate_limited_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys):
     """An unattended run that stopped early looks, in every count except this
     flag, like a run that simply had little to do. The reader has to be able
-    to tell "finished" from "stopped, resume tomorrow" without parsing
+    to tell "finished" from "stopped, resume later" without parsing
     stderr."""
     from ia_bulk import cmd_upload
 
@@ -12849,7 +13039,7 @@ def test_a_rate_limited_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys
 
 def test_a_rate_limited_row_logs_the_status_internet_archive_sent(tmp_path, monkeypatch, capsys):
     """429 and 503 both stop the run, but a 503 can be a busy global queue
-    (clears within hours) or the daily cap (clears tomorrow); the operator
+    (clears within hours) or the daily cap (clears within 24 hours); the operator
     needs the number to start telling them apart."""
     from ia_bulk import cmd_upload
 

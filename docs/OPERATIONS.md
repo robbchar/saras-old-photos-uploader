@@ -420,8 +420,9 @@ real files in the wrong place under a permanent identifier.
       `--limit` the real run will use printed the identifiers and cells you
       expected. Without those, `-v` lists every ready row.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
-      refuses a single run over 5,000 items, but spacing runs across a day
-      is up to you.
+      refuses a run that would take the Sheet's last 24 hours of uploads
+      past 5,000, but it counts only this Sheet: test runs through the same
+      account are up to you.
 - [ ] **The one-upload-at-a-time lock actually refuses a second run on this
       Mac.** Start a test-mode `upload` (no `--live`, no `--dry-run`, so it
       takes the lock but uploads only to the sandbox) in one terminal and,
@@ -669,22 +670,26 @@ Two limits on what a manual pass can show:
 IA's limits are **500 items per upload run** and **5,000 per day**.
 
 `chunk_rows()` groups rows into batches of 500 by default, but the loop just
-walks through them — there is still no sleep between batches. **Pacing across
-a day's runs is manual, but the daily total is now enforced:** `upload`
-refuses to start a run of more than 5,000 items and names the fix.
-Refusing rather than silently capping is deliberate — a run that quietly
-stopped short would read as a complete one.
+walks through them — there is still no sleep between batches. **The daily
+total is enforced across runs:** `upload` counts the items the Sheet's
+`ia_uploaded` column shows in the last 24 hours, and refuses to start a run
+that would take that past 5,000. The refusal names the room left and when the
+whole run fits. Refusing rather than silently capping is deliberate — a run
+that quietly stopped short would read as a complete one.
 
 `upload --limit N` caps how many items a single
 invocation uploads (counting rows actually ready to go out, not rows
 scanned — see `README.md`), and `--chunk-size N` overrides the 500-item
 batch size for that run. The two combine literally: `--limit 10
---chunk-size 3` uploads 10 items in batches of 3. Use `--limit` to pace
-today's runs against the 5,000/day cap by hand, e.g. `--limit 2500` twice in
-a day rather than one uncapped run. A run planning more than 5,000 items is
-refused outright with `--limit 5000` named as the fix; `--allow-over-daily-cap`
-overrides that, and is only correct if you know IA has raised this account's
-cap. Both values are recorded in the run's
+--chunk-size 3` uploads 10 items in batches of 3. A refused run names the
+`--limit` that fits the room left — `--limit 200` after 4,800 went out
+earlier in the day. The count is a rolling 24 hours rather than a calendar
+day, because IA's own day boundary is unknown, and it reads only this Sheet:
+a test run's uploads are recorded in the test Sheet, so a live run does not
+count them (`decisions/QUOTA-AND-RUNS.md`, "A run may not exceed Internet
+Archive's daily item cap"). `--allow-over-daily-cap` overrides the refusal,
+and is only correct if you know IA has raised this account's cap. Both
+`--limit` and `--chunk-size` are recorded in the run's
 `run_header` log line (`ARCHITECTURE.md`, "Logging and resume") so a later
 read of the log shows exactly what each run was capped at. If Internet
 Archive's own rate limit shows up mid-run, the run now stops cleanly instead
@@ -807,15 +812,16 @@ A rate-limited run ends like this:
 
 ```
 stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
-2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, up to 24 hours if the 5,000/day cap was reached
 ```
 
 The tool cannot tell which of IA's limits it hit, so read the `failure` line
 just above the stop, or the last `failure` record in the log. On 2026-09-24 a
 rehearsal was stopped by *"Please reduce your request rate. -
 total_tasks_queued exceeds global_limit"*: IA's task queue was busy, not this
-account's daily cap, so a rerun later the same day is worth trying. If today's
-runs together have already sent close to 5,000 items, wait until tomorrow.
+account's daily cap, so a rerun later the same day is worth trying. If the
+last 24 hours of runs have already sent close to 5,000 items, the rerun's own
+refusal says when there is room.
 Either way the rerun resumes by itself. The status is also in the log, as the
 failure record's `http_status` and the `run_summary`'s `rate_limit_status`.
 
