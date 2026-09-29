@@ -4121,12 +4121,15 @@ def upload_from_sheet(args) -> int:
 
     live = bool(args.live)
     dry_run = bool(getattr(args, "dry_run", False))
+    collection = config.ia_collection if live else TEST_COLLECTION
     # --live always records. An item that exists on Internet Archive under a
     # permanent identifier the Sheet does not know about is precisely what the
     # reserve-first ordering exists to prevent, so there is no live-without-
     # write-back mode to opt into.
     write_back = live or bool(getattr(args, "write_identifier", False))
     print(sheet_banner(config, live))
+    # Printed from the value upload_row is sent; a --live dry run is the pre-live check of it.
+    print(f"items go into Internet Archive collection '{collection}'")
     if dry_run:
         print("--dry-run: nothing is uploaded, and nothing is written to the Sheet")
     elif write_back:
@@ -4314,8 +4317,6 @@ def upload_from_sheet(args) -> int:
             file=sys.stderr,
         )
         return 1
-
-    collection = config.ia_collection if live else TEST_COLLECTION
 
     # `upload` is where something permanent happens, so it shows the same
     # field receipt `validate` does rather than assuming the operator ran

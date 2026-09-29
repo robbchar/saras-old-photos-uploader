@@ -414,7 +414,8 @@ real files in the wrong place under a permanent identifier.
 - [ ] The e2e rehearsal passes on this checkout
       (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
       `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
-      over the real Sheet printed the identifiers and cells you expected.
+      over the real Sheet named collection `sarasoldphotos` and printed the
+      identifiers and cells you expected.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.

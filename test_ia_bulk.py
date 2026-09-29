@@ -4617,6 +4617,67 @@ def test_cmd_upload_dry_run_without_write_identifier_says_it_would_write_nothing
 
 
 @pytest.mark.parametrize(
+    "live,expected_collection,other_collection",
+    [(True, "lcpsociety", "test_collection"), (False, "test_collection", "lcpsociety")],
+)
+def test_cmd_upload_dry_run_names_the_collection_it_would_upload_into(
+    tmp_path, monkeypatch, capsys, live, expected_collection, other_collection
+):
+    """A --live dry run is the pre-live check of the registry's ia_collection."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=live, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.uploads == []
+    assert f"items go into Internet Archive collection '{expected_collection}'" in out
+    assert other_collection not in out
+
+
+def test_cmd_upload_dry_run_names_the_collection_when_nothing_is_ready(
+    tmp_path, monkeypatch, capsys
+):
+    """The pre-live check must not depend on the Sheet having a ready row."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "lcps-astoriaphotos-00001", FIXED_TIMESTAMP,
+         "https://archive.org/details/lcps-astoriaphotos-00001", "photo1.jpg"],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "nothing to upload" in out
+    assert "items go into Internet Archive collection 'lcpsociety'" in out
+
+
+def test_cmd_upload_names_the_collection_it_sends_items_to(tmp_path, monkeypatch, capsys):
+    """A real run prints the same collection upload_row receives."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    captured = []
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=captured
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert [call["collection"] for call in captured] == ["lcpsociety"]
+    assert "items go into Internet Archive collection 'lcpsociety'" in out
+
+
+@pytest.mark.parametrize(
     "live,expected_sheet_id,expected_collection,expected_target",
     [
         (True, "REAL_SHEET_ID", "lcpsociety", "lcps-astoriaphotos-00001"),
