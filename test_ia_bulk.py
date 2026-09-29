@@ -10,6 +10,7 @@ import shlex
 import signal
 import tempfile
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import internetarchive
@@ -8300,6 +8301,142 @@ def test_cmd_upload_daily_cap_can_be_overridden_explicitly(tmp_path, monkeypatch
         monkeypatch,
         _three_ready_row_grid(),
         files=("photo1.jpg", "photo2.jpg", "photo3.jpg"),
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(
+            tmp_path, registry_path, write_identifier=True, allow_over_daily_cap=True
+        )
+    )
+
+    assert len(recorder.uploads) == 3
+    assert "over Internet Archive's" not in capsys.readouterr().err
+    assert exit_code == 0
+
+
+DAILY_CAP_NOW = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _uploaded_hours_ago(hours):
+    return (DAILY_CAP_NOW - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _grid_after_earlier_uploads(*uploaded_at):
+    """One done row per `uploaded_at` value, then three ready rows."""
+    done_rows = [
+        [f"Done {n}", f"done{n}.jpg", f"lcps-astoriaphotos-{n:05d}", value, "u", f"done{n}.jpg"]
+        for n, value in enumerate(uploaded_at, start=1)
+    ]
+    return [SHEET_HEADER, *done_rows, *_three_ready_row_grid()[1:]]
+
+
+def setup_daily_cap_upload(tmp_path, monkeypatch, *uploaded_at):
+    monkeypatch.setattr("ia_bulk.DAILY_ITEM_CAP", 4)
+    monkeypatch.setattr("ia_bulk.utc_now", lambda: DAILY_CAP_NOW)
+    return setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _grid_after_earlier_uploads(*uploaded_at),
+        files=(
+            "photo1.jpg",
+            "photo2.jpg",
+            "photo3.jpg",
+            *(f"done{n}.jpg" for n in range(1, len(uploaded_at) + 1)),
+        ),
+    )
+
+
+def test_cmd_upload_refuses_a_run_that_would_take_the_last_24_hours_over_the_daily_cap(
+    tmp_path, monkeypatch, capsys
+):
+    """Two runs that each fit under the cap alone must not both go through in one day."""
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    err = capsys.readouterr().err
+
+    assert recorder.uploads == []
+    assert recorder.writes == []
+    assert "this Sheet shows 2 uploaded in the last 24 hours, leaving room for 2" in err
+    assert "--limit 2" in err
+    # The oldest upload leaves the window 24 hours after it was made.
+    assert "2026-09-30 09:00 UTC" in err
+    assert exit_code == 1
+
+
+def test_cmd_upload_counts_earlier_uploads_from_other_batches(tmp_path, monkeypatch, capsys):
+    """The cap is the account's, so --batch narrows what is uploaded, not what is counted."""
+    from ia_bulk import cmd_upload
+
+    monkeypatch.setattr("ia_bulk.DAILY_ITEM_CAP", 3)
+    monkeypatch.setattr("ia_bulk.utc_now", lambda: DAILY_CAP_NOW)
+    grid = [
+        BATCH_SHEET_HEADER,
+        ["Done 1", "done1.jpg", "lcps-astoriaphotos-00001", _uploaded_hours_ago(1), "u", "done1.jpg", "Fishing"],
+        ["Done 2", "done2.jpg", "lcps-astoriaphotos-00002", _uploaded_hours_ago(2), "u", "done2.jpg", "Fishing"],
+        ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
+        ["Second photo", "photo2.jpg", "", "", "", "", "Logging"],
+    ]
+    recorder, _, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        grid,
+        files=("photo1.jpg", "photo2.jpg", "done1.jpg", "done2.jpg"),
+        registry=_batch_registry(tmp_path),
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, batch="Logging")
+    )
+
+    assert recorder.uploads == []
+    assert "this Sheet shows 2 uploaded in the last 24 hours" in capsys.readouterr().err
+    assert exit_code == 1
+
+
+def test_cmd_upload_room_left_in_the_last_24_hours_is_reachable_with_limit(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, limit=2)
+    )
+
+    assert len(recorder.uploads) == 2
+    assert "over Internet Archive's" not in capsys.readouterr().err
+    assert exit_code == 0
+
+
+def test_cmd_upload_does_not_count_uploads_older_than_24_hours(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(25), _uploaded_hours_ago(30)
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+
+    assert len(recorder.uploads) == 3
+    assert "over Internet Archive's" not in capsys.readouterr().err
+    assert exit_code == 0
+
+
+def test_cmd_upload_override_also_covers_uploads_earlier_in_the_last_24_hours(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    recorder, _, registry_path, _ = setup_daily_cap_upload(
+        tmp_path, monkeypatch, _uploaded_hours_ago(1), _uploaded_hours_ago(3)
     )
 
     exit_code = cmd_upload(

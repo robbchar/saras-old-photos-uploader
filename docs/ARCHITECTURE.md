@@ -248,9 +248,12 @@ row is uploaded individually through the `internetarchive` Python library so
 outcomes are captured per-row. `upload --chunk-size N` overrides the batch
 size for that run (`SheetUploadRun.chunk_size`, threaded into `chunk_rows()`).
 
-A run may not exceed `DAILY_ITEM_CAP` (5,000, IA's per-account daily
-limit). It refuses rather than silently capping and names the fix,
-`--limit`, with `--allow-over-daily-cap` as the explicit override.
+A run may not take the last 24 hours past `DAILY_ITEM_CAP` (5,000, IA's
+per-account daily limit). `daily_quota.py` counts the rows whose
+`ia_uploaded` falls in that window; `upload` has already read every row, so
+this costs no extra Sheet call. It refuses rather than silently capping and
+names the fix, a `--limit` sized to the room left, with
+`--allow-over-daily-cap` as the explicit override.
 
 `upload --limit N` caps how many *planned* upload targets
 (valid, ready, not already done — `plan_upload_targets()`'s own output) a

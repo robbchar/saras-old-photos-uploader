@@ -315,12 +315,16 @@ the two combine literally, as shown above. Both are recorded in the
 `docs/ARCHITECTURE.md`).
 
 **The 5,000/day cap is enforced.** Internet Archive allows 5,000 items per
-account per day. A run planning more than that is refused before anything is
-uploaded, naming the fix: `--limit 5000`. It refuses rather than silently capping, because a run that
+account per day. A run that would take the last 24 hours past that, counting
+the uploads the Sheet's `ia_uploaded` column shows, is refused before anything
+is uploaded. The refusal names the room left as a `--limit` and when the whole
+run fits. It refuses rather than silently capping, because a run that
 quietly stopped short would read as a complete one. `--allow-over-daily-cap`
 overrides it, and is only correct if you know IA has raised this account's
-cap. The refusal applies in test mode too: a rehearsal uploads through the
-same account and spends the same quota.
+cap. The refusal applies in test mode too, since a rehearsal uploads through
+the same account and spends the same quota — but each run counts only its
+own Sheet's uploads, so live and test runs on the same day do not see each
+other's.
 
 **One upload at a time.** A run refuses to start while another upload is
 running from the same checkout, and names it (project, batch, mode, start

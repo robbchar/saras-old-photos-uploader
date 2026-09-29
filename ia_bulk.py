@@ -15,6 +15,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar
@@ -45,6 +46,7 @@ from column_map import (
     resolve_file,
     template_fields,
 )
+from daily_quota import describe_refusal, measure_daily_quota
 from ia_fields import PIPELINE_OWNED_FIELDS, metadata_to_send, suggest_standard_fields
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
 from project_config import (
@@ -945,6 +947,11 @@ def utc_timestamp() -> str:
     the ambiguity is only discoverable by knowing which machine wrote it and
     what its clock was set to that day."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def utc_now() -> datetime:
+    """Its own function so tests can pin the daily cap's clock."""
+    return datetime.now(timezone.utc)
 
 
 def open_log(log_dir: str | Path, command_name: str) -> Path:
@@ -4335,15 +4342,12 @@ def upload_from_sheet(args) -> int:
     # them in one day is. Refuses rather than silently capping - a run that
     # quietly stops short reads as a complete one, which is the same trap the
     # --limit <= 0 guard above exists to avoid.
-    if len(targets) > DAILY_ITEM_CAP and not getattr(args, "allow_over_daily_cap", False):
-        print(
-            f"this run would upload {len(targets)} items, over Internet Archive's "
-            f"{DAILY_ITEM_CAP}/day cap for the account. Pass --limit {DAILY_ITEM_CAP} (or "
-            "less) and run again tomorrow for the rest; identifiers are minted fresh each "
-            "run, so nothing is lost by splitting it. Pass --allow-over-daily-cap to "
-            "override if you know this account's cap has been raised.",
-            file=sys.stderr,
-        )
+    # Earlier runs count through this Sheet's `ia_uploaded` cells (all rows, not just `scope`).
+    quota = measure_daily_quota(
+        (row.get(IA_UPLOADED_COLUMN) or "" for row in rows), now=utc_now(), cap=DAILY_ITEM_CAP
+    )
+    if not quota.allows(len(targets)) and not getattr(args, "allow_over_daily_cap", False):
+        print(describe_refusal(quota, len(targets)), file=sys.stderr)
         return 1
 
     collection = config.ia_collection if live else TEST_COLLECTION
@@ -5900,9 +5904,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-over-daily-cap",
         action="store_true",
         help=(
-            f"Upload more than Internet Archive's {DAILY_ITEM_CAP}/day account cap in one "
-            "run. Only pass this if you know the cap has been raised for this account - "
-            "otherwise the run is throttled partway through and stops mid-batch."
+            f"Upload past Internet Archive's {DAILY_ITEM_CAP}/day account cap, counting "
+            "this Sheet's uploads in the last 24 hours. Only pass this if you know the cap "
+            "has been raised for this account - otherwise the run is throttled partway "
+            "through and stops mid-batch."
         ),
     )
     upload_parser.add_argument(
