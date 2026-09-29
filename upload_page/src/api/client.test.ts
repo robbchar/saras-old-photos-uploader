@@ -18,6 +18,7 @@ const SAMPLE_STATUS = {
   live: false,
   project: "astoriaphotos",
   collection: "sarasoldphotos",
+  version: "1.0.0",
   run: { kind: "idle" },
 };
 const SAMPLE_VALIDATE_DOC = {

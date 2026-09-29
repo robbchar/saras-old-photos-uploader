@@ -25,6 +25,7 @@ import requests
 from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
+import app_version
 import deployment
 import google_auth
 import launch_agent
@@ -2749,7 +2750,28 @@ def report_unreadable_registry(args, exc: Exception) -> int:
     return 1
 
 
+def version_line(commit: str) -> str:
+    return f"ia_bulk {app_version.APP_VERSION} (commit {deployment.short_commit(commit)})"
+
+
+def report_version_update() -> None:
+    """Print the version line, then name the previous version after an upgrade."""
+    print(version_line(deployment.read_head_commit(REPO_ROOT)))
+    update = app_version.update_line(app_version.read_installed_version(app_version.INSTALLED_VERSION_PATH))
+    if update is not None:
+        print(update)
+
+
+def record_installed_version() -> None:
+    marker_path = app_version.INSTALLED_VERSION_PATH
+    try:
+        app_version.record_installed_version(marker_path)
+    except OSError as exc:
+        print(f"could not record the installed version in {marker_path}: {exc}", file=sys.stderr)
+
+
 def cmd_doctor(args) -> int:
+    print(version_line(deployment.read_head_commit(REPO_ROOT)))
     try:
         checks = build_deployment_checks(args, include_network=not args.offline)
     except REGISTRY_READ_ERRORS as exc:
@@ -2768,6 +2790,7 @@ def cmd_setup(args) -> int:
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
+    report_version_update()
 
     changes: list[str] = []
 
@@ -2779,6 +2802,8 @@ def cmd_setup(args) -> int:
         checks = build_deployment_checks(args, include_network=not args.offline)
     except REGISTRY_READ_ERRORS as exc:
         return report_unreadable_registry(args, exc)
+    # After the registry read: a broken registry is fixed and re-run, and the upgrade line must survive that.
+    record_installed_version()
     results = deployment.converge(checks, announce)
     agent_failed = False
     upload_page_failed = False
@@ -5946,6 +5971,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         allow_abbrev=False,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {app_version.APP_VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser(

@@ -641,7 +641,8 @@ way, and for its request guard and run-state model in full.
 - **`upload_server.py`** — the HTTP server: routing, the request guard
   (Host/Origin/Content-Type, every one rejecting a request before it reaches
   a route), static file serving for the bundle, the `/api/*` routes
-  (`health`, `status`, `themes`, `preview`, starting and stopping a run, and
+  (`health`, `status` — which also carries the tool's `version` for the
+  header — `themes`, `preview`, starting and stopping a run, and
   the `/api/runs/current/output` Server-Sent-Events stream), and the
   subprocess plumbing that actually runs `validate`/`upload`. Bound to
   `127.0.0.1` only. Every side effect (running a command, spawning the

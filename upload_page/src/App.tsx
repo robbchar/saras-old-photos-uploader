@@ -16,7 +16,7 @@ import {
   type OutputHandlers,
 } from "./api/client";
 import type { AppState, TerminalRunHolder } from "./state/types";
-import type { ValidateDoc, ValidateRow } from "./api/schemas";
+import type { Status, ValidateDoc, ValidateRow } from "./api/schemas";
 import { reducer } from "./state/reducer";
 import { Header } from "./components/Header";
 import { ThemePicker } from "./components/ThemePicker";
@@ -45,11 +45,7 @@ export function appendLineCapped(previous: string[], line: string): string[] {
   return previous.length < MAX_BUFFERED_LINES ? [...previous, line] : [...previous.slice(1), line];
 }
 
-interface PageIdentity {
-  project: string;
-  collection: string;
-  live: boolean;
-}
+type PageIdentity = Pick<Status, "project" | "collection" | "version" | "live">;
 
 // Last byte offset shown for a run, keyed by the run's `started_at`, so a
 // reload can resume the output stream instead of replaying it from the start.
@@ -224,7 +220,7 @@ export default function App() {
     getStatus()
       .then((status) => {
         if (cancelled) return;
-        setIdentity({ project: status.project, collection: status.collection, live: status.live });
+        setIdentity({ project: status.project, collection: status.collection, version: status.version, live: status.live });
         dispatch({ type: "status/received", run: status.run });
       })
       .catch((error: unknown) => {
@@ -502,7 +498,7 @@ export default function App() {
     <main className="min-h-screen bg-bg p-4">
       <div className="mx-auto w-full max-w-[1000px]">
         {identity && (
-          <Header project={identity.project} collection={identity.collection} live={identity.live}>
+          <Header project={identity.project} collection={identity.collection} version={identity.version} live={identity.live}>
             {themePickerVisible(state) && (
               <ThemePicker
                 batches={themes?.batches ?? []}

@@ -223,6 +223,7 @@ export const Status = z.object({
   live: z.boolean(),
   project: z.string(),
   collection: z.string(),
+  version: z.string(),
   run: RunState,
 });
 export type Status = z.infer<typeof Status>;

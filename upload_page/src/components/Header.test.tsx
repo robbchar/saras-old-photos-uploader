@@ -16,24 +16,29 @@ const TEST_MODE_TEXT =
 
 describe("Header", () => {
   it("shows the project and collection", () => {
-    render(<Header project="astoriaphotos" collection="lcps_astoria" live />);
+    render(<Header project="astoriaphotos" collection="lcps_astoria" version="1.0.0" live />);
     expect(screen.getByText("astoriaphotos")).toBeInTheDocument();
     expect(screen.getByText("lcps_astoria")).toBeInTheDocument();
   });
 
+  it("shows the app version with a v prefix", () => {
+    render(<Header project="astoriaphotos" collection="lcps_astoria" version="1.2.3" live />);
+    expect(screen.getByText("v1.2.3")).toBeInTheDocument();
+  });
+
   it("shows the test-mode banner with the exact wording when not live", () => {
-    render(<Header project="astoriaphotos" collection="test_collection" live={false} />);
+    render(<Header project="astoriaphotos" collection="test_collection" version="1.0.0" live={false} />);
     expect(screen.getByText(TEST_MODE_TEXT)).toBeInTheDocument();
   });
 
   it("shows no banner at all in live mode", () => {
-    render(<Header project="astoriaphotos" collection="lcps_astoria" live />);
+    render(<Header project="astoriaphotos" collection="lcps_astoria" version="1.0.0" live />);
     expect(screen.queryByText(/TEST MODE/)).not.toBeInTheDocument();
   });
 
   it("renders children (the persistent theme picker) inside the header", () => {
     render(
-      <Header project="astoriaphotos" collection="test_collection" live={false}>
+      <Header project="astoriaphotos" collection="test_collection" version="1.0.0" live={false}>
         <button type="button">theme picker slot</button>
       </Header>,
     );

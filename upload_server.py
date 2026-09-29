@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 
+import app_version
 import build_stamp
 import page_runs
 import project_config
@@ -570,6 +571,7 @@ class UploadPageHandler(BaseHTTPRequestHandler):
                 "live": config.live,
                 "project": config.project,
                 "collection": collection,
+                "version": app_version.APP_VERSION,
                 "run": run_state.to_json(),
             },
         )
