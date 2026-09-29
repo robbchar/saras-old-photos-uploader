@@ -686,7 +686,8 @@ Test Sheet every run; test data is ephemeral.
 **One rehearsal at a time.** Step 0 takes an `E2E Lock` tab on the Test
 Sheet, and teardown deletes it. A rehearsal started while another holds it
 fails at step 0 with "another e2e rehearsal holds the Test Sheet"; wait for
-that run to finish, then re-run. How a stale lock expires, how to clear one by
+that run to finish, then re-run. Hand test-mode commands take no lock, so
+check for an `E2E Lock` tab before running one. How a stale lock expires, how to clear one by
 hand, and what "this run lost the Test Sheet lock" means are in
 [`docs/decisions/SHEET-PROTOCOL.md`, "One rehearsal at a time"](docs/decisions/SHEET-PROTOCOL.md#one-rehearsal-at-a-time).
 

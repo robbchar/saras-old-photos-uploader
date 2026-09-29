@@ -27,11 +27,15 @@ SNAPSHOT_FIELDS = "sheets(properties(sheetId,title),data(rowData(values(formatte
 
 
 class LockHeld(Exception):
-    """Another rehearsal holds the lock, or the lock tab names no rehearsal."""
+    """Another rehearsal holds the lock, the lock tab names no rehearsal, or it vanished mid-takeover (re-run)."""
 
 
 class LockLost(Exception):
     """This run's lock tab is gone: another run took it over, or it was deleted."""
+
+
+class LockStillHeld(Exception):
+    """A check-in or release failed, but the Sheet shows the lock is still this run's."""
 
 
 @dataclass(frozen=True)
@@ -182,38 +186,52 @@ class RehearsalLock:
         now = self._clock()
         holder = replace(self.holder, checked_in=now, expires=now + self._lease)
         new_tab_id = _new_tab_id(self.tab_id)
-        self._on_own_tab(lambda old_tab_id: _swap_requests(old_tab_id, new_tab_id, holder), leaves=new_tab_id)
+
+        def swap_landed(_error: Exception, now_on_sheet: _LockTab | None) -> bool:
+            return _held_by(now_on_sheet, self.holder.run) and now_on_sheet.tab_id == new_tab_id
+
+        self._on_own_tab(lambda old_tab_id: _swap_requests(old_tab_id, new_tab_id, holder), swap_landed)
         self.tab_id, self.holder = new_tab_id, holder
 
     def release(self) -> None:
         """Deletes this run's lock tab; raises LockLost, touching nothing, if it is no longer this run's."""
-        self._on_own_tab(lambda tab_id: [{"deleteSheet": {"sheetId": tab_id}}], leaves=None)
+        # Whole seconds, as the lock tab records `started`.
+        began = self._clock().replace(microsecond=0)
+
+        def delete_landed(error: Exception, now_on_sheet: _LockTab | None) -> bool:
+            if not _may_have_landed(error) or _held_by(now_on_sheet, self.holder.run):
+                return False
+            # A holder started before this release took the lock over; one started after took the freed lock.
+            other_holder = now_on_sheet.holder if now_on_sheet is not None else None
+            return other_holder is None or other_holder.started >= began
+
+        self._on_own_tab(lambda tab_id: [{"deleteSheet": {"sheetId": tab_id}}], delete_landed)
 
     def holds(self) -> bool:
         """Whether the lock tab on the Sheet is still this run's; raises if the Sheet cannot be read."""
         return _held_by(_read_lock_tab(self._service, self._target), self.holder.run)
 
     def _on_own_tab(
-        self, requests_for: Callable[[int], list[dict[str, Any]]], leaves: int | None, retry: bool = True
+        self,
+        requests_for: Callable[[int], list[dict[str, Any]]],
+        landed: Callable[[Exception, _LockTab | None], bool],
     ) -> None:
-        """`requests_for(tab_id)` builds the batch; `leaves` is the lock tab's id once it lands, None for a delete."""
-        tried_tab_id = self.tab_id
-        try:
-            _batch_update(self._service, self._target, requests_for(tried_tab_id))
-        except Exception as error:
-            now_on_sheet = _read_lock_tab(self._service, self._target)
-            if leaves is None and _may_have_landed(error) and not _held_by(now_on_sheet, self.holder.run):
-                # The delete landed; only its response was lost, and another run may already hold the freed lock.
+        """Sends `requests_for(tab_id)`; after an error, `landed` judges the re-read Sheet."""
+        for retrying in (False, True):
+            tried_tab_id = self.tab_id
+            try:
+                _batch_update(self._service, self._target, requests_for(tried_tab_id))
                 return
-            if not _held_by(now_on_sheet, self.holder.run):
-                raise LockLost(self._lost_message(now_on_sheet)) from None
-            if now_on_sheet.tab_id == leaves:
-                return
-            self.tab_id = now_on_sheet.tab_id
-            if now_on_sheet.tab_id == tried_tab_id or not retry:
-                raise
-            # An earlier swap whose re-read failed left a newer tab of this run's; retry from it once.
-            self._on_own_tab(requests_for, leaves, retry=False)
+            except Exception as error:
+                now_on_sheet = _read_lock_tab(self._service, self._target)
+                if landed(error, now_on_sheet):
+                    return
+                if not _held_by(now_on_sheet, self.holder.run):
+                    raise LockLost(self._lost_message(now_on_sheet)) from None
+                self.tab_id = now_on_sheet.tab_id
+                if now_on_sheet.tab_id == tried_tab_id or retrying:
+                    raise LockStillHeld(f"the '{LOCK_TAB}' tab update failed, but the tab still names this run: {error!r}") from error
+                # An earlier swap whose re-read failed left a newer tab of this run's; retry from it once.
 
     def _lost_message(self, now_on_sheet: _LockTab | None) -> str:
         if now_on_sheet is None:
@@ -244,14 +262,15 @@ def acquire_lock(
     tab_id = _new_tab_id(previous_tab_id)
     try:
         _batch_update(service, target, _swap_requests(previous_tab_id, tab_id, holder))
-    except Exception:
+    except Exception as error:
         # Either the batch landed and only its response was lost, or another run won a race for the lock.
         try:
             now_on_sheet = _read_lock_tab(service, target)
         except Exception:
-            # Whether the batch landed is unknown; a tab under the new id can only be this run's.
-            with suppress(Exception):
-                _batch_update(service, target, [{"deleteSheet": {"sheetId": tab_id}}])
+            # Whether the batch landed is unknown; a refused one left nothing to undo, and its id may be another run's tab.
+            if _may_have_landed(error):
+                with suppress(Exception):
+                    _batch_update(service, target, [{"deleteSheet": {"sheetId": tab_id}}])
             raise
         if not (_held_by(now_on_sheet, run) and now_on_sheet.tab_id == tab_id):
             if now_on_sheet is None and previous_tab_id is not None:

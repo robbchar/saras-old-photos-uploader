@@ -26,7 +26,7 @@ import pytest
 from googleapiclient.errors import HttpError
 
 import google_auth
-from e2e_lock import LockHeld, LockLost, RehearsalLock, RunIdentity, acquire_lock
+from e2e_lock import LockHeld, LockLost, LockStillHeld, RehearsalLock, RunIdentity, acquire_lock
 from e2e_sheet import (
     E2E_PROJECT,
     LOCK_TAB,
@@ -342,20 +342,26 @@ def check_in(lock: RehearsalLock, step: str) -> None:
 
 def restore_broken_filename(sheet: RehearsalSheet, lock: RehearsalLock, filename: str) -> None:
     # After a takeover the row is the other run's; restoring it would break that run.
-    check_in_error: Exception | None = None
+    # A restore after a check-in error runs inside its handler, so a failed restore still reports that error.
     try:
         lock.check_in()
     except LockLost as lost:
         pytest.fail(f"{STEP_12}: {lost}")
+    except LockStillHeld:
+        _put_back_filename(sheet, filename)
+        raise
     except Exception as error:
-        check_in_error = error
         # The error leaves the holder unknown; restore only once the Sheet shows the lock is still this run's.
         if not lock.holds():
             pytest.fail(f"{STEP_12}: the lock is no longer this run's, so the filename was left alone ({error!r})")
+        _put_back_filename(sheet, filename)
+        raise
+    _put_back_filename(sheet, filename)
+
+
+def _put_back_filename(sheet: RehearsalSheet, filename: str) -> None:
     sheet.edit(BROKEN_ROW, "File Name", filename)
     expect(STEP_12, sheet.cell(sheet.grid(), BROKEN_ROW, "File Name") == filename, "the broken filename was not restored")
-    if check_in_error is not None:
-        raise check_in_error
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +529,8 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_9, len(sheet.log_rows(target.sync_log_tab)) == len(sync_log), "the quiet run appended to Sync Log")
     expect(STEP_9, sheet.grid() == grid_after_sync, "the quiet run changed the Sheet")
 
+    # Steps 10 and 11 only read, but check in so a lock lost after step 9 fails as one.
+    check_in(lock, STEP_10)
     for tab in target.log_tabs:
         for when, run, *_ in sheet.log_rows(tab)[1:]:
             log_file = log_dir / run
@@ -531,6 +539,7 @@ def test_rehearsal(tmp_path, request):
             expect(STEP_10, summary_timestamp is not None, f"{tab} names {run}, which has no run_summary record")
             expect(STEP_10, summary_timestamp == when, f"{tab} row for {run}: when {when!r} is not its run_summary timestamp")
 
+    check_in(lock, STEP_11)
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
     final = sheet.grid()
@@ -600,6 +609,8 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
         # generous overall budget - never an assertion on how long it took.
         events = _read_sse(f"{base_url}/api/runs/current/output", stop_on="finished", timeout=CLI_TIMEOUT_SECONDS)
 
+    # Before any check on the run, so a lock lost during the wait fails as one.
+    check_in(lock, STEP_UPLOAD_PAGE_RUN)
     finished = [event for event in events if event.event == "finished"]
     expect(STEP_UPLOAD_PAGE_RUN, bool(finished), f"no 'finished' event within {CLI_TIMEOUT_SECONDS}s")
     ending = json.loads(finished[-1].data)["ending"]
@@ -630,7 +641,6 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
         "a test-mode page run wrote to the data tab, but write-back needs --live or --write-identifier",
     )
 
-    check_in(lock, STEP_UPLOAD_PAGE_RUN)
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_UPLOAD_PAGE_RUN, upload_log[:1] == [LOG_TAB_HEADER], f"Upload Log header is {upload_log[:1]}")
     expect(STEP_UPLOAD_PAGE_RUN, [row[2] for row in upload_log[1:]] == ["summary"], f"Upload Log rows: {upload_log[1:]}")
@@ -884,12 +894,31 @@ def test_restoring_the_filename_writes_nothing_once_the_lock_is_lost(tmp_path):
 
 def test_restoring_the_filename_still_restores_after_a_check_in_error_that_is_not_a_lost_lock(tmp_path):
     sheets, lock, _ = held_lock(tmp_path)
-    sheets.fail_next_batch = http_error("Internal error encountered.", status=500)
+    error = http_error("Internal error encountered.", status=500)
+    sheets.fail_next_batch = error
 
-    with pytest.raises(HttpError):
+    def lose_the_network() -> None:
+        sheets.fail_next_get = TimeoutError("timed out")
+
+    # The check-in's own re-read shows the lock held; a second read would fail.
+    sheets.after_next_get = lose_the_network
+
+    with pytest.raises(LockStillHeld) as raised:
         restore_broken_filename(RehearsalSheet(sheets, FAKE_TARGET, ["File Name"]), lock, "e2e-03.jpg")
 
+    assert raised.value.__cause__ is error
     assert sheets.value_updates == [RESTORED_CELL]
+
+
+def test_a_restore_that_fails_after_a_check_in_error_still_reports_the_check_in_error(tmp_path):
+    sheets, lock, _ = held_lock(tmp_path)
+    sheets.fail_next_batch = http_error("Internal error encountered.", status=500)
+    sheets.delete_tab(FAKE_TARGET.data_tab)
+
+    with pytest.raises(HttpError, match="Unable to parse range") as raised:
+        restore_broken_filename(RehearsalSheet(sheets, FAKE_TARGET, ["File Name"]), lock, "e2e-03.jpg")
+
+    assert isinstance(raised.value.__context__, LockStillHeld)
 
 
 def test_restoring_the_filename_after_a_check_in_whose_re_read_failed_restores_a_lock_still_held(tmp_path):

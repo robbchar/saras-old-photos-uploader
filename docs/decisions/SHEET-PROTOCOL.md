@@ -559,9 +559,11 @@ lock expires. Wait for it to finish, then re-run.
   applies a batch whole or not at all, and refuses a second tab with the same
   name, so two runs racing for a free lock cannot both win. If the batch lands
   but its response is lost, the run re-reads the Sheet and keeps a tab that
-  carries its new sheetId and names this run. If that re-read fails too, it
-  tries to delete the tab under its new id before failing; if the delete fails
-  as well, the lock is left behind to expire.
+  carries its new sheetId and names this run. If that re-read fails too, and
+  the API did not refuse the batch outright (a 4xx), it tries to delete the tab
+  under its new id before failing; if the delete fails as well, the lock is
+  left behind to expire. A refused batch added nothing, and its id may be
+  another run's tab, so it deletes nothing.
 - **The sheetId is the ownership.** Every check-in swaps the tab for one under
   a new sheetId, in one batch that deletes by the old id. Check-ins and the
   delete at teardown target the id this run last put there. A run whose lock
@@ -574,15 +576,21 @@ lock expires. Wait for it to finish, then re-run.
 - **A lost response is settled by re-reading the Sheet.** After any error, a
   check-in or release re-reads the lock tab. A swap that landed is kept, and a
   delete that landed counts as a release, even if another run has taken the
-  freed lock by the time of the re-read. If an earlier check-in's outcome was
-  never learned, the next one finds this run's newer tab and retries from it.
-  The step-12 restore goes ahead after a check-in error only once the Sheet
+  freed lock by the time of the re-read. A holder that started before the
+  release began took the lock over instead, so that release fails with "this
+  run lost the Test Sheet lock". If an earlier check-in's outcome was never
+  learned, the next one finds this run's newer tab and retries from it. When
+  the re-read shows the lock is still this run's, the check-in or release
+  fails with `LockStillHeld`, carrying the original error. The step-12 restore
+  goes ahead after that, or after any other check-in error once the Sheet
   shows the lock is still this run's, then fails the run with that error.
 - **Check-ins come before every CLI call, IA wait and Sheet edit.** `run_cli`
   and `wait_for_ia` check in themselves, so a new CLI call or IA wait cannot
   leave it out. The rehearsal's own Sheet edits, at steps 4, 7 and 12, check in
-  explicitly. So does the upload-page test before and after its run: its wait
-  is an SSE stream, not `run_cli`, bounded by the same `CLI_TIMEOUT_SECONDS`.
+  explicitly, and so do steps 10 and 11 before their reads, so a lock lost
+  after step 9 fails as one. So does the upload-page test before its run and
+  right after its wait, before checking the result: its wait is an SSE stream,
+  not `run_cli`, bounded by the same `CLI_TIMEOUT_SECONDS`.
 - **A lost lock is noticed at the next check-in, not sooner.** A run is taken
   over only after its lease runs out; a laptop asleep mid-step is the likely
   cause. The CLI step it was in can still finish and write into the new

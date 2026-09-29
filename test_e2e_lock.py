@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from e2e_lock import LockHeld, LockHolder, LockLost, RehearsalLock, RunIdentity, acquire_lock
+from e2e_lock import LockHeld, LockHolder, LockLost, LockStillHeld, RehearsalLock, RunIdentity, acquire_lock
 from e2e_sheet import LOCK_TAB
 from fake_sheets import TARGET, FakeSheets, http_error
 
@@ -219,6 +219,23 @@ def test_acquiring_deletes_its_own_tab_when_it_cannot_tell_whether_the_batch_lan
     assert LOCK_TAB not in sheets.tabs
 
 
+def test_acquiring_leaves_a_same_id_tab_alone_when_it_cannot_re_read_after_a_refusal(sheets, clock, monkeypatch):
+    draws = iter([41, 41])
+    monkeypatch.setattr(secrets, "randbelow", lambda _limit: next(draws))
+    others: list = []
+
+    def other_run_wins_then_the_network_drops() -> None:
+        others.append(acquire_lock(sheets, TARGET, OTHER_RUN, LEASE, clock))
+        sheets.fail_next_get = TimeoutError("timed out")
+
+    sheets.before_next_batch = other_run_wins_then_the_network_drops
+
+    with pytest.raises(TimeoutError):
+        acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
+
+    assert lock_holder(sheets) == others[0].holder
+
+
 def test_checking_in_extends_the_lease_from_now_under_a_new_tab_id(sheets, clock):
     lock = acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
     first_tab_id = lock.tab_id
@@ -274,13 +291,14 @@ def test_checking_in_after_the_lock_tab_was_replaced_by_hand_says_it_names_no_re
 
 
 @pytest.mark.parametrize("error", [http_error("Internal error encountered.", status=500), TimeoutError("timed out")])
-def test_checking_in_reraises_an_error_that_is_not_a_lost_lock(sheets, clock, error):
+def test_checking_in_after_an_error_that_is_not_a_lost_lock_says_the_lock_is_still_held(sheets, clock, error):
     lock = acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
     sheets.fail_next_batch = error
 
-    with pytest.raises(type(error)):
+    with pytest.raises(LockStillHeld) as raised:
         lock.check_in()
 
+    assert raised.value.__cause__ is error
     assert sheets.tabs[LOCK_TAB] == lock.tab_id
 
 
@@ -374,6 +392,20 @@ def test_releasing_succeeds_when_another_run_takes_the_lock_its_lost_delete_free
     lock.release()
 
     assert sheets.tabs[LOCK_TAB] == others[0].tab_id
+
+
+@pytest.mark.parametrize("error", [http_error("Internal error encountered.", status=500), TimeoutError("timed out")])
+def test_releasing_after_a_takeover_says_so_even_when_the_delete_errs(sheets, clock, error):
+    lock = acquire_lock(sheets, TARGET, THIS_RUN, LEASE, clock)
+    clock.advance(minutes=45)
+    other = acquire_lock(sheets, TARGET, OTHER_RUN, LEASE, clock)
+    clock.advance(minutes=1)
+    sheets.fail_next_batch = error
+
+    with pytest.raises(LockLost, match="took it over"):
+        lock.release()
+
+    assert sheets.tabs[LOCK_TAB] == other.tab_id
 
 
 def test_holder_rows_read_back_as_the_same_holder():

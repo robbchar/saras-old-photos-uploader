@@ -4,6 +4,7 @@ import copy
 import json
 from collections.abc import Callable
 
+import pytest
 from googleapiclient.errors import HttpError
 
 from e2e_sheet import E2ESheet
@@ -74,7 +75,10 @@ class _Spreadsheets:
 
 
 def _title_of(a1_range: str) -> str:
-    return a1_range.split("!")[0].strip("'").replace("''", "'")
+    """A quoted title runs to its last quote, so a '!' inside it stays part of the title."""
+    if a1_range.startswith("'"):
+        return a1_range[1 : a1_range.rindex("'")].replace("''", "'")
+    return a1_range.split("!")[0]
 
 
 def _cell_of(a1_range: str) -> tuple[int, int]:
@@ -124,8 +128,11 @@ class FakeSheets:
         del self.cells[self.tabs.pop(title)]
 
     def write(self, a1_range: str, rows: list[list[str]]) -> None:
+        title = _title_of(a1_range)
+        if title not in self.tabs:
+            raise http_error(f"Unable to parse range: {a1_range}")
         first_row, first_column = _cell_of(a1_range)
-        cells = self.cells[self.tabs[_title_of(a1_range)]]
+        cells = self.cells[self.tabs[title]]
         for r, row in enumerate(rows):
             for c, value in enumerate(row):
                 cells[(first_row + r, first_column + c)] = value
@@ -154,11 +161,17 @@ class FakeSheets:
         move_after, self.after_next_batch = self.after_next_batch, None
         if move is not None:
             move()
-        if failure is not None:
-            raise failure
         tabs, cells = copy.deepcopy(self.tabs), copy.deepcopy(self.cells)
-        for request in requests:
-            _apply_one(request, tabs, cells)
+        try:
+            if failure is not None:
+                raise failure
+            for request in requests:
+                _apply_one(request, tabs, cells)
+        except Exception:
+            # pytest.fail is a BaseException, so the lock code's `except Exception` cannot swallow it.
+            if lost_response is not None or move_after is not None:
+                pytest.fail("the batch did not land, so its fail_after_next_batch/after_next_batch hook never ran")
+            raise
         self.tabs, self.cells = tabs, cells
         if move_after is not None:
             move_after()
