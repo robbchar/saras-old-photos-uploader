@@ -15,7 +15,6 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar
@@ -65,6 +64,7 @@ from sync_state import (
     stamp_updates,
     sync_hash,
 )
+from utc_time import UTC_TIMESTAMP_FORMAT, utc_now
 
 # Shared by build_deployment_checks and cmd_setup - one computed root, not two.
 REPO_ROOT = Path(__file__).resolve().parent
@@ -946,12 +946,7 @@ def utc_timestamp() -> str:
     The trailing Z is not decoration: without it the string is ambiguous, and
     the ambiguity is only discoverable by knowing which machine wrote it and
     what its clock was set to that day."""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def utc_now() -> datetime:
-    """Its own function so tests can pin the daily cap's clock."""
-    return datetime.now(timezone.utc)
+    return time.strftime(UTC_TIMESTAMP_FORMAT, time.gmtime())
 
 
 def open_log(log_dir: str | Path, command_name: str) -> Path:
@@ -3524,7 +3519,7 @@ def print_run_stop(stop: RunStop, attempted: int, uploaded: int) -> None:
         # The status alone cannot say which limit fired, so name both.
         print(
             f"{uploaded} uploaded this run - re-run later to resume: minutes to "
-            "hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached"
+            "hours if IA's queue is busy, up to 24 hours if the 5,000/day cap was reached"
         )
         return
     print(f"stopped: as requested, after {_pluralize(attempted, 'item')}", file=sys.stderr)
@@ -4343,11 +4338,16 @@ def upload_from_sheet(args) -> int:
     # quietly stops short reads as a complete one, which is the same trap the
     # --limit <= 0 guard above exists to avoid.
     # Earlier runs count through this Sheet's `ia_uploaded` cells (all rows, not just `scope`).
-    quota = measure_daily_quota(
-        (row.get(IA_UPLOADED_COLUMN) or "" for row in rows), now=utc_now(), cap=DAILY_ITEM_CAP
-    )
-    if not quota.allows(len(targets)) and not getattr(args, "allow_over_daily_cap", False):
-        print(describe_refusal(quota, len(targets)), file=sys.stderr)
+    # A dry run spends nothing, so it still previews, then names the refusal.
+    over_cap_refusal = None
+    if targets and not getattr(args, "allow_over_daily_cap", False):
+        quota = measure_daily_quota(
+            (row.get(IA_UPLOADED_COLUMN) or "" for row in rows), now=utc_now(), cap=DAILY_ITEM_CAP
+        )
+        if not quota.allows(len(targets)):
+            over_cap_refusal = describe_refusal(quota, len(targets))
+    if over_cap_refusal and not dry_run:
+        print(over_cap_refusal, file=sys.stderr)
         return 1
 
     collection = config.ia_collection if live else TEST_COLLECTION
@@ -4363,7 +4363,9 @@ def upload_from_sheet(args) -> int:
             targets, columns, write_back, upload_timestamp(),
             bool(getattr(args, "verbose", False)),
         )
-        return 1 if blocked else 0
+        if over_cap_refusal:
+            print(f"\n--dry-run: a real run would be refused now:\n{over_cap_refusal}", file=sys.stderr)
+        return 1 if (blocked or over_cap_refusal) else 0
 
     if not targets:
         print("nothing to upload - every valid row is already marked uploaded")

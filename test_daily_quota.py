@@ -4,13 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from daily_quota import DAILY_WINDOW, describe_refusal, measure_daily_quota, parse_uploaded_at
+from utc_time import format_utc as stamp
 
 NOW = datetime(2026, 9, 29, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def stamp(moment: datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def hours_ago(hours: float) -> str:
@@ -121,10 +120,11 @@ def test_room_opens_once_enough_uploads_leave_the_window_for_the_whole_run():
     assert quota.room_opens_at(2) == NOW - timedelta(hours=5) + DAILY_WINDOW
 
 
-def test_room_opens_now_for_a_run_that_already_fits():
+def test_room_opens_at_rejects_a_run_that_already_fits():
     quota = measure_daily_quota([hours_ago(1)], now=NOW, cap=3)
 
-    assert quota.room_opens_at(2) == NOW
+    with pytest.raises(ValueError):
+        quota.room_opens_at(2)
 
 
 def test_room_never_opens_for_a_run_over_the_cap_on_its_own():
@@ -182,6 +182,16 @@ def test_refusal_for_a_run_over_the_cap_on_its_own_says_it_must_be_split():
 
     assert "over the cap on its own" in message
     assert "fits after" not in message
+
+
+def test_refusal_for_a_run_over_the_cap_with_no_room_left_says_when_room_opens():
+    """No --limit fits now, so "the rest" has nothing to be the rest of."""
+    quota = measure_daily_quota([hours_ago(3), hours_ago(1)], now=NOW, cap=2)
+    message = describe_refusal(quota, 3)
+
+    assert "split with --limit once room opens, after" in message
+    assert "(2026-09-30 09:00 UTC)" in message
+    assert "the rest" not in message
 
 
 def test_refusal_names_the_override():

@@ -282,7 +282,7 @@ upload fails with what looks like Internet Archive's rate limit, the run
 stops rather than grinding through the rest of the batch as unexplained
 failures — everything already uploaded that run, in this chunk or an earlier
 one, is still confirmed in the Sheet first. Re-run later to resume: a busy IA
-queue can clear in minutes to hours, the 5,000/day cap only tomorrow, and
+queue can clear in minutes to hours, the 5,000/day cap within 24 hours, and
 the stop cannot tell which one it hit. This detector is best-effort: it has
 fired on one real response so far, and it may miss a limit IA signals some
 other way — see `docs/DECISIONS.md`, "Still open".
@@ -324,7 +324,8 @@ overrides it, and is only correct if you know IA has raised this account's
 cap. The refusal applies in test mode too, since a rehearsal uploads through
 the same account and spends the same quota — but each run counts only its
 own Sheet's uploads, so live and test runs on the same day do not see each
-other's.
+other's. A `--dry-run` still shows its preview, followed by the refusal a
+real run would get.
 
 **One upload at a time.** A run refuses to start while another upload is
 running from the same checkout, and names it (project, batch, mode, start

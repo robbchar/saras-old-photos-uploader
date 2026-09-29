@@ -166,9 +166,12 @@ when the uploads already in the window plus this run's would exceed
   unknown, and only real traffic can say. Every upload since any midnight is
   also inside the last 24 hours, so the rolling count is never lower than a
   calendar-day count: it never lets through a run a calendar-day rule would
-  refuse. The cost is refusing some runs IA would take — 5,000 at 23:00 UTC,
-  then more at 01:00 UTC — which waits at most a day. If real traffic shows a
-  calendar-day reset, `DAILY_WINDOW` in `daily_quota.py` is where to relax it.
+  refuse. The one exception is a DST fall-back day, whose local calendar day
+  runs 25 hours. The cost is refusing some runs IA would take — 5,000 at
+  23:00 UTC, then more at 01:00 UTC — which waits at most a day. If real
+  traffic shows a calendar-day reset, relaxing it means counting from IA's
+  midnight in `measure_daily_quota` and naming the next midnight in
+  `room_opens_at`. No `DAILY_WINDOW` length can express a midnight reset.
 - **The count comes from the Sheet's `ia_uploaded` cells, not the JSONL
   logs.** The logs only see the machine that wrote them, split across
   `logs/` and `logs/page-runs/<UTC>/`. The Sheet sees every run from every
@@ -197,7 +200,9 @@ throttle stays the backstop:
 
 The refusal names the room left as a `--limit` and when the whole run fits.
 The second half exists for the upload page (`serve`), which shows the
-refusal text but cannot pass `--limit`.
+refusal text but cannot pass `--limit`. A `--dry-run` spends nothing, so it
+still prints its preview, then the refusal a real run would get, and exits
+non-zero.
 
 ## Rate-limit detection uses a parsed status code, never message text
 
@@ -300,7 +305,7 @@ and both possible causes:
 
 ```
 stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
-2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, up to 24 hours if the 5,000/day cap was reached
 ```
 
 The operator decides from IA's own message, which the log already keeps in

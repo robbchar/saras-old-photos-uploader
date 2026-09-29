@@ -199,7 +199,7 @@ decision gets made.
   are now tracked too — a run is refused if the Sheet's uploads in the last 24
   hours plus its own would pass the cap. A new open question comes with it:
   whether IA's "day" is a calendar day or a rolling 24 hours. The tool assumes
-  rolling, the stricter of the two (see "A run may not exceed Internet
+  rolling, the stricter of the two except on a 25-hour DST day (see "A run may not exceed Internet
   Archive's daily item cap" in `decisions/QUOTA-AND-RUNS.md`).
 - ~~How a run establishes the next free `NUMBER`~~ **Settled 2026-08-08**:
   reserve in the Sheet before uploading, and track completion in an

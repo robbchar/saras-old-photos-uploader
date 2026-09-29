@@ -808,7 +808,7 @@ A rate-limited run ends like this:
 
 ```
 stopped: Internet Archive asked us to slow down (HTTP 503) after 3 items
-2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, tomorrow if today's 5,000 cap was reached
+2 uploaded this run - re-run later to resume: minutes to hours if IA's queue is busy, up to 24 hours if the 5,000/day cap was reached
 ```
 
 The tool cannot tell which of IA's limits it hit, so read the `failure` line
