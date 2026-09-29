@@ -6,6 +6,7 @@ Each step label names the hand check it replaces.
 
 from __future__ import annotations
 
+import codecs
 import io
 import json
 import os
@@ -13,11 +14,12 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import IO, Any, TextIO, TypeVar
 
 import internetarchive
 import pytest
@@ -60,6 +62,8 @@ REAL_IA_ENVIRONMENT = {name: os.environ.get(name) for name in ("IA_CONFIG_FILE",
 IA_POLL_INTERVAL_SECONDS = 15
 IA_POLL_TIMEOUT_SECONDS = 600
 CLI_TIMEOUT_SECONDS = 900
+PUMP_CHUNK_BYTES = 4096
+PUMP_DRAIN_SECONDS = 10
 # Twice the longest gap between check-ins, which is one CLI call.
 LOCK_LEASE = timedelta(seconds=2 * CLI_TIMEOUT_SECONDS)
 
@@ -71,13 +75,16 @@ IA_RATE_LIMIT_NOTICE = "Internet Archive asked us to slow down"
 
 # Grid indexes; header is 0, so Sheet row = index + 1.
 FIRST_UPLOADED, SECOND_UPLOADED, BROKEN_ROW, THIRD_UPLOADED = 1, 2, 3, 4
-UPLOADED_ROWS = (FIRST_UPLOADED, SECOND_UPLOADED, THIRD_UPLOADED)
+# Index 5 is the row without a theme.
+FOURTH_UPLOADED, FIFTH_UPLOADED = 6, 7
+UPLOADED_ROWS = (FIRST_UPLOADED, SECOND_UPLOADED, THIRD_UPLOADED, FOURTH_UPLOADED, FIFTH_UPLOADED)
 
 STEP_0 = "step 0 - reset (OPERATIONS §2 hand reset; 'Rehearsing the log tabs' intro)"
 STEP_1 = "step 1 - validate (DEPLOYMENT §16 step 1; OPERATIONS §1)"
 STEP_2 = "step 2 - upload (OPERATIONS 'Rehearsing the log tabs' step 1, first run)"
 STEP_3 = "step 3 - upload again (OPERATIONS 'Rehearsing the log tabs' step 1, second run)"
 STEP_4 = "step 4 - problem row (OPERATIONS 'Rehearsing the log tabs' step 2)"
+STEP_4B = "step 4b - two files in one run, one progress bar each (OPERATIONS 'Rehearsing the log tabs' step 2, --limit 2)"
 STEP_5 = "step 5 - items exist on IA (OPERATIONS pre-live checklist: zztest item eyeballed)"
 STEP_6 = "step 6 - sync dry run (DEPLOYMENT §16 step 2)"
 STEP_7 = "step 7 - sync an edit (OPERATIONS 'Rehearsing the log tabs' step 3, first run)"
@@ -90,10 +97,72 @@ STEP_12 = "step 12 - restore the broken filename (OPERATIONS 'Rehearsing the log
 Found = TypeVar("Found")
 
 
-def _print_for_console(text: str) -> None:
+def _write_to_console(text: str, stream: TextIO) -> None:
     """A cp1252 console can't show ia's progress-bar block char; escape what it can't show instead of raising."""
-    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
-    print(text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    stream.write(text.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace"))
+    stream.flush()
+
+
+def _print_for_console(text: str) -> None:
+    _write_to_console(f"{text}\n", sys.stdout)
+
+
+def _echo_stdout(text: str) -> None:
+    _write_to_console(text, sys.stdout)
+
+
+def _echo_stderr(text: str) -> None:
+    _write_to_console(text, sys.stderr)
+
+
+def _pump(source: IO[bytes], echo: Callable[[str], None], captured: list[str]) -> None:
+    """Chunks, not lines, so a progress bar's in-place redraws reach the console as they happen."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    while chunk := source.read(PUMP_CHUNK_BYTES):
+        text = decoder.decode(chunk)
+        captured.append(text)
+        echo(text.replace("\r\n", "\n"))
+    captured.append(decoder.decode(b"", final=True))
+
+
+def _joined(parts: list[str]) -> str:
+    """CRLF becomes LF as in text mode, but a lone CR (a progress-bar redraw) is kept."""
+    return "".join(parts).replace("\r\n", "\n")
+
+
+def run_streaming(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: float,
+    echo_stdout: Callable[[str], None] = _echo_stdout,
+    echo_stderr: Callable[[str], None] = _echo_stderr,
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run(capture_output=True) that also echoes the child's output live; TimeoutExpired carries the partial output."""
+    # bufsize=0: each read returns whatever the child has written so far.
+    process = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    assert process.stdout is not None and process.stderr is not None
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    pumps = [
+        threading.Thread(target=_pump, args=(process.stdout, echo_stdout, stdout_parts), daemon=True),
+        threading.Thread(target=_pump, args=(process.stderr, echo_stderr, stderr_parts), daemon=True),
+    ]
+    for pump in pumps:
+        pump.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        for pump in pumps:
+            pump.join(timeout=PUMP_DRAIN_SECONDS)
+        raise subprocess.TimeoutExpired(argv, timeout, output=_joined(stdout_parts), stderr=_joined(stderr_parts)) from None
+    for pump in pumps:
+        pump.join()
+    return subprocess.CompletedProcess(argv, returncode, _joined(stdout_parts), _joined(stderr_parts))
 
 
 def cli_environment() -> dict[str, str]:
@@ -118,24 +187,17 @@ def run_cli(step: str, command: str, *flags: str, log_dir: Path | None = None) -
     argv = [sys.executable, "ia_bulk.py", command, *flags, "--registry", str(E2E_REGISTRY), "--project", E2E_PROJECT]
     if log_dir is not None:
         argv += ["--log-dir", str(log_dir)]
+    # Header first: the command's output streams under it while it runs.
+    _print_for_console(f"\n===== {step}\n$ ia_bulk.py {command} {' '.join(flags)}")
+    # Unbuffered, so stdout interleaves with the progress bars as it would in a terminal.
+    environment = {**cli_environment(), "PYTHONUNBUFFERED": "1"}
     try:
-        result = subprocess.run(
-            argv,
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=cli_environment(),
-            timeout=CLI_TIMEOUT_SECONDS,
-            check=False,
-        )
+        return run_streaming(argv, cwd=REPO_ROOT, env=environment, timeout=CLI_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         pytest.fail(
             f"{step}: ia_bulk.py {command} did not finish within {CLI_TIMEOUT_SECONDS // 60} min\n"
             f"--- stdout ---\n{_decoded(exc.stdout)}\n--- stderr ---\n{_decoded(exc.stderr)}"
         )
-    _print_for_console(f"\n===== {step}\n$ ia_bulk.py {command} {' '.join(flags)}\n{result.stdout}{result.stderr}")
-    return result
 
 
 def output_of(result: subprocess.CompletedProcess[str]) -> str:
@@ -262,7 +324,7 @@ def restore_broken_filename(sheet: RehearsalSheet, lock: RehearsalLock, filename
 # test_rehearsal already exercises directly.
 # ---------------------------------------------------------------------------
 
-# e2e_fixtures/sheet.json's Theme value for rows 1-4; e2e_fixtures/registry.json
+# e2e_fixtures/sheet.json's Theme value for rows 1-4, 6 and 7; e2e_fixtures/registry.json
 # names "theme" as this project's batch_column. Row 5 has no Theme, so it is
 # out of scope for this batch - see e2e_fixtures/sheet.json.
 UPLOAD_PAGE_BATCH = "E2E"
@@ -330,7 +392,7 @@ def test_rehearsal(tmp_path, request):
 
     check_in(lock, STEP_1)
     result = run_cli(STEP_1, "validate")
-    expect_run(STEP_1, result, 0, "5/5 rows passed", "missing theme")
+    expect_run(STEP_1, result, 0, "7/7 rows passed", "missing theme")
 
     check_in(lock, STEP_2)
     result = run_cli(STEP_2, "upload", "--write-identifier", "--limit", "1", log_dir=log_dir)
@@ -374,6 +436,19 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_4, sheet.cell(grid, THIRD_UPLOADED, "ia_identifier") == "lcps-e2e-00003", "row 5 did not get lcps-e2e-00003")
     expect(STEP_4, not any(sheet.cell(grid, BROKEN_ROW, column) for column in UPLOAD_COLUMNS), "row 4 was marked uploaded")
 
+    check_in(lock, STEP_4B)
+    result = run_cli(STEP_4B, "upload", "--write-identifier", "--limit", "2", log_dir=log_dir)
+    # Row 4 is still broken, so it is skipped again.
+    expect_run(STEP_4B, result, 1, "2 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation)")
+    bars = re.findall(r"uploading (e2e-\d+\.jpg)", result.stderr)
+    expect(STEP_4B, list(dict.fromkeys(bars)) == ["e2e-06.jpg", "e2e-07.jpg"], f"progress bars were for {bars}")
+    upload_log = sheet.log_rows(target.upload_log_tab)
+    expect(STEP_4B, [row[2] for row in upload_log[5:]] == ["summary", "skipped"], f"Upload Log rows: {upload_log[5:]}")
+    grid = sheet.grid()
+    expect(STEP_4B, sheet.cell(grid, FOURTH_UPLOADED, "ia_identifier") == "lcps-e2e-00004", "row 7 did not get lcps-e2e-00004")
+    expect(STEP_4B, sheet.cell(grid, FIFTH_UPLOADED, "ia_identifier") == "lcps-e2e-00005", "row 8 did not get lcps-e2e-00005")
+    expect(STEP_4B, not any(sheet.cell(grid, BROKEN_ROW, column) for column in UPLOAD_COLUMNS), "row 4 was marked uploaded")
+
     identifiers = {row: sheet.cell(grid, row, "ia_url").removeprefix(ITEM_URL_PREFIX) for row in UPLOADED_ROWS}
     for identifier in identifiers.values():
         check_in(lock, STEP_5)
@@ -390,7 +465,7 @@ def test_rehearsal(tmp_path, request):
     edited_title = f"E2E fixture 1 (edited {time.strftime('%Y%m%dT%H%M%S')})"
     sheet.edit(FIRST_UPLOADED, "Title", edited_title)
     result = run_cli(STEP_7, "sync-metadata", log_dir=log_dir)
-    expect_run(STEP_7, result, 0, "1 item(s) updated successfully, 2 unchanged, 0 error(s)")
+    expect_run(STEP_7, result, 0, "1 item(s) updated successfully, 4 unchanged, 0 error(s)")
     sync_log = sheet.log_rows(target.sync_log_tab)
     expect(STEP_7, sync_log[:1] == [LOG_TAB_HEADER], f"Sync Log header is {sync_log[:1]}")
     expect(STEP_7, [row[2] for row in sync_log[1:]] == ["summary"], f"Sync Log rows: {sync_log[1:]}")
@@ -569,12 +644,72 @@ def test_a_throttled_run_fails_as_ia_throttling_even_when_exit_1_was_expected():
 
 def test_a_cli_timeout_fails_with_the_step_and_partial_output(monkeypatch):
     def time_out(*_args, **_kwargs):
-        raise subprocess.TimeoutExpired(cmd="ia_bulk.py", timeout=1, output=b"uploading e2e-01.jpg", stderr=None)
+        raise subprocess.TimeoutExpired(cmd="ia_bulk.py", timeout=1, output="uploading e2e-01.jpg", stderr=None)
 
-    monkeypatch.setattr(subprocess, "run", time_out)
+    monkeypatch.setattr(sys.modules[__name__], "run_streaming", time_out)
 
     with pytest.raises(pytest.fail.Exception, match=r"(?s)step 2: ia_bulk.py upload did not finish.*uploading e2e-01\.jpg"):
         run_cli("step 2", "upload")
+
+
+def _run_child(script: str, timeout: float = 30) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    echoed_stdout: list[str] = []
+    echoed_stderr: list[str] = []
+    result = run_streaming(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=dict(os.environ),
+        timeout=timeout,
+        echo_stdout=echoed_stdout.append,
+        echo_stderr=echoed_stderr.append,
+    )
+    return result, echoed_stdout, echoed_stderr
+
+
+def test_run_streaming_keeps_a_progress_bars_redraws_on_one_line():
+    script = "import sys; sys.stderr.buffer.write(b'\\r 0%\\r100%\\n'); sys.stdout.buffer.write(b'done\\r\\n')"
+
+    result, echoed_stdout, echoed_stderr = _run_child(script)
+
+    assert (result.returncode, result.stdout, result.stderr) == (0, "done\n", "\r 0%\r100%\n")
+    assert ("".join(echoed_stdout), "".join(echoed_stderr)) == ("done\n", "\r 0%\r100%\n")
+
+
+def test_run_streaming_decodes_a_character_split_across_writes():
+    block = "█".encode()
+    script = (
+        "import sys, time; err = sys.stderr.buffer; "
+        f"err.write({block[:1]!r}); err.flush(); time.sleep(0.3); err.write({block[1:]!r})"
+    )
+
+    result, _, echoed_stderr = _run_child(script)
+
+    assert result.stderr == "█"
+    assert "".join(echoed_stderr) == "█"
+
+
+def test_run_streaming_passes_the_exit_code_through():
+    result, _, _ = _run_child("import sys; sys.exit(3)")
+
+    assert result.returncode == 3
+
+
+def test_run_streaming_echoes_before_the_child_exits_and_a_timeout_keeps_the_partial_output():
+    script = "import sys, time; print('uploading e2e-01.jpg', flush=True); time.sleep(60)"
+    echoed: list[str] = []
+
+    with pytest.raises(subprocess.TimeoutExpired) as timed_out:
+        run_streaming(
+            [sys.executable, "-c", script],
+            cwd=REPO_ROOT,
+            env=dict(os.environ),
+            timeout=2,
+            echo_stdout=echoed.append,
+            echo_stderr=echoed.append,
+        )
+
+    assert "uploading e2e-01.jpg" in "".join(echoed)
+    assert "uploading e2e-01.jpg" in _decoded(timed_out.value.stdout)
 
 
 def test_cli_environment_uses_the_real_ia_settings_and_the_current_proxy(monkeypatch):
