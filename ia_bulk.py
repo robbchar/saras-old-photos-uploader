@@ -4115,24 +4115,35 @@ def print_dry_run(
         print("(re-run with -v to list every item and cell)")
 
 
-class CollectionVerdict(Enum):
-    """What archive.org says about the collection a live upload targets."""
-
-    CONFIRMED = "confirmed"
-    MISSING = "missing"
-    NOT_A_COLLECTION = "not_a_collection"
-    UNCHECKED = "unchecked"
+@dataclass(frozen=True)
+class CollectionConfirmed:
+    """archive.org has the item, and its mediatype is `collection`."""
 
 
 @dataclass(frozen=True)
-class CollectionCheck:
-    collection: str
-    verdict: CollectionVerdict
-    mediatype: str | None = None
-    # UNCHECKED only: the parsed status when there is one, and the exception's class name.
-    http_status: int | None = None
-    failure: str | None = None
+class CollectionMissing:
+    """archive.org has no item by that name."""
 
+
+@dataclass(frozen=True)
+class NotACollection:
+    """archive.org has the item, but its mediatype is not `collection`."""
+
+    mediatype: str | None
+
+
+@dataclass(frozen=True)
+class CollectionUnchecked:
+    """archive.org gave no answer a verdict can rest on."""
+
+    # The parsed HTTP status, the exception's class name, or what the answer lacked.
+    reason: str
+    # False for a 4xx other than 429, or an answer that is not the item: asking again gets the same.
+    retry_later: bool
+
+
+CollectionRefusal = CollectionMissing | NotACollection | CollectionUnchecked
+CollectionCheck = CollectionConfirmed | CollectionRefusal
 
 COLLECTION_MEDIATYPE = "collection"
 
@@ -4142,36 +4153,67 @@ def check_ia_collection(collection: str) -> CollectionCheck:
     try:
         item = internetarchive.get_item(collection, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
     except Exception as exc:
-        return CollectionCheck(
-            collection,
-            CollectionVerdict.UNCHECKED,
-            http_status=parsed_status_code(exc),
-            failure=type(exc).__name__,
+        status_code = parsed_status_code(exc)
+        if status_code is None:
+            return CollectionUnchecked(reason=type(exc).__name__, retry_later=True)
+        return CollectionUnchecked(
+            reason=f"HTTP {status_code}",
+            retry_later=status_code >= 500 or status_code in RATE_LIMIT_STATUS_CODES,
         )
-    # The endpoint answers an unknown identifier with an empty body, not a 404.
+    # The endpoint answers an unknown identifier with an empty JSON object, `{}`, not a 404.
     if not item.exists:
-        return CollectionCheck(collection, CollectionVerdict.MISSING)
+        return CollectionMissing()
+    # Non-empty but without `metadata`: `{"error": ...}`, or a sub-path's answer for an id with a `/`.
+    if not item.metadata:
+        return CollectionUnchecked(reason="an answer without the item's metadata", retry_later=False)
+    # archive.org answers 'x/', './x' and 'x?' with x's item; the upload would send the raw string.
+    answered_for = item.metadata.get("identifier")
+    if answered_for != collection:
+        return CollectionUnchecked(reason=f"archive.org answered for '{answered_for}'", retry_later=False)
     mediatype = item.metadata.get("mediatype")
     if mediatype != COLLECTION_MEDIATYPE:
-        return CollectionCheck(collection, CollectionVerdict.NOT_A_COLLECTION, mediatype=mediatype)
-    return CollectionCheck(collection, CollectionVerdict.CONFIRMED, mediatype=mediatype)
+        return NotACollection(mediatype)
+    return CollectionConfirmed()
 
 
-def collection_refusal(check: CollectionCheck, project: str) -> str:
-    """The stderr message for any verdict but CONFIRMED."""
-    target = f"project '{project}' sends items to Internet Archive collection '{check.collection}'"
+def collection_refusal(check: CollectionRefusal, project: str, collection: str) -> str:
+    """The stderr message for any check but CollectionConfirmed."""
+    target = f"project '{project}' sends items to Internet Archive collection '{collection}'"
     fix = "Check ia_collection in the registry. Nothing was uploaded."
-    if check.verdict is CollectionVerdict.MISSING:
+    if isinstance(check, CollectionMissing):
         return f"{target}, but archive.org has no item by that name. {fix}"
-    if check.verdict is CollectionVerdict.NOT_A_COLLECTION:
+    if isinstance(check, NotACollection):
         found = f"mediatype '{check.mediatype}'" if check.mediatype else "no mediatype"
-        return f"{target}, but '{check.collection}' is an item with {found}, not a collection. {fix}"
-    reason = f"HTTP {check.http_status}" if check.http_status is not None else check.failure
-    return (
-        f"could not confirm Internet Archive collection '{check.collection}' exists ({reason}), "
-        "and a live upload goes only into a confirmed collection. Nothing was uploaded; if "
-        "archive.org was unreachable or busy, run this again later."
+        return f"{target}, but '{collection}' is an item with {found}, not a collection. {fix}"
+    unconfirmed = (
+        f"could not confirm Internet Archive collection '{collection}' exists ({check.reason}), "
+        "and a live upload goes only into a confirmed collection. Nothing was uploaded"
     )
+    if check.retry_later:
+        return f"{unconfirmed}; archive.org was unreachable or busy, so run this again later."
+    return (
+        f"{unconfirmed}. Check ia_collection in the registry; if archive.org refused the "
+        f"account, {deployment.IA_CONFIGURE_REMEDY}."
+    )
+
+
+def confirm_collection_on_archive_org(project: str, collection: str) -> bool:
+    """Prints the outcome; False means the live upload stops here."""
+    print(f"asking archive.org whether Internet Archive collection '{collection}' exists...")
+    try:
+        check = check_ia_collection(collection)
+    except KeyboardInterrupt:
+        # Before the send loop an interrupt stops at once; one line instead of a traceback.
+        print(
+            "interrupted while asking archive.org. The Sheet was not read; nothing was uploaded.",
+            file=sys.stderr,
+        )
+        return False
+    if not isinstance(check, CollectionConfirmed):
+        print(collection_refusal(check, project, collection), file=sys.stderr)
+        return False
+    print(f"Internet Archive collection '{collection}' confirmed on archive.org")
+    return True
 
 
 def cmd_upload(args) -> int:
@@ -4283,13 +4325,9 @@ def upload_from_sheet(args) -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    # QUOTA-AND-RUNS.md, "A live upload goes only into a collection archive.org confirms".
-    if live:
-        collection_check = check_ia_collection(config.ia_collection)
-        if collection_check.verdict is not CollectionVerdict.CONFIRMED:
-            print(collection_refusal(collection_check, args.project), file=sys.stderr)
-            return 1
-        print(f"Internet Archive collection '{config.ia_collection}' confirmed on archive.org")
+    # FOUNDATIONS.md, "A live upload goes only into a collection archive.org confirms".
+    if live and not confirm_collection_on_archive_org(config.project_id, config.ia_collection):
+        return 1
 
     try:
         sheet = read_sheet(args, registry, config, live, "upload")

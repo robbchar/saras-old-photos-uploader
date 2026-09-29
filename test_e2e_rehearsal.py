@@ -35,7 +35,14 @@ from e2e_sheet import (
     set_cell,
     tab_ids,
 )
-from ia_bulk import IA_HTTP_ADAPTER_KWARGS, ITEM_URL_PREFIX, build_sheets_service
+from ia_bulk import (
+    IA_HTTP_ADAPTER_KWARGS,
+    ITEM_URL_PREFIX,
+    CollectionConfirmed,
+    CollectionMissing,
+    build_sheets_service,
+    check_ia_collection,
+)
 from log_tab import LOG_TAB_HEADER
 from sheet_client import SheetClient
 from test_e2e_lock import OTHER_RUN, FakeSheets
@@ -535,6 +542,17 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
         f"{expected_succeeded} file(s) uploaded successfully, 0 error(s)" in upload_log[1][4],
         f"Upload Log summary detail is {upload_log[1][4]!r}",
     )
+
+
+@pytest.mark.e2e
+def test_archive_org_answers_the_collection_check_as_it_assumes(monkeypatch):
+    """The real answers check_ia_collection's verdicts rest on: mediatype
+    `collection` for a collection, `{}` for an unknown identifier. Read-only,
+    so it needs neither the rehearsal lock nor the Test Sheet."""
+    _restore_real_ia_environment(monkeypatch)
+
+    assert check_ia_collection("test_collection") == CollectionConfirmed()
+    assert check_ia_collection("lcps-e2e-no-such-collection") == CollectionMissing()
 
 
 def test_print_for_console_survives_a_non_utf8_console(monkeypatch):

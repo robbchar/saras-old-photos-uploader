@@ -23,6 +23,7 @@ limit rather than missed.
 - [Use the `internetarchive` Python library, not `ia upload --spreadsheet`](decisions/FOUNDATIONS.md#use-the-internetarchive-python-library-not-ia-upload---spreadsheet)
 - [Generic to "a project", not hardcoded to photos](decisions/FOUNDATIONS.md#generic-to-a-project-not-hardcoded-to-photos)
 - [Technical configuration lives in the registry, not the command line](decisions/FOUNDATIONS.md#technical-configuration-lives-in-the-registry-not-the-command-line)
+- [A live upload goes only into a collection archive.org confirms](decisions/FOUNDATIONS.md#a-live-upload-goes-only-into-a-collection-archiveorg-confirms)
 - [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person)
 - [Accepted, not overlooked](decisions/FOUNDATIONS.md#accepted-not-overlooked)
 
@@ -115,7 +116,6 @@ run writes down about itself.
 - [An interrupt stops a run after the current item](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)
 - [One upload runs at a time, enforced by `upload`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload)
 - [Dry-run output is a summary by default; `-v` restores per-item detail](decisions/QUOTA-AND-RUNS.md#dry-run-output-is-a-summary-by-default--v-restores-per-item-detail)
-- [A live upload goes only into a collection archive.org confirms](decisions/QUOTA-AND-RUNS.md#a-live-upload-goes-only-into-a-collection-archiveorg-confirms)
 
 ## [The upload page](decisions/UPLOAD-PAGE.md)
 
