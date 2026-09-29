@@ -48,6 +48,7 @@ export function appendLineCapped(previous: string[], line: string): string[] {
 interface PageIdentity {
   project: string;
   collection: string;
+  version: string;
   live: boolean;
 }
 
@@ -224,7 +225,7 @@ export default function App() {
     getStatus()
       .then((status) => {
         if (cancelled) return;
-        setIdentity({ project: status.project, collection: status.collection, live: status.live });
+        setIdentity({ project: status.project, collection: status.collection, version: status.version, live: status.live });
         dispatch({ type: "status/received", run: status.run });
       })
       .catch((error: unknown) => {
@@ -502,7 +503,7 @@ export default function App() {
     <main className="min-h-screen bg-bg p-4">
       <div className="mx-auto w-full max-w-[1000px]">
         {identity && (
-          <Header project={identity.project} collection={identity.collection} live={identity.live}>
+          <Header project={identity.project} collection={identity.collection} version={identity.version} live={identity.live}>
             {themePickerVisible(state) && (
               <ThemePicker
                 batches={themes?.batches ?? []}

@@ -192,14 +192,22 @@ describe("Status", () => {
       live: false,
       project: "astoriaphotos",
       collection: "sarasoldphotos",
+      version: "1.0.0",
       run: { kind: "idle" },
     });
     expect(status).toEqual({
       live: false,
       project: "astoriaphotos",
       collection: "sarasoldphotos",
+      version: "1.0.0",
       run: { kind: "idle" },
     });
+  });
+
+  test("rejects a status without a version", () => {
+    expect(() =>
+      Status.parse({ live: false, project: "astoriaphotos", collection: "sarasoldphotos", run: { kind: "idle" } }),
+    ).toThrow();
   });
 });
 

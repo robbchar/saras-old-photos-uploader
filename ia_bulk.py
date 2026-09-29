@@ -25,6 +25,7 @@ import requests
 from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
+import app_version
 import deployment
 import google_auth
 import launch_agent
@@ -2749,7 +2750,13 @@ def report_unreadable_registry(args, exc: Exception) -> int:
     return 1
 
 
+def version_line(commit: str) -> str:
+    short_commit = commit if commit == "unknown" else commit[:7]
+    return f"ia_bulk {app_version.APP_VERSION} (commit {short_commit})"
+
+
 def cmd_doctor(args) -> int:
+    print(version_line(deployment.read_head_commit(REPO_ROOT)))
     try:
         checks = build_deployment_checks(args, include_network=not args.offline)
     except REGISTRY_READ_ERRORS as exc:
@@ -5946,6 +5953,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         allow_abbrev=False,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {app_version.APP_VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser(

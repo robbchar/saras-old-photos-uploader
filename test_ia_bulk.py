@@ -21,6 +21,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
 
+import app_version
 import deployment
 import google_auth
 import ia_bulk
@@ -3055,6 +3056,31 @@ def test_cmd_doctor_returns_zero_when_everything_passes(monkeypatch):
     )
     args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
     assert ia_bulk.cmd_doctor(args) == 0
+
+
+def test_cmd_doctor_prints_the_version_and_short_commit_first(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "0123456789abcdef")
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    ia_bulk.cmd_doctor(args)
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line == f"ia_bulk {app_version.APP_VERSION} (commit 0123456)"
+
+
+def test_cmd_doctor_version_line_survives_an_unknown_commit(monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+    monkeypatch.setattr(deployment, "read_head_commit", lambda repo_root: "unknown")
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "demo"])
+    ia_bulk.cmd_doctor(args)
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line == f"ia_bulk {app_version.APP_VERSION} (commit unknown)"
+
+
+def test_version_flag_prints_the_app_version(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        ia_bulk.build_parser().parse_args(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"ia_bulk {app_version.APP_VERSION}"
 
 
 def test_build_parser_accepts_setup_with_enable_agent():

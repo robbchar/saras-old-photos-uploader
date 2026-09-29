@@ -16,6 +16,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import app_version
 import build_stamp
 import page_runs
 import upload_lock
@@ -313,6 +314,15 @@ def test_status_reports_collection_and_run_idle(tmp_path, monkeypatch):
         assert payload["project"] == PROJECT
         assert payload["collection"] == "test_collection"
         assert payload["run"] == {"kind": "idle"}
+
+
+def test_status_reports_the_app_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(page_runs, "compute_run_state", lambda lock_path, logs_base: page_runs.Idle())
+    cfg = _make_config(tmp_path, live=False)
+    with upload_server.serve_in_thread(cfg, _fake_deps()) as base:
+        status, body = _get(base + "/api/status")
+        assert status == 200
+        assert json.loads(body)["version"] == app_version.APP_VERSION
 
 
 def test_status_reports_real_collection_when_live(tmp_path, monkeypatch):

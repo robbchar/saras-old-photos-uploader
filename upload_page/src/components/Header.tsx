@@ -8,6 +8,7 @@ import type { ReactNode } from "react";
 export interface HeaderProps {
   project: string;
   collection: string;
+  version: string;
   live: boolean;
   /** The persistent theme picker lives in the header; App passes it here so
    * this component stays presentational and owns no picker state. */
@@ -17,12 +18,13 @@ export interface HeaderProps {
 const TEST_MODE_MESSAGE =
   "TEST MODE — uploads go to test_collection and expire in about 30 days";
 
-export function Header({ project, collection, live, children }: HeaderProps) {
+export function Header({ project, collection, version, live, children }: HeaderProps) {
   return (
     <header className="border-b border-border bg-surface px-4 py-3">
       <div className="flex items-baseline gap-2 font-sans">
         <span className="font-semibold text-text">{project}</span>
         <span className="text-muted">{collection}</span>
+        <span className="ml-auto text-xs text-muted">v{version}</span>
       </div>
       {!live && (
         <p
