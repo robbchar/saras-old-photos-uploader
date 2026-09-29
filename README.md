@@ -204,7 +204,12 @@ through the same code.
 | default | test Sheet | `zztest-…` → `test_collection` | nothing |
 | `--write-identifier` | test Sheet | `zztest-…` → `test_collection` | test Sheet |
 | `--live` | real Sheet | real identifier → registry's `ia_collection` | real Sheet, always |
-| `--dry-run` | either | nothing | nothing — prints the intended writes |
+| `--dry-run` | either | nothing | nothing — prints a summary of the intended writes |
+
+`--dry-run` prints a summary by default: how many items would upload (newly
+minted versus under an existing identifier) and how many cells would be
+written. Add `-v`/`--verbose` to list every item and every cell instead — the
+per-item detail that buries the summary on a full 500-item run.
 
 Per chunk of 500 rows `upload` does four things **in this order**:
 
@@ -475,6 +480,10 @@ not a failure; see
 Unless `--dry-run` is passed, it writes a timestamped log to `--log-dir`
 (default `logs/`), one line per row considered, recording what was
 proposed and what was decided.
+
+`--dry-run` prints a summary by default: how many rows would be corrected, how
+many have no candidate, and how many matched more than one file and would be
+left alone. Add `-v`/`--verbose` to list each row's proposal instead.
 
 Which files on disk even count as photographs — and so can ever be
 proposed — is the project's `photo_extensions` in
