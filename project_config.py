@@ -29,6 +29,9 @@ REQUIRED_KEYS = (
 # the photos under data/.
 DEFAULT_PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".tif", ".tiff", ".png")
 
+# Internet Archive's sandbox; every test-mode run uploads here.
+TEST_COLLECTION = "test_collection"
+
 # Sheet ID marker: not yet set in projects_registry.json; required (never live) in e2e_fixtures/registry.json.
 _PLACEHOLDER_SHEET_ID_PREFIX = "REPLACE_WITH"
 # For messages only; matching goes through is_placeholder_sheet_id.
@@ -123,6 +126,11 @@ class ProjectConfig:
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
+
+    def ia_collection_for(self, live: bool) -> str:
+        """The collection a live or test run uploads into, parallel to
+        sheet_id_for. The one source for upload, its log header and the page."""
+        return self.ia_collection if live else TEST_COLLECTION
 
     def sheet_tab_for(self, live: bool) -> str:
         """The metadata tab name for the live or test document, falling back to

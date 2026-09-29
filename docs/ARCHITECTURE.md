@@ -704,8 +704,8 @@ Archive collection; it was removed with the CSV paths on 2026-09-23.)
 Nothing still validates `ia_collection` against IA itself at
 runtime, so confirm it by hand once, in version control, before the first
 `--live` run — `upload --live --dry-run` names the collection in its opening
-lines without doing any of it (without `--live`, every `upload` names
-`test_collection`). See `DECISIONS.md`, "Technical configuration lives
+lines without uploading or writing anything (without `--live`, every `upload`
+names `test_collection`). See `DECISIONS.md`, "Technical configuration lives
 in the registry". (`ia_collection` for this project was confirmed by hand
 against archive.org on 2026-08-22 — see `DECISIONS.md`, "Still open" — but
 the tool itself still does not check this automatically, and a second

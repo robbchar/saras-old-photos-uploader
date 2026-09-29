@@ -4704,7 +4704,7 @@ def test_cmd_upload_dry_run_names_the_collection_it_would_upload_into(
 
     assert exit_code == 0
     assert recorder.uploads == []
-    assert f"items go into Internet Archive collection '{expected_collection}'" in out
+    assert f"items would go into Internet Archive collection '{expected_collection}'" in out
     assert other_collection not in out
 
 
@@ -4714,37 +4714,36 @@ def test_cmd_upload_dry_run_names_the_collection_when_nothing_is_ready(
     """The pre-live check must not depend on the Sheet having a ready row."""
     from ia_bulk import cmd_upload
 
-    grid = [
-        SHEET_HEADER,
-        ["First photo", "photo1.jpg", "lcps-astoriaphotos-00001", FIXED_TIMESTAMP,
-         "https://archive.org/details/lcps-astoriaphotos-00001", "photo1.jpg"],
-    ]
+    # Blank Title: not yet catalogued.
+    grid = [SHEET_HEADER, ["", "photo1.jpg", "", "", "", ""]]
     recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
 
     exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, dry_run=True))
     out = capsys.readouterr().out
 
     assert exit_code == 0
+    assert "1 row not yet catalogued" in out
     assert "nothing to upload" in out
-    assert "items go into Internet Archive collection 'lcpsociety'" in out
+    assert "items would go into Internet Archive collection 'lcpsociety'" in out
 
 
-def test_cmd_upload_names_the_collection_it_sends_items_to(tmp_path, monkeypatch, capsys):
-    """A real run prints the same collection upload_row receives."""
+def test_cmd_upload_names_the_collection_before_reading_the_sheet(tmp_path, monkeypatch, capsys):
+    """A run refused at the Sheet read has already named the collection."""
     from ia_bulk import cmd_upload
 
     grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
-    captured = []
-    recorder, client, registry_path, _ = setup_sheet_upload(
-        tmp_path, monkeypatch, grid, captured=captured
+    registry = make_sheet_registry(files_dir=str(tmp_path), sheet_id="REPLACE_WITH_REAL_SHEET_ID")
+    recorder, client, registry_path, build_calls = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, registry=registry
     )
 
-    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True))
-    out = capsys.readouterr().out
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, dry_run=True))
+    captured = capsys.readouterr()
 
-    assert exit_code == 0
-    assert [call["collection"] for call in captured] == ["lcpsociety"]
-    assert "items go into Internet Archive collection 'lcpsociety'" in out
+    assert exit_code == 1
+    assert build_calls == []
+    assert "REPLACE_WITH_REAL_SHEET_ID" in captured.err
+    assert "items would go into Internet Archive collection 'lcpsociety'" in captured.out
 
 
 @pytest.mark.parametrize(
@@ -4769,7 +4768,7 @@ def test_cmd_upload_passes_the_live_flag_through_and_picks_the_matching_sheet_an
     )
 
     exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=live))
-    capsys.readouterr()
+    out = capsys.readouterr().out
 
     assert exit_code == 0
     assert len(build_calls) == 1
@@ -4777,6 +4776,7 @@ def test_cmd_upload_passes_the_live_flag_through_and_picks_the_matching_sheet_an
     assert passed_live is live
     assert config.sheet_id_for(passed_live) == expected_sheet_id
     assert [call["collection"] for call in captured] == [expected_collection]
+    assert f"items go into Internet Archive collection '{expected_collection}'" in out
     assert recorder.uploads == [expected_target]
 
 
@@ -12473,7 +12473,8 @@ def test_the_run_header_records_the_collection_the_run_actually_targeted(tmp_pat
     collection while its items went to test_collection. Inferable from the
     `live` field beside it, but only if the reader already knows the rule -
     and this record exists so a reader months later does not have to."""
-    from ia_bulk import log_run_header, TEST_COLLECTION
+    from ia_bulk import log_run_header
+    from project_config import TEST_COLLECTION
 
     log_path = tmp_path / "upload.jsonl"
     column_map = build_column_map(["Title"])

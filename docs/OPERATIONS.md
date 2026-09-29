@@ -282,8 +282,9 @@ python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --w
 
 Run it once without `--write-identifier` first: that mode
 issues zero writes to the Sheet, so it is a rehearsal you can repeat freely.
-`--dry-run` goes further and uploads nothing at all, printing the identifiers
-it would mint and the cells it would write.
+`--dry-run` goes further and uploads nothing at all, printing how many items
+it would upload and how many cells it would write; add `-v` to list each
+identifier and cell.
 
 With no `--live`, the tool targets IA's `test_collection` sandbox and prepends
 `zztest-<run's stamp>-` to each identifier before every network call — the
@@ -413,9 +414,11 @@ real files in the wrong place under a permanent identifier.
       export step to redo, and nothing local to go stale.
 - [ ] The e2e rehearsal passes on this checkout
       (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
-      `python ia_bulk.py upload --project sarasoldphotos --live --dry-run -v`
-      over the real Sheet named collection `sarasoldphotos` and printed the
-      identifiers and cells you expected.
+      `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
+      over the real Sheet named collection `sarasoldphotos` in its opening
+      lines, **and** the same command with `-v` plus the `--batch` or
+      `--limit` the real run will use printed the identifiers and cells you
+      expected. Without those, `-v` lists every ready row.
 - [ ] The batch fits today's pacing plan — see "Pacing" below. The tool
       refuses a single run over 5,000 items, but spacing runs across a day
       is up to you.

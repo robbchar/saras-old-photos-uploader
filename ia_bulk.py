@@ -113,7 +113,6 @@ CHUNK_SIZE = 500
 # which nothing enforced. Applies in test mode too - a rehearsal uploads to
 # test_collection through the same account and spends the same quota.
 DAILY_ITEM_CAP = 5000
-TEST_COLLECTION = "test_collection"
 TEST_IDENTIFIER_PREFIX = "zztest-"
 UNDATED_PLACEHOLDER = "[n.d.]"
 
@@ -1022,7 +1021,7 @@ def log_run_header(
         # already knows that rule, and this record exists precisely so a
         # reader months later does not have to. Branches on `live` for the
         # same reason sheet_id_for() does, right above.
-        "collection": config.ia_collection if live else TEST_COLLECTION,
+        "collection": config.ia_collection_for(live),
         "files_dir": config.files_dir,
         "file_template": config.file_template,
         "columns": dict(column_map.field_names),
@@ -4152,7 +4151,7 @@ def upload_from_sheet(args) -> int:
 
     live = bool(args.live)
     dry_run = bool(getattr(args, "dry_run", False))
-    collection = config.ia_collection if live else TEST_COLLECTION
+    collection = config.ia_collection_for(live)
     # --live always records. An item that exists on Internet Archive under a
     # permanent identifier the Sheet does not know about is precisely what the
     # reserve-first ordering exists to prevent, so there is no live-without-
@@ -4160,7 +4159,8 @@ def upload_from_sheet(args) -> int:
     write_back = live or bool(getattr(args, "write_identifier", False))
     print(sheet_banner(config, live))
     # Printed from the value upload_row is sent; a --live dry run is the pre-live check of it.
-    print(f"items go into Internet Archive collection '{collection}'")
+    verb = "would go" if dry_run else "go"
+    print(f"items {verb} into Internet Archive collection '{collection}'")
     if dry_run:
         print("--dry-run: nothing is uploaded, and nothing is written to the Sheet")
     elif write_back:
