@@ -2884,6 +2884,21 @@ def test_build_parser_verbose_defaults_false():
     assert reconcile_args.verbose is False
 
 
+@pytest.mark.parametrize(
+    "command,handler", [("upload", "cmd_upload"), ("reconcile-files", "cmd_reconcile_files")]
+)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_main_says_when_verbose_is_ignored_outside_a_dry_run(
+    monkeypatch, capsys, command, handler, dry_run
+):
+    monkeypatch.setattr(ia_bulk, handler, lambda args: 0)
+    argv = [command, "--project", "astoriaphotos", "-v"] + (["--dry-run"] if dry_run else [])
+
+    assert ia_bulk.main(argv) == 0
+    ignored = "-v only changes --dry-run output" in capsys.readouterr().err
+    assert ignored is not dry_run
+
+
 def test_build_parser_sync_metadata_subcommand_defaults():
     parser = build_parser()
     args = parser.parse_args(["sync-metadata", "--project", "astoriaphotos"])
@@ -4603,37 +4618,41 @@ def test_cmd_upload_dry_run_writes_nothing_uploads_nothing_and_summarizes(
     assert recorder.uploads == []
     assert "would upload 1 item: 1 would mint a new identifier" in out
     assert "would write 4 cells across 1 item" in out
-    # Default folds the per-item / per-cell detail into counts; -v restores it
-    # (that verbose path, including the STAMPED identifier a real test run
-    # would upload under, is pinned by the -v test below).
+    # Default folds the per-item / per-cell detail into counts; -v adds it
+    # (pinned by the -v test below).
     assert "would mint 'lcps-astoriaphotos-00001'" not in out
     assert "C2 = " not in out
     assert not (tmp_path / "logs").exists()
 
 
+@pytest.mark.parametrize("verbose", [False, True])
 def test_cmd_upload_dry_run_without_write_identifier_says_it_would_write_nothing(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, verbose
 ):
     """Pins the false branch of --write-identifier under --dry-run too: a
     rehearsal that describes writes it would never actually make is worse
-    than no rehearsal."""
+    than no rehearsal. -v is the case that lists cells, so it is the one that
+    can get this wrong."""
     from ia_bulk import cmd_upload
 
     grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
     recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
 
-    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, dry_run=True))
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, dry_run=True, verbose=verbose)
+    )
     out = capsys.readouterr().out
 
     assert exit_code == 0
     assert recorder.writes == []
     assert "would write nothing to the Sheet" in out
     assert "C2 = " not in out
+    assert ("(re-run with -v to list every item)" in out) is not verbose
 
 
 def test_cmd_upload_dry_run_summarizes_items_by_default(tmp_path, monkeypatch, capsys):
     """Default dry-run prints counts, not a line per item - the per-item
-    flood is what buries the summary on a real 500-item run. Issue #81."""
+    flood is what buries the summary on a real 500-item run."""
     from ia_bulk import cmd_upload
 
     grid = [
@@ -4653,17 +4672,70 @@ def test_cmd_upload_dry_run_summarizes_items_by_default(tmp_path, monkeypatch, c
     assert exit_code == 0
     assert recorder.writes == []
     assert recorder.uploads == []
-    assert "would upload 2 items: 2 would mint a new identifier" in out
+    # The permanent identifiers it would mint, and the stamped name a test run
+    # uploads under, survive the fold into counts.
+    assert (
+        "would upload 2 items: 2 would mint a new identifier "
+        "(lcps-astoriaphotos-00001 to lcps-astoriaphotos-00002)"
+    ) in out
+    assert f"new every run, e.g. 'zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001'" in out
     assert "would write 8 cells across 2 items" in out
     # No per-item or per-cell detail without -v.
     assert "would mint 'lcps-astoriaphotos-00001'" not in out
     assert "C2 = " not in out
-    assert "-v" in out
+    assert "(re-run with -v to list every item and cell)" in out
+
+
+def test_cmd_upload_dry_run_summary_splits_minted_from_existing_identifiers(
+    tmp_path, monkeypatch, capsys
+):
+    """A RESERVED row uploads under the identifier it already holds: it adds
+    no reserve cell, only the three confirm cells."""
+    from ia_bulk import cmd_upload
+
+    grid = [
+        SHEET_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", ""],
+        ["Second photo", "photo2.jpg", "lcps-astoriaphotos-00007", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, dry_run=True)
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert (
+        "would upload 2 items: 1 would mint a new identifier (lcps-astoriaphotos-00008), "
+        "1 under an existing one"
+    ) in out
+    assert "would write 7 cells across 2 items" in out
+
+
+def test_cmd_upload_live_dry_run_does_not_call_itself_a_test_run(tmp_path, monkeypatch, capsys):
+    """Under --live the upload name IS the permanent identifier; the stamped
+    test-name line would describe a run that is not happening."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.writes == []
+    assert "would upload 1 item: 1 would mint a new identifier (lcps-astoriaphotos-00001)" in out
+    assert "test run:" not in out
+    assert "zztest-" not in out
 
 
 def test_cmd_upload_dry_run_verbose_lists_every_item_and_cell(tmp_path, monkeypatch, capsys):
-    """-v restores the full per-item / per-cell listing the default folds
-    into counts. Issue #81."""
+    """-v lists every item and cell under the same summary the default
+    prints."""
     from ia_bulk import cmd_upload
 
     grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
@@ -4682,7 +4754,9 @@ def test_cmd_upload_dry_run_verbose_lists_every_item_and_cell(tmp_path, monkeypa
         f"'zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001'"
     ) in out
     assert "C2 = lcps-astoriaphotos-00001" in out
-    # Verbose is the detail view; it does not also nudge toward -v.
+    # A superset of the default: the counts stay, the nudge toward -v goes.
+    assert "would upload 1 item: 1 would mint a new identifier" in out
+    assert "would write 4 cells across 1 item" in out
     assert "re-run with -v" not in out
 
 
@@ -11065,13 +11139,13 @@ def test_cmd_reconcile_files_dry_run_neither_prompts_nor_writes(tmp_path, monkey
 
     assert written == []
     assert not (tmp_path / "logs").exists()
-    assert "1 row would be corrected" in out
+    assert "1 row with a proposed match" in out
     assert exit_code == 0
 
 
 def test_cmd_reconcile_files_dry_run_summarizes_proposals_by_default(tmp_path, monkeypatch, capsys):
     """Default dry-run reports counts, not a line per row - the same flood
-    upload had. -v restores the per-row proposals. Issue #81."""
+    upload had. -v adds the per-row proposals."""
     from ia_bulk import cmd_reconcile_files
 
     registry_path, written = _setup_reconcile(
@@ -11087,16 +11161,85 @@ def test_cmd_reconcile_files_dry_run_summarizes_proposals_by_default(tmp_path, m
 
     assert exit_code == 0
     assert written == []
-    assert "1 row would be corrected" in out
+    assert "1 row with a proposed match" in out
     # No per-row proposal detail without -v.
     assert "Finnish Meat Market.jpg" not in out
     assert "->" not in out
-    assert "-v" in out
+    assert "(re-run with -v to list each row)" in out
+
+
+def test_cmd_reconcile_files_dry_run_summary_names_the_rows_behind_each_count(
+    tmp_path, monkeypatch, capsys
+):
+    """The rows an operator has to go and look at - no candidate, or more than
+    one - are named beside their count, singular or plural to match it."""
+    from ia_bulk import cmd_reconcile_files
+
+    registry_path, _ = _setup_reconcile(
+        tmp_path,
+        monkeypatch,
+        [
+            ["SOP CD 1", "Finnis Meat Market.jpg", "A title"],
+            ["SOP CD 1", "Zebra Crossing.jpg", "Another title"],
+            ["SOP CD 1", "Yak Barn.jpg", "A third title"],
+            ["SOP CD 2", "Liberty.jpg", "A fourth title"],
+        ],
+        {
+            "SOP CD 1": ["Finnish Meat Market.jpg"],
+            "SOP CD 2": ["Liberty.JPG", "liberty.jpeg"],
+        },
+        [],
+    )
+
+    exit_code = cmd_reconcile_files(_reconcile_args(tmp_path, registry_path, dry_run=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert (
+        "1 row with a proposed match; 2 rows with no candidate (rows 3-4); "
+        "1 row matching more than one file, which would be left alone (row 5)"
+    ) in out
+
+
+def test_cmd_reconcile_files_dry_run_flags_a_file_proposed_for_two_rows(
+    tmp_path, monkeypatch, capsys
+):
+    """Only an accept claims a file, so a dry run offers both rows the same
+    one; a real run can give it to at most one. Flagged, not hidden - either
+    row may be the one the file belongs to."""
+    from ia_bulk import cmd_reconcile_files
+
+    registry_path, _ = _setup_reconcile(
+        tmp_path,
+        monkeypatch,
+        [
+            ["SOP CD 1", "Finnis Meat Market.jpg", "A title"],
+            ["SOP CD 1", "Finish Meat Market.jpg", "Another title"],
+        ],
+        {"SOP CD 1": ["Finnish Meat Market.jpg"]},
+        [],
+    )
+
+    exit_code = cmd_reconcile_files(
+        _reconcile_args(tmp_path, registry_path, dry_run=True, verbose=True)
+    )
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "'Finnis Meat Market.jpg' -> 'Finnish Meat Market.jpg'  (edit distance 1)\n" in out
+    assert (
+        "'Finish Meat Market.jpg' -> 'Finnish Meat Market.jpg'  (edit distance 1)"
+        "  - also proposed for row 2"
+    ) in out
+    assert (
+        "2 rows with a proposed match "
+        "(1 of them for a file already proposed for an earlier row: row 3)"
+    ) in out
 
 
 def test_cmd_reconcile_files_dry_run_verbose_lists_each_row(tmp_path, monkeypatch, capsys):
-    """-v restores the per-row proposal lines the default folds into a count.
-    Issue #81."""
+    """-v lists each row's proposal above the same summary the default
+    prints."""
     from ia_bulk import cmd_reconcile_files
 
     registry_path, written = _setup_reconcile(
@@ -11115,8 +11258,9 @@ def test_cmd_reconcile_files_dry_run_verbose_lists_each_row(tmp_path, monkeypatc
     assert exit_code == 0
     assert written == []
     assert "'Finnis Meat Market.jpg' -> 'Finnish Meat Market.jpg'" in out
-    # Verbose is the detail view; no trailing summary count.
-    assert "would be corrected" not in out
+    # A superset of the default: the counts stay, the nudge toward -v goes.
+    assert "1 row with a proposed match" in out
+    assert "re-run with -v" not in out
 
 
 def test_cmd_reconcile_files_on_a_clean_sheet_proposes_nothing(tmp_path, monkeypatch, capsys):

@@ -282,9 +282,9 @@ python ia_bulk.py upload --registry e2e_fixtures/registry.json --project e2e --w
 
 Run it once without `--write-identifier` first: that mode
 issues zero writes to the Sheet, so it is a rehearsal you can repeat freely.
-`--dry-run` goes further and uploads nothing at all, printing how many items
-it would upload and how many cells it would write; add `-v` to list each
-identifier and cell.
+`--dry-run` goes further and uploads nothing at all, printing a summary of the
+identifiers it would mint and, with `--write-identifier`, the cells it would
+write; add `-v` to list each one.
 
 With no `--live`, the tool targets IA's `test_collection` sandbox and prepends
 `zztest-<run's stamp>-` to each identifier before every network call — the

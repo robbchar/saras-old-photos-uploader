@@ -730,25 +730,37 @@ pre-live gate in [`OPERATIONS.md`](../OPERATIONS.md#pre-live-checklist).
 and the file behind it — then one line per cell it would write. On a full
 500-item run that is a thousand lines that bury the counts an operator
 actually reads, and there was no verbosity control anywhere in the CLI. So the
-default is now a summary, and `-v`/`--verbose` restores the old per-item
-listing.
+default is now a summary, and `-v`/`--verbose` adds the old per-item listing
+to it.
 
 Weighed against the alternative of keeping the detail and adding a
 `--quiet`/`--summary` opt-out: the operator running a real upload wants the
 counts, not the listing, so the flood is the thing you ask for, not the thing
 you suppress.
 
+- **`-v` adds to the summary; it never replaces it.** The counts print either
+  way; `-v` adds the lines behind them.
 - **`upload`**: the default prints how many items would upload (newly minted
-  versus under an existing identifier) and how many cells would be written;
-  `-v` restores the per-item and per-cell lines.
-- **`reconcile-files`**: the default prints how many rows would be corrected,
-  how many have no candidate, and how many matched more than one file and
-  would be left alone; `-v` restores the per-row proposals. Its dry run no
-  longer prints the interactive "N corrected" trailer, which always read
-  "0 corrected" because a dry run corrects nothing.
+  versus under an existing identifier), the first and last identifier it
+  would mint — identifiers are permanent once uploaded — and how many cells
+  would be written. A test run also prints one example of the stamped name
+  its items go up under. `-v` adds the per-item and per-cell lines.
+- **`reconcile-files`**: the default prints how many rows have a proposed
+  match and, when there are any, how many have no candidate and how many
+  matched more than one file and would be left alone, naming the rows behind
+  the last two. `-v` adds the per-row proposals. "Proposed", not "corrected":
+  nothing reaches the Sheet until someone accepts it at the prompt. Its dry run
+  no longer prints the interactive "N filename(s) corrected" trailer, which
+  always read "0 filename(s) corrected" because a dry run corrects nothing.
+- **A file proposed for two rows is flagged, not hidden.** Only an accept
+  claims a file, so a dry run can offer one file to two rows where a real run
+  gives it to at most one. The summary names the later rows and `-v` marks
+  each with the row it repeats. Claiming on proposal instead was tried and
+  rejected: an earlier row's guess could take a later row's exact match and
+  report that row as having no candidate.
 - **Scope is those two commands.** `sync-metadata --dry-run` and
   `append-rows --dry-run` already open with a summary line and are left as
   they are, so `-v` is not defined for them. `validate --json` is a format
   toggle, not a verbosity control, and is untouched.
-- **`-v` only shapes dry-run output.** Outside `--dry-run` it does nothing; a
-  real run's output is its own concern.
+- **`-v` only shapes dry-run output.** Outside `--dry-run` it changes nothing,
+  and says so on stderr rather than being silently ignored.

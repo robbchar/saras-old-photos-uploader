@@ -207,9 +207,11 @@ through the same code.
 | `--dry-run` | either | nothing | nothing — prints a summary of the intended writes |
 
 `--dry-run` prints a summary by default: how many items would upload (newly
-minted versus under an existing identifier) and how many cells would be
-written. Add `-v`/`--verbose` to list every item and every cell instead — the
-per-item detail that buries the summary on a full 500-item run.
+minted versus under an existing identifier), the first and last identifier it
+would mint, and how many cells would be written; a test run also shows one
+example of the stamped name its items go up under. Add `-v`/`--verbose` to
+list every item and every cell under that summary — the per-item detail that
+would bury it on a full 500-item run.
 
 Per chunk of 500 rows `upload` does four things **in this order**:
 
@@ -481,9 +483,11 @@ Unless `--dry-run` is passed, it writes a timestamped log to `--log-dir`
 (default `logs/`), one line per row considered, recording what was
 proposed and what was decided.
 
-`--dry-run` prints a summary by default: how many rows would be corrected, how
-many have no candidate, and how many matched more than one file and would be
-left alone. Add `-v`/`--verbose` to list each row's proposal instead.
+`--dry-run` prints a summary by default: how many rows have a proposed match
+and, when there are any, how many have no candidate and how many matched more
+than one file and would be left alone, naming the rows behind the last two. A
+file proposed for more than one row is flagged, since a real run can give it
+to only one. Add `-v`/`--verbose` to list each row's proposal as well.
 
 Which files on disk even count as photographs — and so can ever be
 proposed — is the project's `photo_extensions` in
