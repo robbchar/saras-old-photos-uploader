@@ -246,6 +246,22 @@ def expect_run(step: str, result: subprocess.CompletedProcess[str], exit_code: i
             pytest.fail(f"{step}: expected {text!r} in stdout\n{output_of(result)}")
 
 
+def expect_only_allowed_changes(step: str, fixture: list[list[str]], final: list[list[str]], allowed: set[tuple[int, str]]) -> None:
+    """`allowed` holds (grid index, column) pairs that may differ from the fixture."""
+    header = fixture[0]
+    expect(step, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
+    # grid() pads to the header's width, so a longer row has a cell past the header.
+    wider = [row_index + 1 for row_index, row in enumerate(final) if len(row) > len(header)]
+    expect(step, not wider, f"rows {wider} have cells past the header")
+    unexpected = [
+        f"row {row_index + 1} {column!r}: {fixture[row_index][column_index]!r} -> {final[row_index][column_index]!r}"
+        for row_index in range(len(fixture))
+        for column_index, column in enumerate(header)
+        if final[row_index][column_index] != fixture[row_index][column_index] and (row_index, column) not in allowed
+    ]
+    expect(step, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
+
+
 def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None]) -> Found:
     deadline = time.monotonic() + IA_POLL_TIMEOUT_SECONDS
     while True:
@@ -351,6 +367,8 @@ def restore_broken_filename(sheet: RehearsalSheet, lock: RehearsalLock, filename
 # names "theme" as this project's batch_column. Row 5 has no Theme and rows 6-7
 # are step 4b's own batch, so all three are out of scope for this batch.
 UPLOAD_PAGE_BATCH = "E2E"
+# Grid indexes of the batch's rows, all ready after the reset.
+UPLOAD_PAGE_ROWS = (1, 2, 3, 4)
 
 STEP_UPLOAD_PAGE_PREDICT = "upload page e2e - predict via validate --json (Task 16)"
 STEP_UPLOAD_PAGE_RUN = "upload page e2e - drive a real run through the server (Task 16)"
@@ -525,18 +543,7 @@ def test_rehearsal(tmp_path, request):
     check_in(lock, STEP_11)
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
-    final = sheet.grid()
-    expect(STEP_11, len(final) == len(fixture), f"the data tab has {len(final)} rows, expected {len(fixture)}")
-    # grid() pads to the header's width, so a longer row has a cell past the header.
-    wider = [row_index + 1 for row_index, row in enumerate(final) if len(row) > len(header)]
-    expect(STEP_11, not wider, f"rows {wider} have cells past the header")
-    unexpected = [
-        f"row {row_index + 1} {column!r}: {fixture[row_index][column_index]!r} -> {final[row_index][column_index]!r}"
-        for row_index in range(len(fixture))
-        for column_index, column in enumerate(header)
-        if final[row_index][column_index] != fixture[row_index][column_index] and (row_index, column) not in allowed
-    ]
-    expect(STEP_11, not unexpected, "unexpected changes:\n" + "\n".join(unexpected))
+    expect_only_allowed_changes(STEP_11, fixture, sheet.grid(), allowed)
     # Step 12 runs as the finalizer registered at step 4.
 
 
@@ -547,6 +554,7 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
     /api/runs/current/output to `finished`. The page's own reported result
     must equal what validate --json independently predicts for the same
     batch - i.e. the page's result equals reality, not just its own say-so.
+    The run records the batch's rows to the Test Sheet and touches nothing else.
     """
     fixture = load_fixture_grid(FIXTURE_SHEET)
     header = fixture[0]
@@ -568,8 +576,9 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
     expected_succeeded = json.loads(prediction.stdout)["ready_to_upload"]
     expect(
         STEP_UPLOAD_PAGE_PREDICT,
-        expected_succeeded > 0,
-        f"validate --json predicts 0 rows ready for batch {UPLOAD_PAGE_BATCH!r}; the fixture may have changed",
+        expected_succeeded == len(UPLOAD_PAGE_ROWS),
+        f"validate --json predicts {expected_succeeded} rows ready for batch {UPLOAD_PAGE_BATCH!r}, "
+        f"expected {len(UPLOAD_PAGE_ROWS)}; the fixture may have changed",
     )
 
     check_in(lock, STEP_UPLOAD_PAGE_RUN)
@@ -614,17 +623,31 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
         f"validate --json predicted {expected_succeeded} ready to upload, 0 failed",
     )
 
-    # write_back (ia_bulk.py's upload_from_sheet) is only true for --live or
-    # --write-identifier; the page's own _upload_argv passes neither in test
-    # mode, so a test-mode page run must leave the data tab untouched - only
-    # the Upload Log tab (telemetry, always mirrored) records it.
-    expect(
-        STEP_UPLOAD_PAGE_RUN,
-        sheet.grid() == fixture,
-        "a test-mode page run wrote to the data tab, but write-back needs --live or --write-identifier",
-    )
-
+    # The page's _upload_argv adds --write-identifier in test mode, so the run
+    # records the batch's rows; nothing else in the data tab may change.
     check_in(lock, STEP_UPLOAD_PAGE_RUN)
+    final = sheet.grid()
+    for number, row in enumerate(UPLOAD_PAGE_ROWS, start=1):
+        identifier = f"lcps-e2e-{number:05d}"
+        expect(
+            STEP_UPLOAD_PAGE_RUN,
+            sheet.cell(final, row, "ia_identifier") == identifier,
+            f"row {row + 1} ia_identifier is {sheet.cell(final, row, 'ia_identifier')!r}, expected {identifier!r}",
+        )
+        url = sheet.cell(final, row, "ia_url")
+        expect(
+            STEP_UPLOAD_PAGE_RUN,
+            url.startswith(f"{ITEM_URL_PREFIX}zztest-") and url.endswith(f"-{identifier}"),
+            f"row {row + 1} ia_url is {url!r}",
+        )
+        expect(
+            STEP_UPLOAD_PAGE_RUN,
+            all(sheet.cell(final, row, column) for column in UPLOAD_COLUMNS),
+            f"row {row + 1} upload cells incomplete",
+        )
+    allowed = {(row, column) for row in UPLOAD_PAGE_ROWS for column in UPLOAD_COLUMNS}
+    expect_only_allowed_changes(STEP_UPLOAD_PAGE_RUN, fixture, final, allowed)
+
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_UPLOAD_PAGE_RUN, upload_log[:1] == [LOG_TAB_HEADER], f"Upload Log header is {upload_log[:1]}")
     expect(STEP_UPLOAD_PAGE_RUN, [row[2] for row in upload_log[1:]] == ["summary"], f"Upload Log rows: {upload_log[1:]}")
