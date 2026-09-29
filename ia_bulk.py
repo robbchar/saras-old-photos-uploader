@@ -2755,6 +2755,19 @@ def version_line(commit: str) -> str:
     return f"ia_bulk {app_version.APP_VERSION} (commit {short_commit})"
 
 
+def report_version_update() -> None:
+    """Print the version line, name the previous version after an upgrade, then record this one."""
+    print(version_line(deployment.read_head_commit(REPO_ROOT)))
+    marker_path = app_version.INSTALLED_VERSION_PATH
+    update = app_version.update_line(app_version.read_installed_version(marker_path))
+    if update is not None:
+        print(update)
+    try:
+        app_version.record_installed_version(marker_path)
+    except OSError as exc:
+        print(f"could not record the installed version in {marker_path}: {exc}", file=sys.stderr)
+
+
 def cmd_doctor(args) -> int:
     print(version_line(deployment.read_head_commit(REPO_ROOT)))
     try:
@@ -2775,6 +2788,7 @@ def cmd_setup(args) -> int:
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
+    report_version_update()
 
     changes: list[str] = []
 
