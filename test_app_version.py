@@ -1,3 +1,5 @@
+import pytest
+
 import app_version
 
 
@@ -58,3 +60,32 @@ def test_update_line_calls_a_rollback_a_downgrade():
 def test_update_line_compares_versions_numerically(monkeypatch):
     monkeypatch.setattr(app_version, "APP_VERSION", "1.10.0")
     assert app_version.update_line("1.9.0") == "updating from 1.9.0 to 1.10.0"
+
+
+def test_app_version_comes_from_the_version_file():
+    assert app_version.APP_VERSION == app_version.VERSION_FILE_PATH.read_text(encoding="utf-8").strip()
+
+
+def test_read_version_file_ignores_surrounding_whitespace(tmp_path):
+    version_path = tmp_path / "version.txt"
+    version_path.write_text("  1.2.3\n", encoding="utf-8")
+    assert app_version.read_version_file(version_path) == "1.2.3"
+
+
+def test_read_version_file_names_the_file_when_it_is_missing(tmp_path):
+    with pytest.raises(RuntimeError, match=r"version\.txt"):
+        app_version.read_version_file(tmp_path / "version.txt")
+
+
+def test_read_version_file_names_the_file_when_it_is_not_plain_semver(tmp_path):
+    version_path = tmp_path / "version.txt"
+    version_path.write_text("v1.2.3\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"version\.txt"):
+        app_version.read_version_file(version_path)
+
+
+def test_read_version_file_names_the_file_when_it_is_undecodable(tmp_path):
+    version_path = tmp_path / "version.txt"
+    version_path.write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(RuntimeError, match=r"version\.txt"):
+        app_version.read_version_file(version_path)
