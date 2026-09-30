@@ -667,9 +667,9 @@ release-please makes the release:
   identifier scheme or the Sheet's columns change, or an operator has to do
   something differently
 - **minor** (`feat: …`) — a new command, flag or page feature
-- **patch** (`fix: …`) — a fix
-- no release — `test`, `ci`, `docs`, `chore`, `refactor` and the other
-  non-releasing types
+- **patch** (`fix: …`, `perf: …`, `revert: …`) — a fix, a speedup, or
+  undoing a released change
+- no release — `test`, `ci`, `docs`, `chore`, `refactor`, `build`, `style`
 
 Merging the release PR that release-please keeps open tags `vX.Y.Z` and
 publishes a GitHub Release. Merge it before updating the Mac. The full flow

@@ -59,12 +59,12 @@ it. `app_version.py` reads it for `--version`, `doctor`, `setup` and
 `GET /api/status`.
 
 1. **Every PR title declares its bump**, as a Conventional Commit:
-   - `fix: …` — patch
+   - `fix: …`, `perf: …`, `revert: …` — patch
    - `feat: …` — minor
    - `feat!: …` (any type with `!`) or a `BREAKING CHANGE: …` line in the
      PR description — major
-   - `test`, `ci`, `docs`, `chore`, `refactor`, `build`, `style`, `perf`,
-     `revert` — no release
+   - `test`, `ci`, `docs`, `chore`, `refactor`, `build`, `style` — no
+     release
    - `Release-As: 2.0.0` on its own line in the PR description forces an
      exact number.
 
