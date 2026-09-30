@@ -817,11 +817,12 @@ def test_file_location_fields_are_the_columns_file_template_reads():
 
 
 @pytest.mark.parametrize(
-    "template", ["{file}", "{identifier}.jpg", "{collection}/{mediatype}/{ia_url}"]
+    "template",
+    ["{file}", "{identifier}.jpg", "{collection}/{mediatype}/{ia_url}", "{date}/{title}.jpg"],
 )
 def test_file_location_fields_never_include_names_the_tool_already_owns(template):
-    """Sync sends REMOVE_TAG for these; a tool-owned name there would delete
-    the item's identifier, collection or mediatype."""
+    """Sync sends REMOVE_TAG for these; a tool-owned or standard IA name there
+    would delete the item's identifier, collection, mediatype, title or date."""
     from ia_bulk import file_location_fields
 
     assert file_location_fields(template) == frozenset()
@@ -835,6 +836,18 @@ def test_field_receipt_lists_file_location_columns_as_not_uploaded():
     assert "will upload these metadata fields:\n  title\n" in receipt
     assert (
         "NOT uploaded - only used to find each row's file:\n"
+        "  folder_on_lacie_drive, file_name"
+    ) in receipt
+
+
+def test_sync_field_receipt_says_the_file_location_columns_are_removed():
+    column_map = build_column_map(["Title", "Folder on LaCie Drive", "File Name"])
+
+    receipt = format_field_receipt(column_map, "{folder_on_lacie_drive}/{file_name}", sync=True)
+
+    assert "NOT uploaded - only used to find" not in receipt
+    assert (
+        "REMOVED from each item this run pushes - only used to find each row's file:\n"
         "  folder_on_lacie_drive, file_name"
     ) in receipt
 
@@ -2427,6 +2440,28 @@ def test_cmd_validate_prints_an_actual_suggestion_not_just_the_heading(tmp_path,
 
     assert "photographer" in out
     assert "creator" in out
+
+
+def test_cmd_validate_never_suggests_renaming_a_file_location_column(tmp_path, monkeypatch, capsys):
+    """Renaming it breaks file_template, and it is never uploaded anyway."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "box1").mkdir()
+    (tmp_path / "box1" / "photo1.jpg").write_bytes(b"x")
+    grid = [["Title", "Location", "Name"], ["First photo", "box1", "photo1.jpg"]]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), file_template="{location}/{name}")),
+        encoding="utf-8",
+    )
+    args = Namespace(project="astoriaphotos", registry=str(registry_path), live=False)
+
+    cmd_validate(args)
+    out = capsys.readouterr().out
+
+    assert "suggestions (advisory - nothing is changed automatically):\n  (none)" in out
 
 
 def test_chunk_rows_splits_into_groups_of_chunk_size():
@@ -10105,6 +10140,21 @@ def test_plan_sync_targets_re_pushes_a_row_last_synced_with_its_location_columns
     to_push, _ = split_unchanged(targets)
 
     assert [target.row_number for target in to_push] == [2]
+
+
+def test_sync_dry_run_shows_a_file_location_field_on_the_item_as_deleted():
+    """Only the one the item carries: removing an absent field changes nothing."""
+    from ia_bulk import FieldChange, metadata_changes, plan_sync_targets
+
+    column_map, rows = grid_to_rows([LOCATION_SYNC_HEADER, LOCATION_SYNC_ROW])
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{folder}/{name}"
+    )
+    on_the_item = {"title": "Stone Customshouse", "folder": "box1"}
+
+    assert metadata_changes(targets[0].metadata, on_the_item) == [
+        FieldChange("folder", "box1", "(deleted)")
+    ]
 
 
 def test_sync_from_sheet_skips_rows_that_are_not_uploaded_yet(tmp_path, monkeypatch):

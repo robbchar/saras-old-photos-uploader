@@ -80,7 +80,9 @@ it is a collision warning, not a standing disclaimer. See
 
 **File-location columns.** The columns `file_template` reads
 (`file_location_fields()`, currently `folder_on_lacie_drive` and `file_name`)
-are listed under "NOT uploaded — only used to find each row's file".
+are listed under "NOT uploaded — only used to find each row's file" (sync's
+receipt lists them as removed). Standard IA field names are never location
+columns.
 `sheet_metadata_fields()` subtracts them, so neither command sends their
 values. `sync-metadata` also sends `REMOVE_TAG` for them on every push, which
 strips them from items uploaded before they were excluded. See

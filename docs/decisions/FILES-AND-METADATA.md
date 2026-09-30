@@ -154,11 +154,12 @@ this change pushes once more, and that one push strips the fields.
 This does not contradict "blank cell means leave alone": no cell asks for the
 removal. The tool generates it for columns that must never be on an item.
 Tool-owned names (`file`, `identifier`, `mediatype`, `collection`, the `ia_`
-columns) are excluded, so a template naming one of them can never delete it.
+columns) and standard IA fields (`title`, `date`, `subject`, ...) are excluded,
+so a template naming one of them can never delete it.
 
-The trade-off: a template that named a real metadata column, such as
-`{title}.jpg`, would strip that field from every item. The sync dry run shows
-each removal as `(deleted)` before anything is sent.
+The trade-off: a template that named a project-specific metadata column, such
+as `{theme}/{file_name}`, would strip `theme` from every item. The sync dry run
+and field receipt show each removal before anything is sent.
 
 `(LCPS Internal)` stays the way to keep any other column off IA. It does not
 remove anything from items: marking a column renames its field, so the name

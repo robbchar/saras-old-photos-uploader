@@ -48,7 +48,12 @@ from column_map import (
     template_fields,
 )
 from daily_quota import describe_refusal, measure_daily_quota
-from ia_fields import PIPELINE_OWNED_FIELDS, metadata_to_send, suggest_standard_fields
+from ia_fields import (
+    IA_STANDARD_FIELDS,
+    PIPELINE_OWNED_FIELDS,
+    metadata_to_send,
+    suggest_standard_fields,
+)
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
 from project_config import (
     ConfigError,
@@ -439,7 +444,7 @@ def sheet_structure_validation(column_map: ColumnMap, grid: list[list[str]]) -> 
     return results
 
 
-def format_field_receipt(column_map: ColumnMap, file_template: str) -> str:
+def format_field_receipt(column_map: ColumnMap, file_template: str, sync: bool = False) -> str:
     """Printed before anything permanent happens, so the transformation from
     Sheet header to IA field name is reviewable by a human.
 
@@ -462,16 +467,13 @@ def format_field_receipt(column_map: ColumnMap, file_template: str) -> str:
       ia_fields.PIPELINE_OWNED_FIELDS is the existing definition of that set,
       reused here rather than restated, so the receipt and the
       rename-suggestion logic cannot disagree about which names are the
-      tool's."""
+      tool's.
+
+    `sync` names what sync does to the file-location columns: it removes them."""
     all_fields = column_map.uploadable_fields()
     location_fields = file_location_fields(file_template)
-    fields = [
-        name
-        for name in all_fields
-        if name not in DROPPED_BY_UPLOAD_ROW
-        and name not in PIPELINE_OWNED_FIELDS
-        and name not in location_fields
-    ]
+    sent = sheet_metadata_fields(column_map, file_template)
+    fields = [name for name in all_fields if name in sent]
     dropped = [name for name in all_fields if name in DROPPED_BY_UPLOAD_ROW]
     locating = [name for name in all_fields if name in location_fields]
     # `identifier` is in both sets; it is listed under "reserves these names"
@@ -487,7 +489,10 @@ def format_field_receipt(column_map: ColumnMap, file_template: str) -> str:
     if dropped:
         lines.append("NOT uploaded - Internet Archive reserves these names:")
         lines.append(f"  {', '.join(dropped)}")
-    if locating:
+    if locating and sync:
+        lines.append("REMOVED from each item this run pushes - only used to find each row's file:")
+        lines.append(f"  {', '.join(locating)}")
+    elif locating:
         lines.append("NOT uploaded - only used to find each row's file:")
         lines.append(f"  {', '.join(locating)}")
     if generated:
@@ -2974,7 +2979,7 @@ def run_validate(args, json_out: TextIO | None) -> int:
     print(render_lifecycle_summary(report))
     print()
     print("suggestions (advisory - nothing is changed automatically):")
-    suggestions = suggest_standard_fields(column_map.uploadable_fields())
+    suggestions = suggest_standard_fields(sheet_metadata_fields(column_map, config.file_template))
     if suggestions:
         for suggestion in suggestions:
             print(f"  '{suggestion.field_name}' -> '{suggestion.standard}': {suggestion.reason}")
@@ -3347,12 +3352,13 @@ def split_moved_targets(
 
 def file_location_fields(file_template: str) -> frozenset[str]:
     """Columns `file_template` reads to find each row's file: never sent to IA,
-    and removed from items by sync. Tool-owned names are excluded so sync never removes them."""
+    and removed from items by sync. Tool-owned and standard IA names are excluded so sync never removes them."""
     return (
         frozenset(template_fields(file_template))
         - RESERVED_FIELDS
         - DROPPED_BY_UPLOAD_ROW
         - PIPELINE_OWNED_FIELDS
+        - IA_STANDARD_FIELDS
     )
 
 
@@ -3418,8 +3424,8 @@ def sheet_upload_metadata(
     an Internet Archive metadata field, and IA metadata is permanent - so the
     tool's own bookkeeping columns and anything a Sheet author marked (LCPS
     Internal) have to be filtered out HERE, before upload_row ever sees them.
-    ColumnMap.uploadable_fields() is the single definition of what may be
-    uploaded and already excludes both. It is passed in already computed
+    sheet_metadata_fields() is the single definition of what may be
+    uploaded and already excludes both, plus the file-location columns. It is passed in already computed
     (see SheetUploadRun.uploadable) rather than derived here: the column map
     is fixed for the whole run, and rebuilding the set per row made a
     10,000-row upload rebuild it 10,000 times.
@@ -5424,7 +5430,7 @@ def sync_from_sheet(args) -> int:
         )
         print()
 
-    print(format_field_receipt(column_map, config.file_template))
+    print(format_field_receipt(column_map, config.file_template, sync=True))
     print()
 
     to_push, already_synced = split_unchanged(targets)
