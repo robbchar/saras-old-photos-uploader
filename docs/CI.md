@@ -10,7 +10,8 @@ on each push to `main`. The workflows are in `.github/workflows/`.
 | `python-tests` | Ubuntu and macOS × Python 3.10 and 3.14 | `python -m pytest` |
 | `python-static` | Ubuntu, Python 3.10 | `python -m ruff check .`, `python -m pyright` |
 | `upload-page` | Ubuntu, Node from `upload_page/.node-version` | `yarn install --immutable`, `yarn typecheck`, `yarn test` |
-| `pr-title` | Ubuntu, pull requests only | `python pr_title.py "<title>"` |
+| `ci-passed` | Ubuntu, after the three above | none; fails unless `python-tests`, `python-static` and `upload-page` all passed |
+| `pr-title` | Ubuntu, pull requests only, in its own `pr-title.yml` so a title or description edit reruns only it | `python pr_title.py "<title>"` |
 
 They are the same commands as
 [`OPERATIONS.md`, "Development"](OPERATIONS.md#development) and
@@ -22,16 +23,25 @@ They are the same commands as
   or IA paths.
 - **`dist/` is checked by pytest.** `test_committed_bundle_is_current` fails
   when `upload_page/dist/` is stale, so CI needs no `yarn build`.
-- **No path filters.** Every job runs on every PR; a required check that is
-  skipped would block the merge.
+- **No path filters.** Every job runs on every PR. A workflow that a path
+  filter skips reports nothing, so `ci-passed` would wait forever; a job
+  skipped by its own `if:` fails `ci-passed`.
 - **macOS** covers the deployment target. Windows (the dev box) is covered by
   local runs.
 
 ## Required checks
 
-`main` requires `python-tests` (all four matrix entries), `python-static`,
-`upload-page` and `pr-title` to pass before a PR can merge. An admin can
-override. The rule is a repository ruleset named `main checks`.
+`main` requires `ci-passed` and `pr-title` to pass before a PR can merge. An
+admin can override. The rule is a repository ruleset named `main checks`;
+renaming either job means updating it.
+
+`ci-passed` stands in for the jobs it needs, so adding or renaming a matrix
+entry never touches the ruleset. It runs with `if: always()` and fails unless
+every job it needs passed: a skipped required check would count as passing.
+A new job gates merges only once it is in `ci-passed`'s `needs`.
+
+Retargeting a PR to `main` runs only `pr-title`; push a commit, or close and
+reopen the PR, to run CI.
 
 ## Pinned versions
 
@@ -43,9 +53,11 @@ override. The rule is a repository ruleset named `main checks`.
 - Node is pinned in `upload_page/.node-version` (read by CI and by local
   version managers). Yarn comes from `packageManager` via corepack.
 - Dependabot opens one grouped PR per ecosystem each week (`pip`, `npm`,
-  `github-actions`), titled `chore(deps…)`, so it never triggers a release.
-  Retitle to `fix(deps): …` before merging if a runtime dependency change
-  should ship.
+  `github-actions`), titled `chore(deps…)`, so its title never triggers a
+  release. Its description quotes upstream release notes, though, which can
+  trigger one (see [Releasing](#releasing)), so clear the extended
+  description in the merge dialog before squashing it. Retitle to `fix(deps): …` before merging if a
+  runtime dependency change should ship.
 - `internetarchive` is excluded from Dependabot: its exact pin is deliberate
   (see [`decisions/QUOTA-AND-RUNS.md`](decisions/QUOTA-AND-RUNS.md)).
 - **A Dependabot `npm` PR fails `python-tests` until `dist/` is rebuilt.**
@@ -74,8 +86,8 @@ it. `app_version.py` reads it for `--version`, `doctor`, `setup` and
      PR description — major
    - `test`, `ci`, `docs`, `chore`, `refactor`, `build`, `style` — no
      release
-   - `Release-As: 2.0.0` on its own line in the PR description forces an
-     exact number.
+   - `Release-As: 2.0.0` on its own line at the end of the PR description
+     forces an exact number.
 
    The `pr-title` check enforces the format; choosing the right type is on
    the author. GitHub titles a revert PR `Revert "…"`, which the check
@@ -96,10 +108,22 @@ Squash commits are built from the PR title and description (repository
 setting), which is how the title's type and any `Release-As`/`BREAKING CHANGE`
 line reach `main`.
 
-Because the description becomes the commit body, a line in it that starts
-with `Release-As:` or `BREAKING CHANGE:` is read as a release instruction.
-Mention those words mid-sentence or in code spans when you only mean to talk
-about them.
+Because the description becomes the commit body, release-please parses it
+too, and some text in it releases:
+
+- **`BREAKING-CHANGE:`** (hyphen) makes a major release anywhere in the
+  description, even inside a code span or quoted HTML. Only leaving the token
+  out is safe.
+- **`BREAKING CHANGE:`** (space) makes a major release at the start of a
+  line, even in a code fence. Mid-sentence or in a code span, it is just text.
+- **A line starting with a lowercase type and `: `** (`fix: …`,
+  `feat(x): …`) after a blank line counts as one more commit. So does, in any
+  case, a `Word: …` line followed only by blank lines, indented lines and
+  more `Word: …` or `Closes #12` lines (`Fix: …` releases a patch).
+
+`Release-As:` counts only in that closing run. A `- ` bullet keeps a
+`BREAKING CHANGE:` or type line inert; an indent does too, except inside
+that run.
 
 ## The release token
 

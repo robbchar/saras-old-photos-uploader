@@ -10,7 +10,8 @@ VERSION_FILE_PATH = Path(__file__).resolve().parent / "version.txt"
 
 def read_version_file(version_path: Path) -> str:
     try:
-        version = version_path.read_text(encoding="utf-8").strip()
+        # utf-8-sig: a BOM from a Windows editor must not fail the X.Y.Z check.
+        version = version_path.read_text(encoding="utf-8-sig").strip()
     except (OSError, UnicodeDecodeError) as error:
         raise RuntimeError(f"cannot read the app version from {version_path}: {error}") from error
     if not SEMVER_PATTERN.fullmatch(version):

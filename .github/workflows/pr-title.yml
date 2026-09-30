@@ -1,0 +1,27 @@
+name: PR title
+
+# Separate from ci.yml so a title or description edit reruns only this check.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      # Title goes through env, never interpolated into the script.
+      - run: python pr_title.py "$PR_TITLE"
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}

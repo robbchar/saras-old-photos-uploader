@@ -10,8 +10,12 @@ account to any workflow change. The network guard makes "offline" a checked
 property, not a convention.
 
 The one secret in the repository, `RELEASE_PLEASE_TOKEN`, is used only by
-`release.yml`. It can open pull requests and push tags on this repository.
-It can't reach the Sheet or Internet Archive.
+`release.yml`. It can't reach the Sheet or Internet Archive, but it is not
+narrow. Contents write lets it push to any branch, and it acts as its owner,
+an admin whom `main checks` lets bypass the required checks, so a leaked
+token could push straight to `main`. A `pull_request` run from a branch in
+this repository (not a fork's or Dependabot's) can read it too. Revoking it:
+[`CI.md`, "The release token"](../CI.md#the-release-token).
 
 ## The version lives in `version.txt` and changes only in the release PR
 
@@ -26,8 +30,8 @@ release. The version sits in a plain `version.txt` so the release PR changes
 data, never Python. `app_version.py` reads it at import and refuses to start
 without a valid `X.Y.Z`.
 
-Releasing is merging the release PR. A bot never pushes to `main`, so the
-required checks apply to releases too.
+Releasing is merging the release PR. release-please never pushes to `main`,
+so the required checks apply to releases too.
 
 Considered and rejected:
 

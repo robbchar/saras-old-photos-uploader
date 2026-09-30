@@ -63,12 +63,18 @@ def test_update_line_compares_versions_numerically(monkeypatch):
 
 
 def test_app_version_comes_from_the_version_file():
-    assert app_version.APP_VERSION == app_version.VERSION_FILE_PATH.read_text(encoding="utf-8").strip()
+    assert app_version.APP_VERSION == app_version.VERSION_FILE_PATH.read_text(encoding="utf-8-sig").strip()
 
 
 def test_read_version_file_ignores_surrounding_whitespace(tmp_path):
     version_path = tmp_path / "version.txt"
     version_path.write_text("  1.2.3\n", encoding="utf-8")
+    assert app_version.read_version_file(version_path) == "1.2.3"
+
+
+def test_read_version_file_accepts_a_utf8_bom(tmp_path):
+    version_path = tmp_path / "version.txt"
+    version_path.write_bytes(b"\xef\xbb\xbf1.2.3\r\n")
     assert app_version.read_version_file(version_path) == "1.2.3"
 
 

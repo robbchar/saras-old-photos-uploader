@@ -548,6 +548,11 @@ there and run the same two commands.
 
 ## 14. Upgrading
 
+First make sure any pending release PR (`chore(main): release X.Y.Z`) is
+merged on GitHub — a maintainer step, see
+[`CI.md`, "Releasing"](CI.md#releasing). Otherwise the pull brings code that
+no version names, and `setup`'s `updating from` line doesn't cover it.
+
 ```bash
 git pull
 ./install.sh --project <project>

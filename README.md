@@ -663,9 +663,9 @@ the upload page together. It shows in three places:
 Don't edit `version.txt` by hand. The PR title sets the bump, and
 release-please makes the release:
 
-- **major** (`feat!: …`, or `BREAKING CHANGE:` in the description) — the
-  identifier scheme or the Sheet's columns change, or an operator has to do
-  something differently
+- **major** (`feat!: …`, or a line starting `BREAKING CHANGE:` in the
+  description) — the identifier scheme or the Sheet's columns change, or an
+  operator has to do something differently
 - **minor** (`feat: …`) — a new command, flag or page feature
 - **patch** (`fix: …`, `perf: …`, `revert: …`) — a fix, a speedup, or
   undoing a released change

@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   workflow_dispatch:
@@ -60,15 +60,13 @@ jobs:
       - run: yarn typecheck
       - run: yarn test
 
-  pr-title:
-    if: github.event_name == 'pull_request'
+  # The one required CI check, so matrix edits never rename it; list every job in needs.
+  # always(), not !cancelled(): a skipped required check would count as passing.
+  ci-passed:
+    if: always()
+    needs: [python-tests, python-static, upload-page]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.10"
-      # Title goes through env, never interpolated into the script.
-      - run: python pr_title.py "$PR_TITLE"
+      - run: jq -e 'all(.[]; .result == "success")' <<< "$NEEDS"
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          NEEDS: ${{ toJSON(needs) }}

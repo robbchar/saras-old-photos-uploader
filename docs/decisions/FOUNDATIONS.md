@@ -189,8 +189,11 @@ tag after a bad release). An upgrade
 is `git pull && ./install.sh`, so by the time `setup` runs the old checkout is
 gone; this marker is the only record of what came before. The line fires only
 on a version change, never on a commit change alone. Merging any pending
-release PR before updating the Mac keeps that true: behavior changes are then
-always under a new version, so a commit-only difference is noise. The
+release PR before updating the Mac puts every `feat`, `fix`, `perf`, `revert`
+and breaking change under a new version. `refactor`, `build` and `chore`
+changes, Dependabot's dependency bumps among them, release nothing by their
+type and can reach the Mac under an unchanged version: the line reports releases, not every
+change, and the commit printed beside the version tells those apart. The
 marker is written on every run that gets past the refusals and reads the
 registry, whatever the checks say, because the pull has already swapped the
 code. It is not written when the registry can't be read: the operator fixes
