@@ -5,7 +5,7 @@ urllib3>=2.0,<3
 requests>=2.32,<3
 pytest>=8.0
 jsonschema>=4.26
-ruff>=0.15
-pyright>=1.1
+ruff==0.16.9
+pyright==1.1.414
 google-api-python-client>=2.198
 google-auth[requests]>=2.56
