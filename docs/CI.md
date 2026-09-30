@@ -7,7 +7,7 @@ on each push to `main`. The workflows are in `.github/workflows/`.
 
 | Check | Where | Commands |
 |---|---|---|
-| `python-tests` | Ubuntu and macOS × Python 3.10 and 3.14 | `python -m pytest` |
+| `python-tests` | Ubuntu and macOS, Python 3.12 (the Mac's, see [`DEPLOYMENT.md`, "Python"](DEPLOYMENT.md#3-python)) | `python -m pytest` |
 | `python-static` | Ubuntu, Python 3.10 | `python -m ruff check .`, `python -m pyright` |
 | `upload-page` | Ubuntu, Node from `upload_page/.node-version` | `yarn install --immutable`, `yarn typecheck`, `yarn test` |
 | `ci-passed` | Ubuntu, after the three above | none; fails unless `python-tests`, `python-static` and `upload-page` all passed |
@@ -69,7 +69,9 @@ reopen the PR, to run CI.
 - `ruff`, `pyright` and the GitHub Actions versions arrive through
   Dependabot PRs.
 - `upload_page/.node-version` and the Python matrix in
-  `.github/workflows/ci.yml` are edited by hand.
+  `.github/workflows/ci.yml` are edited by hand. Keep the matrix on the
+  Python the Mac runs. The oldest supported version, 3.10, is covered by
+  `python-static`: pyright checks against it.
 - Node 25 and later no longer bundle corepack, so moving `.node-version`
   past 24 means replacing the `corepack enable` step in `ci.yml`.
 
