@@ -1,4 +1,5 @@
 {
+  "$schema": "../projects_registry.schema.json",
   "collection_key": "lcps",
   "projects": {
     "e2e": {

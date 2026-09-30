@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "projects_registry.schema.json",
+  "title": "LCPS project registry",
+  "description": "Editor and test aid for projects_registry.json. project_config.load_project_config is the authoritative check; it also refuses what this schema cannot express, e.g. sheet_id equal to test_sheet_id, or a log tab named after a metadata tab. Stricter than the loader where the loader normalizes instead of refusing: a whitespace-padded batch_column, a non-string log tab or description, and a mediatype outside the enum below are rejected here but accepted by the loader.",
+  "type": "object",
+  "required": ["collection_key", "projects"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path to this schema, for editor validation. Ignored by the tool."
+    },
+    "collection_key": {
+      "$ref": "#/$defs/identifierPart",
+      "description": "First part of every minted identifier (COLLECTIONKEY-PROJECTID-NUMBER). Not the IA collection items land in; that is ia_collection."
+    },
+    "projects": {
+      "type": "object",
+      "description": "Project id -> its configuration. The project id is the identifier's second part.",
+      "propertyNames": { "$ref": "#/$defs/identifierPart" },
+      "additionalProperties": { "$ref": "#/$defs/project" }
+    }
+  },
+  "$defs": {
+    "identifierPart": {
+      "type": "string",
+      "$comment": "(?!\\n) stops Python's $ (used by jsonschema) from accepting a trailing newline.",
+      "pattern": "^[a-z0-9]+(?!\\n)$",
+      "description": "Lowercase letters and digits only; hyphens separate an identifier's parts."
+    },
+    "nonBlankString": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "normalizedColumnName": {
+      "type": "string",
+      "$comment": "(?!\\n): see identifierPart.",
+      "pattern": "^[a-z0-9-]+(_[a-z0-9-]+)*(?!\\n)$",
+      "description": "A Sheet header after normalization: lowercased, punctuation dropped, spaces to underscores. \"Theme Name\" is written theme_name."
+    },
+    "project": {
+      "type": "object",
+      "required": [
+        "mediatype",
+        "ia_collection",
+        "sheet_id",
+        "test_sheet_id",
+        "sheet_tab",
+        "files_dir",
+        "file_template",
+        "required_for_upload"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human note. Not read by the tool."
+        },
+        "mediatype": {
+          "enum": ["texts", "image", "movies", "audio", "software", "data", "web", "collection", "etree"],
+          "description": "IA mediatype sent with every item, e.g. image. Cannot be changed after upload."
+        },
+        "ia_collection": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "IA collection a --live run uploads into. Test runs always use test_collection."
+        },
+        "sheet_id": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Live Google Sheet document id. A value starting REPLACE_WITH is a placeholder that live runs refuse. Must differ from test_sheet_id."
+        },
+        "test_sheet_id": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Google Sheet document id read by test (non --live) runs."
+        },
+        "sheet_tab": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Metadata tab name; the default when live_sheet_tab / test_sheet_tab is unset."
+        },
+        "live_sheet_tab": {
+          "type": "string",
+          "description": "Metadata tab name in the live document only. Blank means unset."
+        },
+        "test_sheet_tab": {
+          "type": "string",
+          "description": "Metadata tab name in the test document only. Blank means unset."
+        },
+        "upload_log_tab": {
+          "type": "string",
+          "description": "Tab upload appends its run summary to. Absent or blank: no mirroring. Must not be a metadata tab."
+        },
+        "sync_log_tab": {
+          "type": "string",
+          "description": "Tab sync-metadata appends its run summary to. Absent or blank: no mirroring. Must not be a metadata tab."
+        },
+        "files_dir": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Root folder the resolved file paths are relative to."
+        },
+        "file_template": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Builds a row's file path from normalized column names, e.g. {folder_on_lacie_drive}/{file_name}."
+        },
+        "required_for_upload": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/normalizedColumnName" },
+          "description": "Columns a human must fill in before a row can upload. No default by design."
+        },
+        "batch_column": {
+          "$ref": "#/$defs/normalizedColumnName",
+          "description": "Column --batch matches against. Absent: --batch is unavailable."
+        },
+        "photo_extensions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonBlankString" },
+          "description": "File extensions that count as photos. Case and leading dot are optional. Default: .jpg .jpeg .tif .tiff .png."
+        }
+      }
+    }
+  }
+}
