@@ -111,6 +111,14 @@ that check against that item and does not run the registry-prefix check at
 all. See
 [`IDENTIFIERS.md`](decisions/IDENTIFIERS.md#an-identifier-is-checked-against-the-runs-project-not-the-whole-registry).
 
+Every registry key, its type and its meaning are in
+`projects_registry.schema.json` (JSON Schema 2020-12). Both registries point to
+it with a `$schema` key, so an editor validates and autocompletes them. It is
+an aid, not the check: `load_project_config` is authoritative and also refuses
+what the schema cannot express, such as `sheet_id` equal to `test_sheet_id`.
+`test_registry_schema.py` holds the two to the same required keys and has both
+reject the same broken registries.
+
 The permanent identifier always holds the real, permanent value — `check_identifier`
 only accepts the registry's actual `collection_key` as the first segment.
 There is no separate "test" identifier form in the Sheet; see
