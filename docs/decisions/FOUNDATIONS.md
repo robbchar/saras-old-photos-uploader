@@ -165,8 +165,11 @@ Sheets.
 ## One version for the whole tool, kept on the Python side
 
 *Decided 2026-09-29.* The version is `APP_VERSION` in `app_version.py`,
-starting at `1.0.0` because the tool was already running live. The page gets
-it from `GET /api/status`, not from its bundle.
+starting at `1.0.0` because the tool was already running live. Since
+2026-09-30 `app_version.py` reads it from `version.txt`, which only the
+release PR changes; see
+[`CI-AND-RELEASES.md`](CI-AND-RELEASES.md#the-version-lives-in-versiontxt-and-changes-only-in-the-release-pr).
+The page gets it from `GET /api/status`, not from its bundle.
 
 Keeping it in `upload_page/package.json` was ruled out. `package.json` is a
 build-stamp input, so every bump would force a rebuild and a committed `dist/`,
@@ -185,8 +188,9 @@ prints `updating from X to Y` when the next run's version differs
 tag after a bad release). An upgrade
 is `git pull && ./install.sh`, so by the time `setup` runs the old checkout is
 gone; this marker is the only record of what came before. The line fires only
-on a version change, never on a commit change alone: every behavior change
-bumps the version in its own PR, so a commit-only difference is noise. The
+on a version change, never on a commit change alone. Merging any pending
+release PR before updating the Mac keeps that true: behavior changes are then
+always under a new version, so a commit-only difference is noise. The
 marker is written on every run that gets past the refusals and reads the
 registry, whatever the checks say, because the pull has already swapped the
 code. It is not written when the registry can't be read: the operator fixes

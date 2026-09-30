@@ -649,27 +649,35 @@ offline CSV paths were removed on 2026-09-23 — see
 
 ## Versioning
 
-The tool has one semantic version, `APP_VERSION` in
-[`app_version.py`](app_version.py), covering the CLI, the server and the
-upload page together. It shows in three places:
+The tool has one semantic version, kept in [`version.txt`](version.txt) and
+read by [`app_version.py`](app_version.py), covering the CLI, the server and
+the upload page together. It shows in three places:
 
 - the upload page's bottom-right corner (`v1.0.0`, from `GET /api/status`)
 - `python ia_bulk.py --version`
 - the top of `doctor`'s and `setup`'s output, with the checkout's short
   commit; after a `git pull` that changed the version, `setup` adds
-  `updating from X to Y` (or `downgrading from X to Y`), read from the `logs/installed-version` the last
-  `setup` wrote
+  `updating from X to Y` (or `downgrading from X to Y`), read from the
+  `logs/installed-version` the last `setup` wrote
 
-Bump it in the same PR as the change it describes:
+Don't edit `version.txt` by hand. The PR title sets the bump, and
+release-please makes the release:
 
-- **major** — the identifier scheme or the Sheet's columns change, or an
-  operator has to do something differently
-- **minor** — a new command, flag or page feature
-- **patch** — a fix
+- **major** (`feat!: …`, or `BREAKING CHANGE:` in the description) — the
+  identifier scheme or the Sheet's columns change, or an operator has to do
+  something differently
+- **minor** (`feat: …`) — a new command, flag or page feature
+- **patch** (`fix: …`) — a fix
+- no release — `test`, `ci`, `docs`, `chore`, `refactor` and the other
+  non-releasing types
 
-Tag the merge commit `vX.Y.Z` once it is on `main`. Bumping the version never
-needs a page rebuild: the page reads it from the server, not from its bundle.
-`upload_page/package.json` deliberately has no `version`. See
+Merging the release PR that release-please keeps open tags `vX.Y.Z` and
+publishes a GitHub Release. Merge it before updating the Mac. The full flow
+is in [`docs/CI.md`, "Releasing"](docs/CI.md#releasing).
+
+Bumping the version never needs a page rebuild: the page reads it from the
+server, not from its bundle. `upload_page/package.json` deliberately has no
+`version`. See
 [`docs/decisions/FOUNDATIONS.md`](docs/decisions/FOUNDATIONS.md#one-version-for-the-whole-tool-kept-on-the-python-side).
 
 ## Tests, linting and type checking

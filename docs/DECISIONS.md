@@ -28,6 +28,14 @@ limit rather than missed.
 - [One version for the whole tool, kept on the Python side](decisions/FOUNDATIONS.md#one-version-for-the-whole-tool-kept-on-the-python-side)
 - [Accepted, not overlooked](decisions/FOUNDATIONS.md#accepted-not-overlooked)
 
+## [CI and releases](decisions/CI-AND-RELEASES.md)
+
+What runs on every pull request, what never does, and how a merged change
+becomes a numbered release.
+
+- [CI has no secrets and never runs the e2e rehearsal](decisions/CI-AND-RELEASES.md#ci-has-no-secrets-and-never-runs-the-e2e-rehearsal)
+- [The version lives in `version.txt` and changes only in the release PR](decisions/CI-AND-RELEASES.md#the-version-lives-in-versiontxt-and-changes-only-in-the-release-pr)
+
 ## [Identifiers](decisions/IDENTIFIERS.md)
 
 How a permanent identifier is formed, minted, reserved and protected. Internet
