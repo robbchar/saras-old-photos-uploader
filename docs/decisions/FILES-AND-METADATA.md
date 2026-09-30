@@ -133,6 +133,38 @@ This is not only tidiness. The surviving test item
 misspelled, permanently. A header typo ships once per batch; a generated field
 name cannot.
 
+## File-location columns never reach IA, and sync removes them
+
+*Decided 2026-09-30.*
+
+The columns `file_template` reads, such as `folder_on_lacie_drive` and
+`file_name`, exist to find each row's file. Once it is uploaded they are not
+item metadata, and `identifier-bib` already records the path they build.
+`file_location_fields()` derives them from the template, so a project with a
+different template gets its own set with nothing hard-coded.
+`sheet_metadata_fields()` subtracts them, so neither `upload` nor
+`sync-metadata` sends their values.
+
+Items uploaded before this carry both fields. `sync-metadata` therefore adds
+`field: REMOVE_TAG` for each one to every row it pushes. The `internetarchive`
+library diffs against the item's current metadata, so removing an absent field
+changes nothing. The removals are part of the hash, so every row synced before
+this change pushes once more, and that one push strips the fields.
+
+This does not contradict "blank cell means leave alone": no cell asks for the
+removal. The tool generates it for columns that must never be on an item.
+Tool-owned names (`file`, `identifier`, `mediatype`, `collection`, the `ia_`
+columns) and standard IA fields (`title`, `date`, `subject`, ...) are excluded,
+so a template naming one of them can never delete it.
+
+The trade-off: a template that named a project-specific metadata column, such
+as `{theme}/{file_name}`, would strip `theme` from every item. The sync dry run
+and field receipt show each removal before anything is sent.
+
+`(LCPS Internal)` stays the way to keep any other column off IA. It does not
+remove anything from items: marking a column renames its field, so the name
+already on the item is no longer known.
+
 ## Blank cell means "leave alone", not "clear"
 
 A `sync-metadata` CSV lists only the columns that changed, so a blank cell has

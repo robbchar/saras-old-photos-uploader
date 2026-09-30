@@ -188,7 +188,9 @@ Four choices went into the shape:
   about what a row means. A hash over anything else either re-pushes a row
   forever or silently swallows an edit. Being derived from
   `sheet_metadata_fields()`, it excludes the six `ia_` columns and the
-  `(LCPS Internal)` ones automatically.
+  `(LCPS Internal)` ones automatically. It does include the `REMOVE_TAG`
+  entries for the file-location columns, so a row synced before those were
+  excluded pushes once more (see [FILES-AND-METADATA.md](FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them)).
 - **The hash is captured at read time and stamped unchanged.** Identity is
   checked late — the moved-row guard runs against a fresh read before the
   stamp write — but content is captured early. Re-reading the row at write

@@ -228,7 +228,9 @@ in, which trains an operator to stop trusting the exit code at all. See §2
 below for `upload`'s modes.
 
 It also prints a **field receipt** — every metadata field name the run would
-create, plus the columns held back as `(LCPS Internal)`. Read it. This receipt
+create, plus the columns held back as `(LCPS Internal)` and the ones only used
+to find each row's file (the columns `file_template` names, by their normalized
+names). Read it. This receipt
 has caught two real Sheet typos before they shipped as permanent IA fields.
 
 **What `validate` does not check** — the values inside your columns. A Sheet
@@ -497,6 +499,11 @@ python ia_bulk.py sync-metadata --project sarasoldphotos --live
 Decoupled from upload and safe to re-run. Blank cell = leave alone; literal
 `REMOVE_TAG` = delete that field. `noindex` cannot be changed this way —
 see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata).
+
+The columns `file_template` names are never sent, and every push removes them
+from the item; the field receipt lists them under "REMOVED from each item this
+run pushes". So the first sync after items were uploaded carrying them pushes
+every uploaded row once, and the dry run shows each as `(deleted)`.
 
 The dry run prints each field it would change as a `now:` / `new:` pair, with
 line breaks shown as `\n` (or `\r\n`) so each value stays on its line. A long
