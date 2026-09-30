@@ -148,9 +148,13 @@ beforeEach(() => {
   mockOpenOutput.mockImplementation(() => ({ close: vi.fn() }));
 });
 
+// The health-reload test swaps window.location; put the real one back after every test.
+const originalLocation = Object.getOwnPropertyDescriptor(window, "location");
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  if (originalLocation) Object.defineProperty(window, "location", originalLocation);
 });
 
 /** The trigger renders disabled until the theme list loads, and a click on it
@@ -206,7 +210,7 @@ describe("appendLineCapped", () => {
 describe("App", () => {
   it("shows the theme picker once status is idle and themes have loaded", async () => {
     render(<App />);
-    expect(await findEnabledThemeTrigger()).toBeInTheDocument();
+    expect(await findEnabledThemeTrigger()).toBeEnabled();
     expect(mockGetStatus).toHaveBeenCalledTimes(1);
     expect(mockGetThemes).toHaveBeenCalledTimes(1);
   });
@@ -501,7 +505,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
+    await findEnabledThemeTrigger();
     expect(screen.queryByText("5 uploaded, 0 failed")).not.toBeInTheDocument();
   });
 
