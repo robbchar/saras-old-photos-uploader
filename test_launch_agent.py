@@ -220,9 +220,12 @@ def test_render_plist_matches_a_golden_byte_string_for_the_sync_agent():
     (Label, ProgramArguments, RunAtLoad, ...) because plistlib.dumps defaults
     to sort_keys=True - that, not dict insertion order in render_plist, is
     what makes this ordering stable to pin."""
+    root = Path("/srv/repo").resolve()
     spec = launch_agent.sync_agent_spec(
-        Path("/srv/repo"), "sarasoldphotos", "/srv/repo/projects_registry.json"
+        root, "sarasoldphotos", root / "projects_registry.json"
     )
+    # Path-bearing lines are built per platform; the rest stays byte-exact.
+    log_path = root / "logs" / "launchagent-sarasoldphotos.log"
     golden = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
@@ -232,25 +235,25 @@ def test_render_plist_matches_a_golden_byte_string_for_the_sync_agent():
         "\t<string>org.lcpsociety.iabulk.sync.sarasoldphotos</string>\n"
         "\t<key>ProgramArguments</key>\n"
         "\t<array>\n"
-        "\t\t<string>C:\\srv\\repo\\.venv\\bin\\python</string>\n"
-        "\t\t<string>C:\\srv\\repo\\ia_bulk.py</string>\n"
+        f"\t\t<string>{root / '.venv' / 'bin' / 'python'}</string>\n"
+        f"\t\t<string>{root / 'ia_bulk.py'}</string>\n"
         "\t\t<string>sync-metadata</string>\n"
         "\t\t<string>--project</string>\n"
         "\t\t<string>sarasoldphotos</string>\n"
         "\t\t<string>--live</string>\n"
         "\t\t<string>--registry</string>\n"
-        "\t\t<string>C:\\srv\\repo\\projects_registry.json</string>\n"
+        f"\t\t<string>{root / 'projects_registry.json'}</string>\n"
         "\t</array>\n"
         "\t<key>RunAtLoad</key>\n"
         "\t<true/>\n"
         "\t<key>StandardErrorPath</key>\n"
-        "\t<string>C:\\srv\\repo\\logs\\launchagent-sarasoldphotos.log</string>\n"
+        f"\t<string>{log_path}</string>\n"
         "\t<key>StandardOutPath</key>\n"
-        "\t<string>C:\\srv\\repo\\logs\\launchagent-sarasoldphotos.log</string>\n"
+        f"\t<string>{log_path}</string>\n"
         "\t<key>StartInterval</key>\n"
         "\t<integer>3600</integer>\n"
         "\t<key>WorkingDirectory</key>\n"
-        "\t<string>C:\\srv\\repo</string>\n"
+        f"\t<string>{root}</string>\n"
         "</dict>\n"
         "</plist>\n"
     )

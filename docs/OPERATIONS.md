@@ -1049,6 +1049,9 @@ list. `pytest.ini` and `pyrightconfig.json` keep the untracked `data/` and
 the Pylance VS Code extension, so it reports what the editor would.
 `pyrightconfig.json` pins it to Python 3.10, the oldest supported version.
 
+CI runs the same three commands, plus the upload page's checks, on every
+pull request; see [`CI.md`](CI.md).
+
 Tests are pure-offline, and `conftest.py` enforces it. The one exception is
 the opt-in e2e rehearsal: tests marked `e2e` and run with `--run-e2e` may
 reach the network, since that is how it drives the real Test Sheet and IA's
