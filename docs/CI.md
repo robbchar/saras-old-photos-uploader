@@ -111,9 +111,11 @@ checks.
 
 - Owner `robbchar`, repository access: this repository only
 - Permissions: Contents, Issues, Pull requests — read and write
-- **Expires: YYYY-MM-DD** (update this line when renewing)
+- **Expires: never** (created 2026-09-30)
 
-When it expires, the `Release` workflow fails on the next push to `main`.
-Nothing else breaks. Renew it with the same permissions, then
-`gh secret set RELEASE_PLEASE_TOKEN -R robbchar/saras-old-photos-uploader`,
-and re-run the failed `Release` run.
+It has no expiry, so it stays valid until revoked. If it may have leaked, or
+its owner loses access, revoke it and create a replacement with the same
+permissions. Store the new one with
+`gh secret set RELEASE_PLEASE_TOKEN -R robbchar/saras-old-photos-uploader`.
+Until then, the `Release` workflow fails on each push to `main`; nothing else
+breaks. Re-run the failed `Release` run once the secret is replaced.
