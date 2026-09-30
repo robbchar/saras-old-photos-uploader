@@ -38,8 +38,11 @@ below). Node is only needed here, on a development machine.
 
 The Mac never runs `yarn build` — it serves the `dist/` this repo already
 carries. So after any change under `src/` (or to `index.html`,
-`package.json`, `yarn.lock`, `tsconfig.json`, `vite.config.ts` or
-`vitest.config.ts`), rebuild and commit the result:
+`package.json`, `yarn.lock`, `tsconfig.json` or `vite.config.ts`), rebuild
+and commit the result. Test files (`*.test.*`, `src/test/`) and
+`vitest.config.ts` are not build inputs: a test-only change needs no rebuild,
+and Tailwind is told not to scan them (`src/index.css`), so they can't change
+the CSS either:
 
 ```bash
 yarn build

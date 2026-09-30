@@ -658,7 +658,8 @@ way, and for its request guard and run-state model in full.
   [`DECISIONS.md`, "The run-state model"](decisions/UPLOAD-PAGE.md#the-run-state-model).
 - **`build_stamp.py`** — computes a content-hash "stamp" over the
   front-end's build inputs (`index.html`, `package.json`, `yarn.lock`, the
-  TypeScript/Vite/Vitest configs, everything under `upload_page/src/`), so
+  TypeScript/Vite configs, everything under `upload_page/src/` except test
+  files — `*.test.*` and `src/test/`), so
   the server can tell whether the committed `dist/` bundle actually matches
   its source without needing Node installed to rebuild it and check.
   `upload_page/scripts/build-stamp.mjs` computes the same stamp on the Node

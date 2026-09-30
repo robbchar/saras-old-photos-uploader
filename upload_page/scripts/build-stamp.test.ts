@@ -7,7 +7,7 @@ import { computeBuildStamp } from "./build-stamp.mjs";
 // literal here locks this JS implementation to the Python one for the same
 // input tree, without either side ever invoking the other.
 const EXPECTED_FIXTURE_STAMP =
-  "9ce5f51497020ddc6be31a8afc13411500a3c5da0fdee86f1614b5d4506c01a2";
+  "f981dc8160b2be7ec975e6e008eba37d678c88b69b9545a214e8718613ab8beb";
 
 const FIXTURE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

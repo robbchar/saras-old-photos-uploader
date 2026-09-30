@@ -19,9 +19,10 @@ import json
 from pathlib import Path, PurePosixPath
 
 STAMP_ALGORITHM = (
-    "build-stamp-v1: sha256 over sorted (relpath, sha256(LF-normalized "
+    "build-stamp-v2: sha256 over sorted (relpath, sha256(LF-normalized "
     "bytes)) pairs for index.html, package.json, yarn.lock, tsconfig.json, "
-    "vite.config.ts, vitest.config.ts, and everything under src/"
+    "vite.config.ts, and everything under src/ except *.test.* files and "
+    "src/test/"
 )
 
 _TOP_LEVEL_INPUT_FILES = (
@@ -30,7 +31,6 @@ _TOP_LEVEL_INPUT_FILES = (
     "yarn.lock",
     "tsconfig.json",
     "vite.config.ts",
-    "vitest.config.ts",
 )
 
 
@@ -39,7 +39,8 @@ def _input_files(page_dir: Path) -> list[Path]:
 
     Top-level files are included only if present (a fixture or a real page
     directory may be missing one); every file under src/ is included
-    recursively. dist/, node_modules/, and dotfile directories are never
+    recursively except test-only files, which never reach the bundle.
+    dist/, node_modules/, and dotfile directories are never
     walked into (src/ is the only directory walked, so this mostly matters
     for future-proofing if src/ ever nests one of those names).
     """
@@ -64,6 +65,9 @@ def _input_files(page_dir: Path) -> list[Path]:
 def _is_excluded(relpath: Path) -> bool:
     parts = relpath.parts
     if "dist" in parts or "node_modules" in parts:
+        return True
+    # Test-only: a test changes no bundle byte, so it must not stale the stamp.
+    if parts[:2] == ("src", "test") or ".test." in parts[-1]:
         return True
     # Any dotfile directory component (e.g. .git, .cache) excludes the file.
     # The file's own final component is not itself a directory, so it is

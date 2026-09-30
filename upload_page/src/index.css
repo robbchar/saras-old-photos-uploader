@@ -1,6 +1,9 @@
-@import "tailwindcss";
+/* Scan only src/, minus tests: untracked files elsewhere must not leak utilities into dist/. */
+@import "tailwindcss" source(".");
 @import "@fontsource/josefin-sans/latin-600.css";
 @import "@fontsource/josefin-sans/latin-700.css";
+@source not "./test";
+@source not "./**/*.test.{ts,tsx}";
 
 /* Palette drawn from lcpsociety.org: warm paper, near-black, the logo's gold.
    Light keeps gold decorative (too pale for text); dark promotes it to accent. */
