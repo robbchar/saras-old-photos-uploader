@@ -37,6 +37,7 @@ from column_map import (
     ColumnMap,
     FileResolutionError,
     IA_SYNC_HASH_COLUMN,
+    RESERVED_FIELDS,
     TemplateError,
     candidate_path,
     check_column_map,
@@ -438,7 +439,7 @@ def sheet_structure_validation(column_map: ColumnMap, grid: list[list[str]]) -> 
     return results
 
 
-def format_field_receipt(column_map: ColumnMap) -> str:
+def format_field_receipt(column_map: ColumnMap, file_template: str) -> str:
     """Printed before anything permanent happens, so the transformation from
     Sheet header to IA field name is reviewable by a human.
 
@@ -463,12 +464,16 @@ def format_field_receipt(column_map: ColumnMap) -> str:
       rename-suggestion logic cannot disagree about which names are the
       tool's."""
     all_fields = column_map.uploadable_fields()
+    location_fields = file_location_fields(file_template)
     fields = [
         name
         for name in all_fields
-        if name not in DROPPED_BY_UPLOAD_ROW and name not in PIPELINE_OWNED_FIELDS
+        if name not in DROPPED_BY_UPLOAD_ROW
+        and name not in PIPELINE_OWNED_FIELDS
+        and name not in location_fields
     ]
     dropped = [name for name in all_fields if name in DROPPED_BY_UPLOAD_ROW]
+    locating = [name for name in all_fields if name in location_fields]
     # `identifier` is in both sets; it is listed under "reserves these names"
     # only, which is the more precise reason of the two.
     generated = [
@@ -482,6 +487,9 @@ def format_field_receipt(column_map: ColumnMap) -> str:
     if dropped:
         lines.append("NOT uploaded - Internet Archive reserves these names:")
         lines.append(f"  {', '.join(dropped)}")
+    if locating:
+        lines.append("NOT uploaded - only used to find each row's file:")
+        lines.append(f"  {', '.join(locating)}")
     if generated:
         lines.append(
             "uploaded with a value this tool generates - the column's own value is IGNORED:"
@@ -2961,7 +2969,7 @@ def run_validate(args, json_out: TextIO | None) -> int:
 
     print(format_report(results))
     print()
-    print(format_field_receipt(column_map))
+    print(format_field_receipt(column_map, config.file_template))
     print()
     print(render_lifecycle_summary(report))
     print()
@@ -3337,7 +3345,18 @@ def split_moved_targets(
     return still_there, moved
 
 
-def sheet_metadata_fields(column_map: ColumnMap) -> frozenset[str]:
+def file_location_fields(file_template: str) -> frozenset[str]:
+    """Columns `file_template` reads to find each row's file: never sent to IA,
+    and removed from items by sync. Tool-owned names are excluded so sync never removes them."""
+    return (
+        frozenset(template_fields(file_template))
+        - RESERVED_FIELDS
+        - DROPPED_BY_UPLOAD_ROW
+        - PIPELINE_OWNED_FIELDS
+    )
+
+
+def sheet_metadata_fields(column_map: ColumnMap, file_template: str) -> frozenset[str]:
     """The normalized column names whose values this tool sends to Internet
     Archive as item metadata.
 
@@ -3350,11 +3369,14 @@ def sheet_metadata_fields(column_map: ColumnMap) -> frozenset[str]:
     `mediatype` and `collection` are generated, and upload overwrites them
     anyway, so excluding them here changes nothing for upload - but for sync
     it matters twice over: Internet Archive will not change an item's
-    mediatype after upload, and `collection` is membership, not metadata."""
+    mediatype after upload, and `collection` is membership, not metadata.
+
+    Also subtracts file_location_fields(): identifier-bib already records the path."""
     return (
         frozenset(column_map.uploadable_fields())
         - DROPPED_BY_UPLOAD_ROW
         - PIPELINE_OWNED_FIELDS
+        - file_location_fields(file_template)
     )
 
 
@@ -3583,7 +3605,7 @@ class SheetUploadRun:
         the same set 10,000 times. cached_property works on a frozen
         dataclass because it writes through __dict__ rather than
         __setattr__."""
-        return sheet_metadata_fields(self.column_map)
+        return sheet_metadata_fields(self.column_map, self.file_template)
 
     def execute(self, targets: list[UploadTarget]) -> UploadSummary:
         """One chunk at a time: verify, reserve, upload, verify, confirm,
@@ -4487,7 +4509,7 @@ def upload_from_sheet(args) -> int:
     # `upload` is where something permanent happens, so it shows the same
     # field receipt `validate` does rather than assuming the operator ran
     # validate first and remembers what it said.
-    print(format_field_receipt(column_map))
+    print(format_field_receipt(column_map, config.file_template))
     print()
 
     if dry_run:
@@ -4966,7 +4988,9 @@ def plan_sync_targets(
     Returns (targets, problems). A DONE row this run cannot safely target is a
     problem rather than a silent skip: the operator edited it expecting the
     edit to reach the site."""
-    fields = sheet_metadata_fields(column_map)
+    fields = sheet_metadata_fields(column_map, file_template)
+    # Part of every push, and so of the hash: rows synced while these still shipped push once more.
+    location_removals = dict.fromkeys(sorted(file_location_fields(file_template)), REMOVE_TAG_SENTINEL)
     # Raw cells: sync never calls resolve_sheet_files(), so row['file'] has
     # not been rewritten and these compare correctly against a fresh read.
     fingerprints = sheet_row_fingerprints(rows, file_template)
@@ -5043,7 +5067,7 @@ def plan_sync_targets(
             )
             continue
 
-        metadata = {key: value for key, value in row.items() if key in fields}
+        metadata = {key: value for key, value in row.items() if key in fields} | location_removals
         targets.append(
             SyncTarget(
                 row_number=row_number,
@@ -5400,7 +5424,7 @@ def sync_from_sheet(args) -> int:
         )
         print()
 
-    print(format_field_receipt(column_map))
+    print(format_field_receipt(column_map, config.file_template))
     print()
 
     to_push, already_synced = split_unchanged(targets)

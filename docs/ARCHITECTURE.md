@@ -78,6 +78,14 @@ discarded. That section prints only when such a column actually exists —
 it is a collision warning, not a standing disclaimer. See
 [`DECISIONS.md`](decisions/FILES-AND-METADATA.md#sheet-metadata-is-filtered-at-the-upload-boundary-not-in-upload_row).
 
+**File-location columns.** The columns `file_template` reads
+(`file_location_fields()`, currently `folder_on_lacie_drive` and `file_name`)
+are listed under "NOT uploaded — only used to find each row's file".
+`sheet_metadata_fields()` subtracts them, so neither command sends their
+values. `sync-metadata` also sends `REMOVE_TAG` for them on every push, which
+strips them from items uploaded before they were excluded. See
+[`DECISIONS.md`](decisions/FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them).
+
 **File resolution.** A row's file is *resolved*, not constructed from a
 path template: `resolve_file()` looks in the folder named by `file_template`'s
 substituted columns for an exact filename match, then a case-insensitive
