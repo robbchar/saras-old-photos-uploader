@@ -21,17 +21,21 @@ const TOP_LEVEL_INPUT_FILES = [
   "yarn.lock",
   "tsconfig.json",
   "vite.config.ts",
-  "vitest.config.ts",
 ];
 
 /**
  * True when relPosixPath lives under a dist/, node_modules/, or dotfile
- * directory. Mirrors build_stamp.py's _is_excluded: only the directory
- * components are checked, never the file's own final name component.
+ * directory, or is test-only (src/test/ or *.test.*). Mirrors
+ * build_stamp.py's _is_excluded.
  */
 function isExcludedPath(relPosixPath) {
-  const dirParts = relPosixPath.split("/").slice(0, -1);
+  const parts = relPosixPath.split("/");
+  const dirParts = parts.slice(0, -1);
   if (dirParts.includes("dist") || dirParts.includes("node_modules")) {
+    return true;
+  }
+  // Test-only: a test changes no bundle byte, so it must not stale the stamp.
+  if ((parts[0] === "src" && parts[1] === "test") || parts[parts.length - 1].includes(".test.")) {
     return true;
   }
   return dirParts.some((part) => part.startsWith("."));

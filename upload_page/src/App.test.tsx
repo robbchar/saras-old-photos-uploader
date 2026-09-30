@@ -132,7 +132,9 @@ const COMPLETED_ENDING: Ending = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // Reset, not clear: clearing keeps queued *Once values, so a test that
+  // fails before consuming them would feed them to the tests after it.
+  vi.resetAllMocks();
   // The output-offset resume key lives in sessionStorage, which jsdom keeps
   // across tests in the same file - start each test with a clean slate so
   // one test's remembered offset can't leak into the next.
@@ -146,17 +148,30 @@ beforeEach(() => {
   mockOpenOutput.mockImplementation(() => ({ close: vi.fn() }));
 });
 
+// The health-reload test swaps window.location; put the real one back after every test.
+const originalLocation = Object.getOwnPropertyDescriptor(window, "location");
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  if (originalLocation) Object.defineProperty(window, "location", originalLocation);
 });
+
+/** The trigger renders disabled until the theme list loads, and a click on it
+ * before then is a no-op - so wait for enabled, not just present. */
+async function findEnabledThemeTrigger() {
+  return waitFor(() => {
+    const trigger = screen.getByRole("combobox", { name: /choose a theme/i });
+    expect(trigger).toBeEnabled();
+    return trigger;
+  });
+}
 
 /** Drives the app from mount through a loaded preview: opens the theme
  * picker, selects "Fishing", and waits for its preview to render. */
 async function selectFishingTheme() {
   render(<App />);
-  const trigger = await screen.findByRole("combobox", { name: /choose a theme/i });
-  fireEvent.click(trigger);
+  fireEvent.click(await findEnabledThemeTrigger());
   fireEvent.click(await screen.findByRole("option", { name: /Fishing/ }));
   await screen.findByText("5 ready to upload");
 }
@@ -195,7 +210,7 @@ describe("appendLineCapped", () => {
 describe("App", () => {
   it("shows the theme picker once status is idle and themes have loaded", async () => {
     render(<App />);
-    expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
+    expect(await findEnabledThemeTrigger()).toBeEnabled();
     expect(mockGetStatus).toHaveBeenCalledTimes(1);
     expect(mockGetThemes).toHaveBeenCalledTimes(1);
   });
@@ -243,7 +258,7 @@ describe("App", () => {
     mockGetPreview.mockResolvedValueOnce(zeroReadyPreview).mockResolvedValueOnce(oneReadyPreview);
 
     render(<App />);
-    const trigger = await screen.findByRole("combobox", { name: /choose a theme/i });
+    const trigger = await findEnabledThemeTrigger();
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole("option", { name: "Fishing — 2 not ready" }));
     await screen.findByText("0 ready to upload");
@@ -263,7 +278,8 @@ describe("App", () => {
 
     await waitFor(() => expect(mockStartRun).toHaveBeenCalledWith("Fishing"));
     expect(await screen.findByRole("log")).toBeInTheDocument();
-    expect(mockOpenOutput).toHaveBeenCalledTimes(1);
+    // openOutput runs in an effect after the log renders, so it can lag the log.
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
   });
 
   it("waits for startRun to succeed before opening the output stream (no race against the new run existing)", async () => {
@@ -445,7 +461,8 @@ describe("App", () => {
     await selectFishingTheme();
     fireEvent.click(screen.getByRole("button", { name: "Upload 5 items to Internet Archive" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
-    await screen.findByRole("log");
+    // Wait for the subscription itself - the log renders before openOutput runs.
+    await waitFor(() => expect(mockOpenOutput).toHaveBeenCalledTimes(1));
 
     act(() => {
       capturedHandlers?.onFinished(COMPLETED_ENDING);
@@ -488,7 +505,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("combobox", { name: /choose a theme/i })).toBeInTheDocument();
+    await findEnabledThemeTrigger();
     expect(screen.queryByText("5 uploaded, 0 failed")).not.toBeInTheDocument();
   });
 
@@ -505,9 +522,7 @@ describe("App", () => {
     });
 
     render(<App />);
-    const trigger = await screen.findByRole("combobox", { name: /choose a theme/i });
-    await waitFor(() => expect(trigger).toBeEnabled());
-    fireEvent.click(trigger);
+    fireEvent.click(await findEnabledThemeTrigger());
     fireEvent.click(await screen.findByRole("option", { name: /Fishing/ }));
 
     // Straight to that theme's preview - never back through the status fetch.
