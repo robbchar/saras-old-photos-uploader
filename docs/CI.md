@@ -52,6 +52,15 @@ override. The rule is a repository ruleset named `main checks`.
   `package.json` and `yarn.lock` are build-stamp inputs. Check out its branch,
   run `yarn build` in `upload_page/`, commit `dist/`, and push.
 
+### Bumping
+
+- `ruff`, `pyright` and the GitHub Actions versions arrive through
+  Dependabot PRs.
+- `upload_page/.node-version` and the Python matrix in
+  `.github/workflows/ci.yml` are edited by hand.
+- Node 25 and later no longer bundle corepack, so moving `.node-version`
+  past 24 means replacing the `corepack enable` step in `ci.yml`.
+
 ## Releasing
 
 The version is the single line in `version.txt`. Only the release PR changes
@@ -86,6 +95,11 @@ PR before updating the Mac**: the Mac runs `main`, and `setup` only prints
 Squash commits are built from the PR title and description (repository
 setting), which is how the title's type and any `Release-As`/`BREAKING CHANGE`
 line reach `main`.
+
+Because the description becomes the commit body, a line in it that starts
+with `Release-As:` or `BREAKING CHANGE:` is read as a release instruction.
+Mention those words mid-sentence or in code spans when you only mean to talk
+about them.
 
 ## The release token
 
