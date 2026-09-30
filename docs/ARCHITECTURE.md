@@ -116,8 +116,10 @@ Every registry key, its type and its meaning are in
 it with a `$schema` key, so an editor validates and autocompletes them. It is
 an aid, not the check: `load_project_config` is authoritative and also refuses
 what the schema cannot express, such as `sheet_id` equal to `test_sheet_id`.
-`test_registry_schema.py` holds the two to the same required keys and has both
-reject the same broken registries.
+Both refuse a project key outside `REQUIRED_KEYS`, `required_for_upload` and
+`OPTIONAL_KEYS`. The schema alone also limits `mediatype` to IA's mediatypes.
+`test_registry_schema.py` holds the two to the same required and allowed keys
+and has both reject the same broken registries.
 
 The permanent identifier always holds the real, permanent value — `check_identifier`
 only accepts the registry's actual `collection_key` as the first segment.

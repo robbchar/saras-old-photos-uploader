@@ -1,13 +1,14 @@
 """projects_registry.schema.json against the registries and against
 load_project_config, the authoritative check."""
 import copy
+import functools
 import json
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
 
-from project_config import REQUIRED_KEYS, ConfigError, load_project_config
+from project_config import OPTIONAL_KEYS, REQUIRED_KEYS, ConfigError, load_project_config
 
 REPO_ROOT = Path(__file__).parent
 SCHEMA_PATH = REPO_ROOT / "projects_registry.schema.json"
@@ -33,14 +34,14 @@ VALID_REGISTRY = {
 }
 
 
+@functools.cache
 def _schema() -> dict:
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+@functools.cache
 def _validator() -> Draft202012Validator:
-    schema = _schema()
-    Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(schema)
+    return Draft202012Validator(_schema())
 
 
 def _schema_errors(registry: dict) -> list[str]:
@@ -78,10 +79,20 @@ def test_shipped_registry_points_editors_at_the_schema(registry_path):
     assert schema_file == SCHEMA_PATH.resolve()
 
 
+def test_schema_is_valid_json_schema_2020_12():
+    Draft202012Validator.check_schema(_schema())
+
+
 def test_schema_requires_exactly_the_keys_the_loader_requires():
     required = set(_project_schema()["required"])
 
     assert required == {*REQUIRED_KEYS, "required_for_upload"}
+
+
+def test_schema_allows_exactly_the_keys_the_loader_allows():
+    allowed = set(_project_schema()["properties"])
+
+    assert allowed == {*REQUIRED_KEYS, "required_for_upload", *OPTIONAL_KEYS}
 
 
 def test_valid_registry_passes_both_schema_and_loader():
@@ -106,6 +117,12 @@ BROKEN_REGISTRIES = {
     },
     "hyphenated collection_key": {**VALID_REGISTRY, "collection_key": "lc-ps"},
     "missing collection_key": {"projects": VALID_REGISTRY["projects"]},
+    "misspelled optional key": _registry_with(upload_log_tabs="Upload Log"),
+    "trailing newline in project id": {
+        "collection_key": "lcps",
+        "projects": {"p\n": VALID_REGISTRY["projects"]["p"]},
+    },
+    "trailing newline in required_for_upload": _registry_with(required_for_upload=["title\n"]),
 }
 
 
@@ -120,9 +137,9 @@ def test_schema_and_loader_both_reject(registry):
         load_project_config(registry, project_id)
 
 
-def test_schema_rejects_a_misspelled_optional_key():
-    """The loader ignores unknown keys, so a typo there silently means "unset"."""
-    registry = _registry_with(upload_log_tabs="Upload Log")
+def test_schema_rejects_a_mediatype_outside_ia_mediatypes():
+    """Irreversible after upload, so the editor flags a typo the loader accepts."""
+    registry = _registry_with(mediatype="images")
 
     assert _schema_errors(registry) != []
 

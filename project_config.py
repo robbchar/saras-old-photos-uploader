@@ -22,6 +22,18 @@ REQUIRED_KEYS = (
     "file_template",
 )
 
+# Every other key a project block may hold; anything outside these and
+# REQUIRED_KEYS + required_for_upload is refused as a likely typo.
+OPTIONAL_KEYS = (
+    "description",
+    "live_sheet_tab",
+    "test_sheet_tab",
+    "upload_log_tab",
+    "sync_log_tab",
+    "batch_column",
+    "photo_extensions",
+)
+
 # Which files on the drive count as photographs. Optional with a default,
 # unlike required_for_upload: extensions describe what a photo file IS, while
 # required_for_upload encodes editorial policy that must not be inherited by
@@ -242,6 +254,14 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
             f"project '{project_id}' must be an object holding its configuration keys "
             f"({', '.join(REQUIRED_KEYS)}, required_for_upload), got "
             f"{type(block).__name__!r}"
+        )
+
+    # A misspelled optional key would otherwise read as "unset" and silently change behavior.
+    unknown_keys = sorted(set(block) - {*REQUIRED_KEYS, "required_for_upload", *OPTIONAL_KEYS})
+    if unknown_keys:
+        raise ConfigError(
+            f"project '{project_id}' has unknown registry key(s): {', '.join(unknown_keys)}. "
+            f"Allowed: {', '.join((*REQUIRED_KEYS, 'required_for_upload', *OPTIONAL_KEYS))}"
         )
 
     # Validate all values are strings before processing

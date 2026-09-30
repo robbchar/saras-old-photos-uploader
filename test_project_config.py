@@ -130,6 +130,11 @@ def test_a_non_string_per_document_sheet_tab_is_rejected(key):
         load_project_config(_registry(**{key: 5}), "p")
 
 
+def test_a_misspelled_optional_key_is_rejected_by_name():
+    with pytest.raises(ConfigError, match="unknown registry key.*upload_log_tabs"):
+        load_project_config(_registry(upload_log_tabs="Upload Log"), "p")
+
+
 @pytest.mark.parametrize(
     ("sheet_id", "expected"),
     [

@@ -44,6 +44,7 @@ configuration lives in the registry, not the command line".
 
 ```json
 {
+  "$schema": "./projects_registry.schema.json",
   "collection_key": "lcps",
   "projects": {
     "photosexample": {
@@ -62,6 +63,12 @@ configuration lives in the registry, not the command line".
   }
 }
 ```
+
+Every key, its type and its meaning are in
+[`projects_registry.schema.json`](projects_registry.schema.json); keep the
+`$schema` line and an editor such as VS Code validates and autocompletes the
+registry. A key the tool does not know is refused at startup, so a typo never
+reads as "unset".
 
 `upload_log_tab` and `sync_log_tab` are optional and name the tabs each
 command mirrors its run summary into — one row per run, plus one row per
