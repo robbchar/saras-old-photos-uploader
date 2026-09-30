@@ -1,11 +1,11 @@
 # Requires Python 3.10+ (google-auth, google-api-core). macOS system python3 is 3.9.6.
 # Exact pin: retry handling relies on library internals. See docs/decisions/QUOTA-AND-RUNS.md.
 internetarchive==5.11.1
-urllib3>=2.0,<3
-requests>=2.32,<3
-pytest>=8.0
+urllib3>=2.8.0,<3
+requests>=2.34.2,<3
+pytest>=9.1.1
 jsonschema>=4.26
 ruff==0.16.9
 pyright==1.1.414
-google-api-python-client>=2.198
-google-auth[requests]>=2.56
+google-api-python-client>=2.200.0
+google-auth[requests]>=2.58.1
