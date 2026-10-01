@@ -33,6 +33,10 @@ HELD_BACK_MARKER = "(lcps internal)"
 IA_SYNC_HASH_COLUMN = "ia_sync_hash"
 IA_LAST_SYNCED_COLUMN = "ia_last_synced"
 
+# A person's yes/no for pulling an item back, and when the tool last removed its files.
+WITHDRAWN_COLUMN = "withdrawn"
+IA_WITHDRAWN_COLUMN = "ia_withdrawn"
+
 # `identifier` is deliberately NOT here: the real Sheet's own `Identifier`
 # column holds the donor's original archival reference (e.g.
 # "CD 1 01 53 58 1 Central SS"), not a minted IA identifier - that lives in
@@ -46,6 +50,8 @@ IA_LAST_SYNCED_COLUMN = "ia_last_synced"
 # specified, its two new `ia_` columns would have shipped to Internet Archive
 # as item metadata on every push. Adding an `ia_` column without adding it
 # here uploads it.
+#
+# `withdrawn` is the one person-edited name here: it steers the tool and is never metadata.
 RESERVED_FIELDS = frozenset({
     "file",
     "ia_identifier",
@@ -54,6 +60,8 @@ RESERVED_FIELDS = frozenset({
     "ia_url",
     IA_SYNC_HASH_COLUMN,
     IA_LAST_SYNCED_COLUMN,
+    WITHDRAWN_COLUMN,
+    IA_WITHDRAWN_COLUMN,
 })
 
 
