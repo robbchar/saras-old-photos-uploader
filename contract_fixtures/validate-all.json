@@ -16,7 +16,7 @@
       "ready": 3,
       "invalid": 1,
       "not_ready": 4,
-      "held": 0
+      "held": 1
     },
     "done": {
       "ready": 1,
@@ -64,7 +64,7 @@
           "ready": 1,
           "invalid": 1,
           "not_ready": 2,
-          "held": 0
+          "held": 1
         },
         "done": {
           "ready": 1,

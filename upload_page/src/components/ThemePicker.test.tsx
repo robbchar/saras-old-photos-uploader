@@ -14,7 +14,7 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0 };
+const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0, held: 0 };
 const ZERO_COUNTS = { unassigned: ZERO_VERDICTS, done: ZERO_VERDICTS, reserved: ZERO_VERDICTS };
 
 const READY_BATCH: ValidateBatch = {
@@ -22,7 +22,7 @@ const READY_BATCH: ValidateBatch = {
   ready_to_upload: 1,
   counts: {
     ...ZERO_COUNTS,
-    unassigned: { ready: 1, invalid: 0, not_ready: 2 },
+    unassigned: { ready: 1, invalid: 0, not_ready: 2, held: 0 },
   },
 };
 
@@ -34,7 +34,7 @@ const NOT_READY_BATCH: ValidateBatch = {
   ready_to_upload: 0,
   counts: {
     ...ZERO_COUNTS,
-    unassigned: { ready: 0, invalid: 2, not_ready: 1 },
+    unassigned: { ready: 0, invalid: 2, not_ready: 1, held: 0 },
   },
 };
 
@@ -44,7 +44,7 @@ const ONE_NOT_READY_BATCH: ValidateBatch = {
   ready_to_upload: 0,
   counts: {
     ...ZERO_COUNTS,
-    unassigned: { ready: 0, invalid: 0, not_ready: 1 },
+    unassigned: { ready: 0, invalid: 0, not_ready: 1, held: 0 },
   },
 };
 
@@ -55,7 +55,17 @@ const ALL_UPLOADED_BATCH: ValidateBatch = {
   ready_to_upload: 0,
   counts: {
     ...ZERO_COUNTS,
-    done: { ready: 0, invalid: 0, not_ready: 0 },
+    done: { ready: 0, invalid: 0, not_ready: 0, held: 0 },
+  },
+};
+
+// Nothing ready, nothing broken, one row withdrawn before upload.
+const WITHDRAWN_BATCH: ValidateBatch = {
+  value: "Cannery",
+  ready_to_upload: 0,
+  counts: {
+    ...ZERO_COUNTS,
+    unassigned: { ready: 0, invalid: 0, not_ready: 0, held: 1 },
   },
 };
 
@@ -112,6 +122,13 @@ describe("ThemePicker", () => {
     expect(option).not.toHaveAttribute("aria-disabled", "true");
     fireEvent.click(option);
     expect(onSelect).toHaveBeenCalledWith("Harbor");
+  });
+
+  it("names withdrawn rows instead of calling the theme all uploaded", () => {
+    render(<ThemePicker batches={[WITHDRAWN_BATCH]} onSelect={vi.fn()} />);
+
+    openPicker();
+    expect(screen.getByRole("option", { name: "Cannery — 1 withdrawn" })).toBeInTheDocument();
   });
 
   it("shows the instruction inline and uses it as the picker's accessible name", () => {

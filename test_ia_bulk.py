@@ -13073,14 +13073,14 @@ CONTRACT_FIXTURES = Path(__file__).resolve().parent / "contract_fixtures"
 
 
 def _contract_grid(tmp_path):
-    """Every lifecycle case the upload page shows, across two batches and one unbatched row."""
+    """Every lifecycle case the upload page shows, held included, across two batches and one unbatched row."""
     for name in (
         "photo1.jpg", "photo2.jpg", "photo4.jpg", "photo5.jpg", "photo6.jpg", "photo7.jpg",
-        "photo10.jpg",
+        "photo10.jpg", "photo12.jpg",
     ):
         (tmp_path / name).write_bytes(b"x")
     return [
-        BATCH_SHEET_HEADER,
+        BATCH_SHEET_HEADER + ["withdrawn"],
         ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
         ["Second photo", "photo2.jpg", "", "", "", "", "Fishing"],
         ["Third photo", "photo3.jpg", "", "", "", "", "logging"],
@@ -13094,6 +13094,7 @@ def _contract_grid(tmp_path):
         ["", "photo9.jpg", "", "", "", "", "Fishing"],
         ["", "photo10.jpg", "", "", "", "", "Logging"],
         ["", "photo11.jpg", "", "", "", "", "Logging"],
+        ["Twelfth photo", "photo12.jpg", "", "", "", "", "Logging", "yes"],
     ]
 
 
@@ -13134,7 +13135,7 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["valid"] is False
     assert document["rows"] is None
     assert document["counts"] == {
-        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4, "held": 0},
+        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4, "held": 1},
         "done": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
         "reserved": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
     }
@@ -13149,7 +13150,7 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     }
     assert document["batches"][0]["ready_to_upload"] == 1
     assert document["batches"][1]["counts"] == {
-        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2, "held": 0},
+        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2, "held": 1},
         "done": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
         "reserved": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
     }
@@ -13177,6 +13178,7 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
         (8, "reserved", "ready"),
         (10, "unassigned", "not_ready"),
         (11, "unassigned", "not_ready"),
+        (12, "unassigned", "held"),
     ]
     assert document["rows"][1]["errors"] != []
     assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
@@ -13184,6 +13186,7 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
     assert document["rows"][2]["file"] == "photo6.jpg"
     assert document["rows"][4]["missing_fields"] == ["title"]
     assert document["rows"][5]["errors"] != []
+    assert document["rows"][6]["file"] == "photo12.jpg"
     # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
     assert document["rows_with_errors"] == [4, 11]
     assert document["ready_to_upload"] == 2

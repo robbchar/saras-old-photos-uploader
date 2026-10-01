@@ -27,6 +27,7 @@ export function UploadedList({ rows }: UploadedListProps) {
               className="rounded border border-border-strong bg-raised px-2 py-1 font-mono text-sm text-text"
             >
               {row.file || row.identifier || `row ${row.row}`}
+              {row.verdict === "held" ? " (withdrawn)" : ""}
             </li>
           ))}
         </ul>

@@ -5,7 +5,7 @@ import { Preview } from "./Preview";
 
 afterEach(cleanup);
 
-const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0 };
+const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0, held: 0 };
 const ZERO_COUNTS = { unassigned: ZERO_VERDICTS, done: ZERO_VERDICTS, reserved: ZERO_VERDICTS };
 
 // `file` defaults to "" so existing rows need not spell it out; ready_to_upload
@@ -38,6 +38,24 @@ describe("Preview", () => {
     render(<Preview doc={doc} checkedAt="2026-01-01T09:07:00" onRecheck={vi.fn()} />);
     // The done row is not "ready to upload" - it is already uploaded.
     expect(screen.getByText("1 ready to upload")).toBeInTheDocument();
+  });
+
+  it("lists rows withdrawn before upload in their own section", () => {
+    const doc = docWithRows([
+      { row: 12, state: "unassigned", verdict: "held", identifier: "", file: "photo12.jpg", errors: [], missing_fields: [] },
+    ]);
+    render(<Preview doc={doc} checkedAt="2026-01-01T09:07:00" onRecheck={vi.fn()} />);
+    expect(screen.getByText("Withdrawn")).toBeInTheDocument();
+    expect(screen.getByText("row 12: withdrawn - upload skips it")).toBeInTheDocument();
+  });
+
+  it("marks an uploaded row that has been withdrawn, without a Withdrawn section", () => {
+    const doc = docWithRows([
+      { row: 7, state: "done", verdict: "held", identifier: "lcps-astoriaphotos-00001", file: "photo6.jpg", errors: [], missing_fields: [] },
+    ]);
+    render(<Preview doc={doc} checkedAt="2026-01-01T09:07:00" onRecheck={vi.fn()} />);
+    expect(screen.getByText("photo6.jpg (withdrawn)")).toBeInTheDocument();
+    expect(screen.queryByText("Withdrawn")).not.toBeInTheDocument();
   });
 
   it("lists already-uploaded rows by filename in a collapsible Uploaded section", () => {

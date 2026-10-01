@@ -43,6 +43,12 @@ describe("ValidateDoc", () => {
     expect(doc.batches).toBeNull();
   });
 
+  test("parses a held row and the held counts", () => {
+    const doc = ValidateDoc.parse(batch);
+    expect(doc.rows?.find((row) => row.verdict === "held")?.row).toBe(12);
+    expect(doc.counts.unassigned.held).toBe(1);
+  });
+
   test("rejects an unknown verdict", () => {
     const withBadVerdict = {
       ...batch,
