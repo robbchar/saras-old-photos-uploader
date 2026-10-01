@@ -12,6 +12,7 @@ from sync_state import (
     locate_sync_columns,
     stamp_updates,
     sync_hash,
+    withdrawn_updates,
 )
 
 
@@ -134,3 +135,48 @@ def test_stamp_updates_writes_the_hash_it_is_given_not_one_it_derives():
     updates = stamp_updates([(9, "read-time-hash")], columns, "T")
 
     assert updates[0].value == "read-time-hash"
+
+
+def test_locate_sync_columns_finds_ia_withdrawn_when_present():
+    column_map = build_column_map(
+        ["Title", "ia_sync_hash", "ia_last_synced", "Withdrawn", "ia_withdrawn"]
+    )
+
+    assert locate_sync_columns(column_map) == SyncColumns(
+        ia_sync_hash=1, ia_last_synced=2, ia_withdrawn=4
+    )
+
+
+def test_a_sheet_without_withdrawal_columns_locates_as_before():
+    column_map = build_column_map(["Title", "ia_sync_hash", "ia_last_synced"])
+
+    assert locate_sync_columns(column_map).ia_withdrawn is None
+
+
+def test_a_withdrawn_column_needs_ia_withdrawn_beside_it():
+    column_map = build_column_map(["Title", "ia_sync_hash", "ia_last_synced", "withdrawn"])
+
+    with pytest.raises(MissingSyncColumns) as excinfo:
+        locate_sync_columns(column_map)
+
+    assert "ia_withdrawn" in str(excinfo.value)
+    assert "add it as a header cell" in str(excinfo.value)
+
+
+def test_withdrawn_updates_writes_a_timestamp_or_clears_the_cell():
+    columns = SyncColumns(ia_sync_hash=6, ia_last_synced=7, ia_withdrawn=9)
+
+    assert withdrawn_updates([(4, "2026-10-01T12:00:00Z"), (5, "")], columns) == [
+        CellUpdate("J4", "2026-10-01T12:00:00Z"),
+        CellUpdate("J5", ""),
+    ]
+
+
+def test_withdrawn_updates_with_nothing_to_mark_writes_nothing():
+    assert withdrawn_updates([], SyncColumns(ia_sync_hash=6, ia_last_synced=7)) == []
+
+
+def test_withdrawn_updates_refuses_marks_without_the_column():
+    """Dropping them would leave a withdraw unrecorded, repeating every run."""
+    with pytest.raises(ValueError):
+        withdrawn_updates([(4, "T")], SyncColumns(ia_sync_hash=6, ia_last_synced=7))

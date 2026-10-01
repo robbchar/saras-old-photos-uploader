@@ -21,7 +21,13 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from column_map import ColumnMap, IA_LAST_SYNCED_COLUMN, IA_SYNC_HASH_COLUMN
+from column_map import (
+    IA_LAST_SYNCED_COLUMN,
+    IA_SYNC_HASH_COLUMN,
+    IA_WITHDRAWN_COLUMN,
+    WITHDRAWN_COLUMN,
+    ColumnMap,
+)
 from sheet_client import CellUpdate, column_letter
 
 
@@ -70,6 +76,8 @@ class SyncColumns:
 
     ia_sync_hash: int
     ia_last_synced: int
+    # None when the Sheet has no ia_withdrawn column (only allowed without `withdrawn`).
+    ia_withdrawn: int | None = None
 
     def cell(self, column_index: int, row_number: int) -> str:
         return f"{column_letter(column_index)}{row_number}"
@@ -89,7 +97,7 @@ def locate_sync_columns(column_map: ColumnMap) -> SyncColumns:
     indexes: dict[str, int] = {}
     for index, header in enumerate(column_map.headers):
         field_name = column_map.field_names[header]
-        if field_name in SYNC_STATE_COLUMNS and field_name not in indexes:
+        if field_name in (*SYNC_STATE_COLUMNS, IA_WITHDRAWN_COLUMN) and field_name not in indexes:
             indexes[field_name] = index
 
     missing = [name for name in SYNC_STATE_COLUMNS if name not in indexes]
@@ -100,10 +108,19 @@ def locate_sync_columns(column_map: ColumnMap) -> SyncColumns:
             "only the rows that actually changed; add them as header cells (any position, "
             "spelling exactly as shown - far right is fine) before syncing."
         )
+    # Required only beside `withdrawn`: a Sheet without that column never withdraws anything.
+    if WITHDRAWN_COLUMN in column_map.field_names.values() and IA_WITHDRAWN_COLUMN not in indexes:
+        raise MissingSyncColumns(
+            f"the Sheet has a '{WITHDRAWN_COLUMN}' column but no '{IA_WITHDRAWN_COLUMN}' column. "
+            f"`sync-metadata` records in {IA_WITHDRAWN_COLUMN} when it removed an item's files, so "
+            "it knows which way to move each item; add it as a header cell (any position, "
+            "spelling exactly as shown - far right is fine) before syncing."
+        )
 
     return SyncColumns(
         ia_sync_hash=indexes[IA_SYNC_HASH_COLUMN],
         ia_last_synced=indexes[IA_LAST_SYNCED_COLUMN],
+        ia_withdrawn=indexes.get(IA_WITHDRAWN_COLUMN),
     )
 
 
@@ -127,3 +144,15 @@ def stamp_updates(
         updates.append(CellUpdate(columns.cell(columns.ia_sync_hash, row_number), content_hash))
         updates.append(CellUpdate(columns.cell(columns.ia_last_synced, row_number), synced_at))
     return updates
+
+
+def withdrawn_updates(marks: list[tuple[int, str]], columns: SyncColumns) -> list[CellUpdate]:
+    """`ia_withdrawn` cells for rows a run withdrew (a timestamp) or restored ("").
+
+    Raises rather than dropping marks when the column is gone: an unrecorded withdraw repeats every run."""
+    if not marks:
+        return []
+    column = columns.ia_withdrawn
+    if column is None:
+        raise ValueError("withdrawal marks need an ia_withdrawn column")
+    return [CellUpdate(columns.cell(column, row_number), value) for row_number, value in marks]

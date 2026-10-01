@@ -11268,6 +11268,20 @@ def test_sync_from_sheet_pins_a_null_planned_in_its_run_header(tmp_path, monkeyp
     assert _sync_log_entries(tmp_path)[0]["planned"] is None
 
 
+def test_sync_refuses_a_sheet_with_withdrawn_but_no_ia_withdrawn(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    grid = [SYNC_SHEET_HEADER + ["withdrawn"], _synced_grid()[1] + ["yes"]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_withdrawn" in capsys.readouterr().err
+
+
 def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypatch):
     """The failure list is what makes the summary actionable rather than
     merely countable - a run reporting "1 error(s)" and nothing else sends
