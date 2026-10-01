@@ -4475,6 +4475,13 @@ def upload_from_sheet(args) -> int:
     blocked = [result for result in reported if result.verdict is UploadVerdict.INVALID]
     not_ready = [result for result in reported if result.verdict is UploadVerdict.NOT_READY]
     not_ready_broken = [result for result in not_ready if not result.is_valid]
+    # Withdrawn before upload; an uploaded withdrawn row is sync-metadata's to act on.
+    held = [
+        result
+        for result in reported
+        if result.verdict is UploadVerdict.HELD
+        and classify_row(rows[result.row_number - 2]) is not RowState.DONE
+    ]
 
     if blocked:
         print("\n".join(_format_result_lines(blocked)))
@@ -4498,7 +4505,9 @@ def upload_from_sheet(args) -> int:
                 "filename - run `validate` to see them)"
             )
         print(line)
-    if blocked or not_ready:
+    if held:
+        print(f"{_pluralize(len(held), 'row')} held back from upload (withdrawn = yes)")
+    if blocked or not_ready or held:
         print()
 
     # `rows` and `row_results` stay whole here, with `scope` passed alongside:

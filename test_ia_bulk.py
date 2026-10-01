@@ -4522,6 +4522,69 @@ def setup_sheet_upload(
     return recorder, client, registry_path, build_calls
 
 
+WITHDRAWN_UPLOAD_HEADER = SHEET_HEADER + ["withdrawn"]
+
+
+def test_upload_skips_a_withdrawn_row_and_says_so(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [
+        WITHDRAWN_UPLOAD_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "yes"],
+        ["Second photo", "photo2.jpg", "", "", "", "", ""],
+    ]
+    captured = []
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg"), captured=captured
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
+    assert [entry["row"]["file"] for entry in captured] == ["photo2.jpg"]
+    assert client.grid[1][2] == ""
+    assert "1 row held back from upload (withdrawn = yes)" in out.splitlines()
+
+
+def test_a_withdrawn_reserved_row_keeps_its_identifier_and_its_number_stays_spent(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    grid = [
+        WITHDRAWN_UPLOAD_HEADER,
+        ["First photo", "photo1.jpg", "lcps-astoriaphotos-00001", "", "", "", "y"],
+        ["Second photo", "photo2.jpg", "", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002"]
+    assert client.grid[1][2] == "lcps-astoriaphotos-00001"
+    assert client.grid[1][3] == ""
+
+
+def test_a_row_set_back_to_no_uploads_on_the_next_run(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [WITHDRAWN_UPLOAD_HEADER, ["First photo", "photo1.jpg", "", "", "", "", "FALSE"]]
+    recorder, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
+    assert "held back" not in out
+
+
 def test_cmd_upload_default_mode_writes_nothing_to_the_sheet_and_only_uploads_prefixed_identifiers(
     tmp_path, monkeypatch, capsys
 ):
