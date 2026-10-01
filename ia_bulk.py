@@ -72,6 +72,7 @@ from sync_state import (
     sync_hash,
 )
 from utc_time import UTC_TIMESTAMP_FORMAT, utc_now
+from withdrawal import WithdrawnValue, read_withdrawn_cell
 
 # Shared by build_deployment_checks and cmd_setup - one computed root, not two.
 REPO_ROOT = Path(__file__).resolve().parent
@@ -244,13 +245,14 @@ class Readiness(Enum):
 
 
 class UploadVerdict(Enum):
-    """Validity crossed with readiness; NOT_READY beats INVALID (see
-    format_lifecycle_summary). Only READY rows are uploadable, and
+    """Validity crossed with readiness and withdrawal; HELD beats NOT_READY, which beats
+    INVALID (see format_lifecycle_summary). Only READY rows are uploadable, and
     classify_row() still decides which of those `upload` targets (not DONE)."""
 
     READY = "ready"
     INVALID = "invalid"
     NOT_READY = "not_ready"
+    HELD = "held"
 
 
 @dataclass
@@ -264,6 +266,8 @@ class RowValidation:
     # Order matters to callers that group or count by name (Tasks 7-8), not
     # just to this list's own contents.
     missing_fields: list[str] = field(default_factory=list)
+    # The row's `withdrawn` cell says yes: someone decided it must not go out.
+    held: bool = False
 
     @property
     def is_valid(self) -> bool:
@@ -277,6 +281,8 @@ class RowValidation:
 
     @property
     def verdict(self) -> UploadVerdict:
+        if self.held:
+            return UploadVerdict.HELD
         if self.readiness is Readiness.NOT_READY:
             return UploadVerdict.NOT_READY
         return UploadVerdict.READY if self.is_valid else UploadVerdict.INVALID
@@ -363,12 +369,17 @@ def validate_rows(
             column for column in required_for_upload if not (row.get(column) or "").strip()
         ]
 
+        withdrawn, withdrawn_problem = read_withdrawn_cell(row)
+        if withdrawn_problem is not None:
+            errors.append(withdrawn_problem)
+
         results.append(
             RowValidation(
                 row_number=row_number,
                 identifier=identifier,
                 errors=errors,
                 missing_fields=missing_fields,
+                held=withdrawn is WithdrawnValue.YES,
             )
         )
 
@@ -688,6 +699,11 @@ def render_lifecycle_summary(report: LifecycleReport) -> str:
             "assigned an identifier but failed validation - see the errors above; will "
             "not be uploaded until fixed"
         )
+    if counts[(RowState.UNASSIGNED, UploadVerdict.HELD)]:
+        lines.append(
+            f"{_pluralize(counts[(RowState.UNASSIGNED, UploadVerdict.HELD)], 'row')} withdrawn "
+            "before upload - held back from `upload` while 'withdrawn' says yes"
+        )
 
     lines.append(f"{counts[(RowState.DONE, UploadVerdict.READY)]:,} already uploaded")
     if counts[(RowState.DONE, UploadVerdict.NOT_READY)]:
@@ -704,6 +720,11 @@ def render_lifecycle_summary(report: LifecycleReport) -> str:
             f"{_pluralize(counts[(RowState.DONE, UploadVerdict.INVALID)], 'row')} already "
             "uploaded but now fail validation - see the errors above; this needs a human to "
             "look, not an automatic retry"
+        )
+    if counts[(RowState.DONE, UploadVerdict.HELD)]:
+        lines.append(
+            f"{_pluralize(counts[(RowState.DONE, UploadVerdict.HELD)], 'row')} already uploaded "
+            "and marked withdrawn - `sync-metadata` keeps the files and text off Internet Archive"
         )
 
     lines.append(
@@ -723,6 +744,12 @@ def render_lifecycle_summary(report: LifecycleReport) -> str:
         lines.append(
             f"{_pluralize(counts[(RowState.RESERVED, UploadVerdict.INVALID)], 'row')} reserved but "
             "invalid - see the errors above; will NOT retry automatically until fixed"
+        )
+    if counts[(RowState.RESERVED, UploadVerdict.HELD)]:
+        lines.append(
+            f"{_pluralize(counts[(RowState.RESERVED, UploadVerdict.HELD)], 'row')} reserved but "
+            "withdrawn - kept under the identifier already reserved, held back from `upload` "
+            "while 'withdrawn' says yes"
         )
 
     return "\n".join(lines)
@@ -815,7 +842,12 @@ def _format_result_lines(results: list[RowValidation]) -> list[str]:
         # so a row can be "[FAIL] ... (not yet catalogued)" - broken AND
         # uncatalogued - without the marker implying the errors below it are
         # what "not yet catalogued" means.
-        marker = "  (not yet catalogued)" if result.missing_fields else ""
+        if result.held:
+            marker = "  (withdrawn - held back)"
+        elif result.missing_fields:
+            marker = "  (not yet catalogued)"
+        else:
+            marker = ""
         lines.append(f"[{status}] row {result.row_number}{label}{marker}")
         for error in result.errors:
             lines.append(f"    - {error}")

@@ -65,6 +65,7 @@ from ia_bulk import (
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
 from utc_time import format_utc
+from withdrawal import withdrawn_error
 
 
 class FakeResponse:
@@ -1157,6 +1158,8 @@ def _one_row_in(state: str, kind: str) -> tuple[list[dict[str, str]], list[RowVa
             errors=["some validation error"],
             missing_fields=["title"],
         )
+    elif kind == "held":
+        result = RowValidation(row_number=2, identifier=identifier, held=True)
     else:
         raise ValueError(f"_one_row_in: unknown kind {kind!r}")
 
@@ -1229,6 +1232,53 @@ def test_lifecycle_summary_prints_exact_text_for_a_not_ready_done_row():
         "column was cleared after upload; needs a human to look, not an "
         "automatic retry"
     ) in summary.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("state", "line"),
+    [
+        (
+            "unassigned",
+            "1 row withdrawn before upload - held back from `upload` while 'withdrawn' says yes",
+        ),
+        (
+            "reserved",
+            "1 row reserved but withdrawn - kept under the identifier already reserved, held "
+            "back from `upload` while 'withdrawn' says yes",
+        ),
+        (
+            "done",
+            "1 row already uploaded and marked withdrawn - `sync-metadata` keeps the files and "
+            "text off Internet Archive",
+        ),
+    ],
+)
+def test_lifecycle_summary_names_held_rows_under_their_state(state, line):
+    rows, results = _one_row_in(state, "held")
+    summary = format_lifecycle_summary(rows, results)
+
+    assert line in summary.splitlines()
+    assert sum(int(n) for n in re.findall(r"^(\d+) ", summary, re.MULTILINE)) == 1
+
+
+def test_a_held_row_is_marked_withdrawn_in_the_row_report():
+    lines = _format_result_lines([RowValidation(row_number=5, identifier="", held=True)])
+
+    assert lines == ["[PASS] row 5  (withdrawn - held back)"]
+
+
+def test_validate_json_counts_held_rows_in_their_own_bucket():
+    from ia_bulk import build_lifecycle_report, lifecycle_counts_json, ready_to_upload_count
+
+    report = build_lifecycle_report(
+        [{"ia_identifier": "", "ia_uploaded": ""}],
+        [RowValidation(row_number=2, identifier="", held=True)],
+    )
+
+    assert lifecycle_counts_json(report)["unassigned"] == {
+        "ready": 0, "invalid": 0, "not_ready": 0, "held": 1,
+    }
+    assert ready_to_upload_count(report) == 0
 
 
 class _RecordingSheetsValues:
@@ -8395,6 +8445,48 @@ def test_a_broken_filename_produces_exactly_one_error(tmp_path):
     assert results[0].errors[0] == _unresolved_message(tmp_path / "SOP CD1", "Finnis.jpg")
 
 
+def test_a_withdrawn_row_is_held_not_ready_or_invalid(tmp_path):
+    rows = [_sheet_row(withdrawn="yes")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].errors == []
+    assert results[0].held is True
+    assert results[0].verdict is UploadVerdict.HELD
+
+
+def test_held_beats_not_ready_and_invalid(tmp_path):
+    rows = [_sheet_row(withdrawn="TRUE", title="", name="Finnis.jpg")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].missing_fields == ["title"]
+    assert results[0].errors != []
+    assert results[0].verdict is UploadVerdict.HELD
+
+
+def test_a_kept_row_is_not_held(tmp_path):
+    rows = [_sheet_row(withdrawn="FALSE")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].held is False
+    assert results[0].verdict is UploadVerdict.READY
+
+
+def test_a_broken_withdrawn_value_is_a_row_error_and_not_held(tmp_path):
+    rows = [_sheet_row(withdrawn="maybe")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].errors == [withdrawn_error("maybe")]
+    assert results[0].held is False
+    assert results[0].verdict is UploadVerdict.INVALID
+
+
+def test_a_sheet_without_the_withdrawn_column_holds_nothing(tmp_path):
+    rows = [_sheet_row()]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].held is False
+
+
 def test_a_broken_filename_in_an_uncatalogued_row_is_both(tmp_path):
     rows = [_sheet_row(title="", theme="", name="Finnis.jpg")]
     _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
@@ -12965,9 +13057,9 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["valid"] is False
     assert document["rows"] is None
     assert document["counts"] == {
-        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4},
-        "done": {"ready": 1, "invalid": 0, "not_ready": 0},
-        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
+        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4, "held": 0},
+        "done": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
+        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
     }
     # Row 9 is not-ready (blank title) AND broken (unresolvable file), and not_ready
     # beats invalid - it must not also be counted as invalid.
@@ -12975,12 +13067,14 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["rows_with_errors"] == [4, 9, 11]
     assert document["ready_to_upload"] == 4
     assert [batch["value"] for batch in document["batches"]] == ["Fishing", "Logging"]
-    assert document["batches"][0]["counts"]["unassigned"] == {"ready": 1, "invalid": 0, "not_ready": 2}
+    assert document["batches"][0]["counts"]["unassigned"] == {
+        "ready": 1, "invalid": 0, "not_ready": 2, "held": 0,
+    }
     assert document["batches"][0]["ready_to_upload"] == 1
     assert document["batches"][1]["counts"] == {
-        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2},
-        "done": {"ready": 1, "invalid": 0, "not_ready": 0},
-        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
+        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2, "held": 0},
+        "done": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
+        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
     }
     assert document["batches"][1]["ready_to_upload"] == 2
 
