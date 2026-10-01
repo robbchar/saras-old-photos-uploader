@@ -1617,10 +1617,12 @@ def deletable_files(identifier: str, names: list[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class DeletePass:
-    """One pass of deletes over an item: names IA accepted, and "name: why" for each it refused."""
+    """One pass of deletes over an item: names IA accepted, "name: why" for each it refused, and
+    names not attempted (the tile, while a refused content file could rebuild it)."""
 
     deleted: tuple[str, ...] = ()
     refused: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
 
     @property
     def started(self) -> bool:
@@ -1629,7 +1631,7 @@ class DeletePass:
 
 
 class DeleteFailed(RuntimeError):
-    """A file delete IA answered with anything but 204; status_code is read like UploadFailed's."""
+    """A file delete IA answered with a non-2xx status; status_code is read like UploadFailed's."""
 
     def __init__(self, message: str, *, status_code: int | None):
         super().__init__(message)
@@ -1646,7 +1648,8 @@ def _delete_file(identifier: str, file: internetarchive.File) -> None:
             f"delete of '{identifier}/{file.name}' returned an unprepared Request instead of a "
             "Response - this should be unreachable since debug is never passed"
         )
-    if response.status_code != 204:
+    # IA answers 204, but any 2xx is an accepted delete; miscounting one as refused hides it.
+    if not 200 <= response.status_code < 300:
         raise DeleteFailed(
             f"delete of '{identifier}/{file.name}' failed with status {response.status_code}: "
             f"{response.text}",
@@ -1660,7 +1663,12 @@ def _delete_in_order(identifier: str, files: list[internetarchive.File]) -> Dele
     by_name = {file.name: file for file in files}
     deleted: list[str] = []
     refused: list[str] = []
+    skipped: list[str] = []
     for name in deletable_files(identifier, list(by_name)):
+        if name == IA_ITEM_TILE and refused:
+            # IA would rebuild the tile from the refused content file, so it waits for a later pass.
+            skipped.append(name)
+            continue
         try:
             retry_ia_call(
                 functools.partial(_delete_file, identifier, by_name[name]),
@@ -1671,7 +1679,7 @@ def _delete_in_order(identifier: str, files: list[internetarchive.File]) -> Dele
                 refused.append(f"{name}: {format_row_error(exc)}")
                 continue
         deleted.append(name)
-    return DeletePass(deleted=tuple(deleted), refused=tuple(refused))
+    return DeletePass(deleted=tuple(deleted), refused=tuple(refused), skipped=tuple(skipped))
 
 
 def delete_item_files(identifier: str) -> DeletePass:
@@ -5372,20 +5380,17 @@ class SheetSyncRun:
             pushed: list[SyncTarget] = []
             # (row_number, ia_withdrawn value) for rows whose files this chunk moved.
             marks: list[tuple[int, str]] = []
-            refusals = self._refused_deletes(
-                [target for target in chunk if target.action is SyncAction.WITHDRAW]
-            )
 
             for target in chunk:
                 position += 1
                 print(f"[{position}/{total}] {SYNC_PROGRESS_VERBS[target.action]} {target.uploaded_as}")
-                refusal = refusals.get(target.row_number)
-                if refusal is not None:
-                    failures.append(RowFailure(identifier=target.identifier, error=refusal))
-                    print(f"    - {refusal}")
-                    self._log(target, "failure", error=refusal)
-                    continue
                 if target.action is SyncAction.WITHDRAW:
+                    refusal = self._refused_delete(target)
+                    if refusal is not None:
+                        failures.append(RowFailure(identifier=target.identifier, error=refusal))
+                        print(f"    - {refusal}")
+                        self._log(target, "failure", error=refusal)
+                        continue
                     deletes, error = self._withdraw(target)
                     started = deletes is not None and deletes.started
                     if deletes is not None and deletes.deleted:
@@ -5466,6 +5471,8 @@ class SheetSyncRun:
         except Exception as exc:
             return None, f"could not read the item's files, so nothing was deleted: {exc}"
         problems = [f"IA refused to delete {', '.join(deletes.refused)}"] if deletes.refused else []
+        if deletes.skipped:
+            problems.append(f"{', '.join(deletes.skipped)} kept until the content is gone")
         try:
             update_metadata_row(target.metadata, target.uploaded_as)
         except MetadataUnchanged:
@@ -5480,7 +5487,7 @@ class SheetSyncRun:
 
     def _reread(self) -> SheetSnapshot | str:
         """A fresh read with the sync columns where this run found them, or why not (a sentence).
-        Shared by _verified() (before stamping) and _refused_deletes() (before deleting)."""
+        Shared by _verified() (before stamping) and _refused_delete() (before deleting)."""
         try:
             snapshot = read_sheet_snapshot(self.client, self.file_template)
         except MissingWriteBackColumns as exc:
@@ -5515,26 +5522,44 @@ class SheetSyncRun:
             f"'{target.identifier}' - the Sheet was edited while the run was in progress"
         )
 
-    def _refused_deletes(self, withdrawing: list[SyncTarget]) -> dict[int, str]:
-        """row_number -> why its files are NOT deleted, for each withdraw whose row may have moved.
+    def _refused_delete(self, target: SyncTarget) -> str | None:
+        """Why this withdraw's files are NOT deleted, or None to go ahead.
 
-        Checked before deleting, unlike _verified(): a delete cannot be sent again."""
-        if not withdrawing:
-            return {}
+        A fresh read just before each withdraw's deletes, unlike _verified()'s per chunk: a delete
+        cannot be sent again. The row must be unmoved AND its withdrawn cell must still say yes."""
         fresh = self._reread()
         if isinstance(fresh, str):
-            reason = f"{fresh} Nothing was deleted - this row is withdrawn on the next run"
-            return {target.row_number: reason for target in withdrawing}
-        _still_there, moved = split_moved_targets(withdrawing, fresh, reserved_already=True)
-        return {
-            target.row_number: f"{self._moved_reason(target)}. Nothing was deleted - "
-            + (
+            return f"{fresh} Nothing was deleted - this row is withdrawn on the next run"
+        _still_there, moved = split_moved_targets([target], fresh, reserved_already=True)
+        if moved:
+            return f"{self._moved_reason(target)}. Nothing was deleted - " + (
                 "fill in its file_template cells, then run again"
                 if not target.source_fingerprint
                 else "this row is withdrawn on the next run"
             )
-            for target in moved
-        }
+        if not self._still_withdrawn(fresh, target.row_number):
+            return (
+                f"row {target.row_number} ('{target.identifier}') no longer says withdrawn = yes "
+                "- it was changed while the run was in progress. Nothing was deleted - the next "
+                "run follows what the Sheet says then"
+            )
+        return None
+
+    @staticmethod
+    def _still_withdrawn(snapshot: SheetSnapshot, row_number: int) -> bool:
+        """The row's withdrawn cell in this fresh read still parses as yes."""
+        headers = snapshot.column_map.headers
+        index = next(
+            (
+                position
+                for position, header in enumerate(headers)
+                if snapshot.column_map.field_names[header] == WITHDRAWN_COLUMN
+            ),
+            None,
+        )
+        cell = "" if index is None else cell_value(snapshot.grid, row_number, index)
+        value, _problem = read_withdrawn_cell({WITHDRAWN_COLUMN: cell})
+        return value is WithdrawnValue.YES
 
     def _stamp(
         self,
@@ -5557,7 +5582,9 @@ class SheetSyncRun:
         if not stamped and not marks:
             return
 
-        safe = self._verified(pushed)
+        # Rows whose metadata is on IA; a withdraw whose text failed is covered by the WARNING only.
+        landed = {row for row, _digest in stamped}
+        safe = self._verified(pushed, landed)
         safe_rows = {target.row_number for target in safe}
         # A withdraw's mark is a timestamp; a restore's (Task 9) is "" and needs no warning.
         marked_rows = {row for row, value in marks if value}
@@ -5575,9 +5602,8 @@ class SheetSyncRun:
             write_cells_if_any(self.client, updates)
         except Exception as exc:
             print(
-                f"the Sheet stamp write failed: {exc}. The metadata IS on Internet Archive; "
-                f"{_pluralize(len(safe_stamps), 'row')} will simply be sent again next run "
-                "and reported as unchanged. Continuing.",
+                f"the Sheet stamp write failed: {exc}. "
+                f"{self._metadata_landed(len(safe_stamps))}Continuing.",
                 file=sys.stderr,
             )
             self._warn_unmarked([item for row, item in started_on.items() if row in safe_rows])
@@ -5594,7 +5620,17 @@ class SheetSyncRun:
             file=sys.stderr,
         )
 
-    def _verified(self, pushed: list[SyncTarget]) -> list[SyncTarget]:
+    @staticmethod
+    def _metadata_landed(count: int) -> str:
+        """The sentence for rows whose metadata IS on IA but went unstamped; "" when there are none."""
+        if not count:
+            return ""
+        return (
+            f"The metadata IS on Internet Archive; {_pluralize(count, 'row')} will simply be sent "
+            "again next run and reported as unchanged. "
+        )
+
+    def _verified(self, pushed: list[SyncTarget], landed: set[int]) -> list[SyncTarget]:
         """The rows still at the position this run planned for them.
 
         reserved_already=True: this leg checks the fingerprint AND the
@@ -5610,25 +5646,24 @@ class SheetSyncRun:
         and an unstamped row costs one repeat next run - a stack trace in
         place of the run summary costs the operator the log path.
 
-        All five messages below say "the metadata IS on Internet Archive":
-        every one of them fires after the chunk already pushed, so an
-        operator reading any single one must be told the same thing an
-        operator reading any other one is told - an inconsistency here reads
-        as "some of these failures mean the run failed" when none of them
-        do."""
+        Every message below says "the metadata IS on Internet Archive" for
+        the rows in `landed` (their metadata write succeeded), and only for
+        those: an operator must read the same thing from each one. A
+        withdraw whose text write failed is not in `landed`, and _stamp's
+        WARNING covers it."""
         fresh = self._reread()
         if isinstance(fresh, str):
+            sent = sum(1 for target in pushed if target.row_number in landed)
             print(
-                f"{fresh} The metadata IS on Internet Archive; these rows are sent again next "
-                "run and reported as unchanged. Nothing stamped this chunk.",
+                f"{fresh} {self._metadata_landed(sent)}Nothing stamped this chunk.",
                 file=sys.stderr,
             )
             return []
         still_there, moved = split_moved_targets(pushed, fresh, reserved_already=True)
         for target in moved:
+            landed_note = self._metadata_landed(1 if target.row_number in landed else 0)
             print(
-                f"{self._moved_reason(target)}, so it is not stamped this run. The metadata IS "
-                "on Internet Archive; this row is sent again next run and reported as unchanged.",
+                f"{self._moved_reason(target)}, so it is not stamped this run. {landed_note}".rstrip(),
                 file=sys.stderr,
             )
         return still_there

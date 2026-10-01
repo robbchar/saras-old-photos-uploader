@@ -3066,6 +3066,40 @@ def test_deletable_files_keeps_ias_system_files_and_puts_the_tile_last():
     ) == ["a.jpg", "y_meta.xml", "__ia_thumb.jpg"]
 
 
+def test_delete_item_files_counts_any_2xx_as_an_accepted_delete(monkeypatch):
+    """File.delete raises on non-2xx itself; a 200 is a delete IA took, never a refusal."""
+    from ia_bulk import DeletePass, delete_item_files
+
+    files = [_FakeIAFile("photo1.jpg", [], status_code=200)]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    result = delete_item_files("item")
+
+    assert result == DeletePass(deleted=("photo1.jpg",))
+    assert result.started is True
+
+
+def test_a_refused_content_delete_keeps_the_tile_for_a_later_pass(monkeypatch):
+    """IA rebuilds the tile from the surviving original, so deleting it now is pointless."""
+    from ia_bulk import delete_item_files
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    deletes = []
+    files = [
+        _FakeIAFile("__ia_thumb.jpg", deletes),
+        _FakeIAFile("photo1.jpg", deletes, status_code=403),
+        _FakeIAFile("photo1_thumb.jpg", deletes),
+    ]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    result = delete_item_files("item")
+
+    assert [name for name, _cascade, _headers in deletes] == ["photo1.jpg", "photo1_thumb.jpg"]
+    assert result.deleted == ("photo1_thumb.jpg",)
+    assert [refusal.split(":")[0] for refusal in result.refused] == ["photo1.jpg"]
+    assert result.skipped == ("__ia_thumb.jpg",)
+
+
 def test_build_parser_validate_subcommand_defaults():
     parser = build_parser()
     args = parser.parse_args(["validate", "--project", "astoriaphotos"])
@@ -10136,6 +10170,108 @@ def test_push_outcome_counts_each_row_once():
     )
 
     assert outcome.pushed == 4
+
+
+def test_a_withdraw_unticked_after_the_read_deletes_nothing(tmp_path, monkeypatch, capsys):
+    """A mistaken withdraw un-ticked mid-run must stop before its deletes, not after."""
+    from ia_bulk import cmd_sync_metadata
+
+    def untick(grid, read_count):
+        if read_count == 2:
+            grid[1][8] = "no"
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, before_read=untick
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert calls == []
+    assert client.grid[1][9] == ""
+    assert "no longer says withdrawn = yes" in capsys.readouterr().out
+
+
+def test_each_withdraw_rereads_the_sheet_just_before_its_deletes(tmp_path, monkeypatch):
+    """Read 2 checks row 1; read 3, after row 1's deletes, checks row 2."""
+    from ia_bulk import cmd_sync_metadata
+
+    def untick_row_two(grid, read_count):
+        if read_count == 3:
+            grid[2][8] = ""
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1), _withdraw_row(2)], calls,
+        before_read=untick_row_two,
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert [call[:2] for call in calls] == [("delete", WITHDRAWN_ITEM), ("metadata", WITHDRAWN_ITEM)]
+    assert client.grid[1][9] != ""
+    assert client.grid[2][9] == ""
+
+
+def test_an_update_only_run_reads_the_sheet_no_more_than_before(tmp_path, monkeypatch):
+    """The initial read and one stamp verify; the pre-delete read is for withdraws only."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no")], calls
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["metadata"]
+    assert client.read_count == 2
+
+
+def test_a_started_withdraw_whose_text_and_stamp_failed_is_not_called_on_ia(
+    tmp_path, monkeypatch, capsys
+):
+    """Its text never landed: the WARNING covers it, and nothing claims "0 rows" or the metadata."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], [], fail={"metadata"}
+    )
+    monkeypatch.setattr(
+        "ia_bulk.write_cells_if_any",
+        lambda client, updates: (_ for _ in ()).throw(RuntimeError("quota")),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    err = capsys.readouterr().err
+    assert "the Sheet stamp write failed: quota" in err
+    assert "IS on Internet Archive" not in err
+    assert "0 rows" not in err
+    assert f"deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
+
+
+def test_a_started_withdraw_whose_text_failed_and_stamp_reread_failed_is_not_called_on_ia(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    def fail_the_stamp_reread(grid, read_count):
+        if read_count == 3:
+            raise RuntimeError("Sheets API returned 503")
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], [], fail={"metadata"},
+        before_read=fail_the_stamp_reread,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    err = capsys.readouterr().err
+    assert "could not be re-read" in err
+    assert "IS on Internet Archive" not in err
+    assert f"deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
