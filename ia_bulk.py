@@ -37,8 +37,10 @@ from column_map import (
     ColumnMap,
     FileResolutionError,
     IA_SYNC_HASH_COLUMN,
+    IA_WITHDRAWN_COLUMN,
     RESERVED_FIELDS,
     TemplateError,
+    WITHDRAWN_COLUMN,
     candidate_path,
     check_column_map,
     check_file_template,
@@ -56,6 +58,8 @@ from ia_fields import (
 )
 from identifiers import RowState, classify_row, next_identifiers, parse_identifier
 from project_config import (
+    DEFAULT_WITHDRAWN_DESCRIPTION,
+    DEFAULT_WITHDRAWN_TITLE,
     ConfigError,
     ProjectConfig,
     is_placeholder_sheet_id,
@@ -72,7 +76,7 @@ from sync_state import (
     sync_hash,
 )
 from utc_time import UTC_TIMESTAMP_FORMAT, utc_now
-from withdrawal import WithdrawnValue, read_withdrawn_cell
+from withdrawal import SyncAction, WithdrawnValue, read_withdrawn_cell, sync_action
 
 # Shared by build_deployment_checks and cmd_setup - one computed root, not two.
 REPO_ROOT = Path(__file__).resolve().parent
@@ -4654,6 +4658,12 @@ class SyncTarget:
     # uploaded under an earlier run, so it is never a number this run minted;
     # the guard is always called with reserved_already=True.
     newly_minted: bool = False
+    # Which way this push moves the item's files; UPDATE is metadata only.
+    action: SyncAction = SyncAction.UPDATE
+    # A restore's original, resolved under files_dir by attach_restore_files().
+    restore_file: str = ""
+    # Withdrawn and stamped: every real run re-checks the item's files (recheck_withdrawals).
+    recheck: bool = False
 
 
 @dataclass(frozen=True)
@@ -4999,12 +5009,44 @@ def mirror_run_to_log_tab(
     log_tab.mirror_run(client.append_only_tab(tab), record, run=log_path.name, headline=headline)
 
 
+def item_is_rows_own(uploaded_as: str, identifier: str, live: bool) -> bool:
+    """Whether ia_url names this row's own item: the identifier itself when live, or
+    zztest-<stamp>-<identifier> for some stamp in test mode."""
+    if live:
+        return uploaded_as == identifier
+    if not uploaded_as.startswith(TEST_IDENTIFIER_PREFIX):
+        return False
+    stamp, separator, rest = uploaded_as[len(TEST_IDENTIFIER_PREFIX):].partition("-")
+    return bool(stamp) and bool(separator) and rest == identifier
+
+
+# Replaced on a withdrawn item rather than removed, so its page says why it is empty.
+WITHDRAWN_REPLACED_FIELDS = ("title", "description")
+# Set by `upload` from no Sheet column of that name, so a withdraw removes them by name.
+UPLOAD_GENERATED_FIELDS = ("identifier-bib", "date")
+
+
+def withdrawn_metadata(metadata: dict[str, str], title: str, description: str) -> dict[str, str]:
+    """A withdrawn row's payload: the notice as title and description, REMOVE_TAG for every
+    other field the row sends. Never identifier, collection or mediatype."""
+    removed = [
+        key
+        for key in metadata
+        if key not in WITHDRAWN_REPLACED_FIELDS and key not in PIPELINE_OWNED_FIELDS
+    ]
+    cleared = dict.fromkeys([*removed, *UPLOAD_GENERATED_FIELDS], REMOVE_TAG_SENTINEL)
+    return cleared | {"title": title, "description": description}
+
+
 def plan_sync_targets(
     rows: list[dict[str, str]],
     column_map: ColumnMap,
     live: bool,
     project_id: str,
     file_template: str,
+    *,
+    withdrawn_title: str = DEFAULT_WITHDRAWN_TITLE,
+    withdrawn_description: str = DEFAULT_WITHDRAWN_DESCRIPTION,
 ) -> tuple[list[SyncTarget], list[RowValidation]]:
     """Decides which rows this run will correct, and what it will send.
 
@@ -5034,13 +5076,18 @@ def plan_sync_targets(
 
     Returns (targets, problems). A DONE row this run cannot safely target is a
     problem rather than a silent skip: the operator edited it expecting the
-    edit to reach the site."""
+    edit to reach the site.
+
+    A row whose `withdrawn` cell says yes sends withdrawn_metadata() instead, and that is
+    what its hash covers. Without a `withdrawn` column nothing withdraws or restores."""
     fields = sheet_metadata_fields(column_map, file_template)
     # Part of every push, and so of the hash: rows synced while these still shipped push once more.
     location_removals = dict.fromkeys(sorted(file_location_fields(file_template)), REMOVE_TAG_SENTINEL)
     # Raw cells: sync never calls resolve_sheet_files(), so row['file'] has
     # not been rewritten and these compare correctly against a fresh read.
     fingerprints = sheet_row_fingerprints(rows, file_template)
+    # Deleting the column must not restore every stamped item.
+    withdrawal_tracked = WITHDRAWN_COLUMN in column_map.field_names.values()
     targets: list[SyncTarget] = []
     problems: list[RowValidation] = []
 
@@ -5114,7 +5161,35 @@ def plan_sync_targets(
             )
             continue
 
+        withdrawn, withdrawn_problem = read_withdrawn_cell(row)
+        if withdrawn_problem is not None:
+            problems.append(
+                RowValidation(row_number=row_number, identifier=identifier, errors=[withdrawn_problem])
+            )
+            continue
+        files_removed = withdrawal_tracked and bool((row.get(IA_WITHDRAWN_COLUMN) or "").strip())
+        action = sync_action(withdrawn, files_removed)
+        recheck = withdrawn is WithdrawnValue.YES and files_removed
+        # Files are deleted only from this row's own item, never from what a pasted ia_url names.
+        if (action is SyncAction.WITHDRAW or recheck) and not item_is_rows_own(
+            uploaded_as, identifier, live
+        ):
+            problems.append(
+                RowValidation(
+                    row_number=row_number,
+                    identifier=identifier,
+                    errors=[
+                        f"'{IA_URL_COLUMN}' names item '{uploaded_as}', which is not this row's "
+                        f"own item '{identifier}' - refusing to delete files from it; nothing was "
+                        f"deleted. Fix '{IA_URL_COLUMN}' or '{IA_IDENTIFIER_COLUMN}' first"
+                    ],
+                )
+            )
+            continue
+
         metadata = {key: value for key, value in row.items() if key in fields} | location_removals
+        if withdrawn is WithdrawnValue.YES:
+            metadata = withdrawn_metadata(metadata, withdrawn_title, withdrawn_description)
         targets.append(
             SyncTarget(
                 row_number=row_number,
@@ -5124,6 +5199,8 @@ def plan_sync_targets(
                 content_hash=sync_hash(metadata_to_send(metadata)),
                 stored_hash=(row.get(IA_SYNC_HASH_COLUMN) or "").strip(),
                 source_fingerprint=fingerprints.get(row_number, ""),
+                action=action,
+                recheck=recheck,
             )
         )
 
@@ -5145,7 +5222,9 @@ def split_unchanged(targets: list[SyncTarget]) -> tuple[list[SyncTarget], list[S
     to_push: list[SyncTarget] = []
     already_synced: list[SyncTarget] = []
     for target in targets:
-        (already_synced if target.content_hash == target.stored_hash else to_push).append(target)
+        # A withdraw or restore goes whatever the hashes say: the column moved, not the content.
+        in_sync = target.action is SyncAction.UPDATE and target.content_hash == target.stored_hash
+        (already_synced if in_sync else to_push).append(target)
     return to_push, already_synced
 
 
@@ -5459,7 +5538,13 @@ def sync_from_sheet(args) -> int:
     sync_columns = locate_sync_columns(column_map)
 
     targets, problems = plan_sync_targets(
-        rows, column_map, live, config.project_id, config.file_template
+        rows,
+        column_map,
+        live,
+        config.project_id,
+        config.file_template,
+        withdrawn_title=config.withdrawn_title,
+        withdrawn_description=config.withdrawn_description,
     )
 
     if problems:

@@ -65,7 +65,7 @@ from ia_bulk import (
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
 from utc_time import format_utc
-from withdrawal import withdrawn_error
+from withdrawal import SyncAction, withdrawn_error
 
 
 class FakeResponse:
@@ -9536,6 +9536,253 @@ def test_split_unchanged_preserves_order():
 
     assert [t.row_number for t in to_push] == [2, 4]
     assert [t.row_number for t in already] == [3]
+
+
+# A..H as SYNC_SHEET_HEADER, then I=withdrawn, J=ia_withdrawn.
+WITHDRAW_SYNC_HEADER = SYNC_SHEET_HEADER + ["withdrawn", "ia_withdrawn"]
+
+
+def _withdraw_row(number=1, withdrawn="yes", ia_withdrawn="", stored_hash="", live=False):
+    """One uploaded row; `live` names the real item in ia_url instead of the zztest one."""
+    identifier = f"lcps-astoriaphotos-{number:05d}"
+    item = identifier if live else f"zztest-{SYNC_STAMP}-{identifier}"
+    return [
+        f"Photo {number}", f"photo{number}.jpg", identifier, "2026-08-23T16:13:31Z",
+        f"https://archive.org/details/{item}", f"photo{number}.jpg",
+        stored_hash, "", withdrawn, ia_withdrawn,
+    ]
+
+
+def _plan_withdraw_rows(rows, live=False, **withdrawn_text):
+    from ia_bulk import plan_sync_targets
+
+    column_map, parsed = grid_to_rows([WITHDRAW_SYNC_HEADER] + rows)
+    return plan_sync_targets(
+        parsed, column_map, live=live, project_id="astoriaphotos", file_template="{file}",
+        **withdrawn_text,
+    )
+
+
+WITHDRAWN_PAYLOAD = {
+    "title": "Withdrawn",
+    "description": "This item has been withdrawn by the Lower Columbia Preservation Society.",
+    "identifier-bib": "REMOVE_TAG",
+    "date": "REMOVE_TAG",
+}
+
+
+def test_a_withdrawn_row_not_yet_stamped_plans_a_withdraw():
+    targets, problems = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert problems == []
+    assert targets[0].action is SyncAction.WITHDRAW
+
+
+def test_a_kept_row_with_its_files_removed_plans_a_restore():
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="", ia_withdrawn="2026-09-30T10:00:00Z")])
+
+    assert targets[0].action is SyncAction.RESTORE
+
+
+def test_rows_that_agree_with_ia_withdrawn_plan_ordinary_updates():
+    targets, _ = _plan_withdraw_rows([
+        _withdraw_row(1, withdrawn="yes", ia_withdrawn="2026-09-30T10:00:00Z"),
+        _withdraw_row(2, withdrawn="no"),
+    ])
+
+    assert [target.action for target in targets] == [SyncAction.UPDATE, SyncAction.UPDATE]
+
+
+def test_a_withdrawn_row_sends_the_notice_and_removes_everything_else():
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert targets[0].metadata == {
+        "title": "Withdrawn",
+        "description": "This item has been withdrawn by the Lower Columbia Preservation Society.",
+        "identifier-bib": "REMOVE_TAG",
+        "date": "REMOVE_TAG",
+    }
+
+
+def test_the_withdrawn_wording_comes_from_the_caller():
+    targets, _ = _plan_withdraw_rows(
+        [_withdraw_row(withdrawn="yes")],
+        withdrawn_title="Removed",
+        withdrawn_description="Taken down on request.",
+    )
+
+    assert targets[0].metadata["title"] == "Removed"
+    assert targets[0].metadata["description"] == "Taken down on request."
+
+
+def test_withdrawn_metadata_replaces_title_and_description_and_removes_every_other_field():
+    from ia_bulk import withdrawn_metadata
+
+    sent = withdrawn_metadata(
+        {
+            "title": "Pier 39",
+            "description": "",
+            "subject": "Docks",
+            "date": "1908",
+            "folder_on_lacie_drive": "REMOVE_TAG",
+        },
+        "Withdrawn",
+        "Gone.",
+    )
+
+    assert sent == {
+        "title": "Withdrawn",
+        "description": "Gone.",
+        "subject": "REMOVE_TAG",
+        "date": "REMOVE_TAG",
+        "folder_on_lacie_drive": "REMOVE_TAG",
+        "identifier-bib": "REMOVE_TAG",
+    }
+
+
+def test_withdrawn_metadata_never_names_identifier_collection_or_mediatype():
+    from ia_bulk import withdrawn_metadata
+
+    sent = withdrawn_metadata(
+        {"identifier": "x", "collection": "y", "mediatype": "image", "title": "t"}, "W", "D"
+    )
+
+    assert not {"identifier", "collection", "mediatype"} & set(sent)
+
+
+def test_a_withdrawn_rows_hash_is_of_the_withdrawn_notice():
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert targets[0].content_hash == sync_hash(metadata_to_send(WITHDRAWN_PAYLOAD))
+
+
+def test_editing_another_cell_of_a_withdrawn_row_changes_nothing_it_sends():
+    """Edits wait for a restore: the hash input is the notice, not the row."""
+    stamped = "2026-09-30T10:00:00Z"
+    before, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes", ia_withdrawn=stamped)])
+    edited = _withdraw_row(withdrawn="yes", ia_withdrawn=stamped)
+    edited[0] = "A corrected title"
+    after, _ = _plan_withdraw_rows([edited])
+
+    assert after[0].content_hash == before[0].content_hash
+
+
+def test_flipping_the_column_pushes_even_with_a_matching_hash():
+    from ia_bulk import split_unchanged
+
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+    stale = dataclasses.replace(targets[0], stored_hash=targets[0].content_hash)
+
+    to_push, already = split_unchanged([stale])
+
+    assert to_push == [stale]
+    assert already == []
+
+
+def test_a_stamped_withdrawn_row_is_already_in_sync():
+    from ia_bulk import split_unchanged
+
+    targets, _ = _plan_withdraw_rows(
+        [_withdraw_row(withdrawn="yes", ia_withdrawn="2026-09-30T10:00:00Z")]
+    )
+    synced = dataclasses.replace(targets[0], stored_hash=targets[0].content_hash)
+
+    to_push, already = split_unchanged([synced])
+
+    assert to_push == []
+    assert already == [synced]
+
+
+def test_a_broken_withdrawn_value_is_a_problem_and_never_a_target():
+    targets, problems = _plan_withdraw_rows([_withdraw_row(withdrawn="maybe")])
+
+    assert targets == []
+    assert problems[0].errors == [withdrawn_error("maybe")]
+
+
+def test_without_a_withdrawn_column_a_leftover_stamp_restores_nothing():
+    from ia_bulk import plan_sync_targets
+
+    column_map, parsed = grid_to_rows(
+        [SYNC_SHEET_HEADER + ["ia_withdrawn"], _synced_grid()[1] + ["2026-09-30T10:00:00Z"]]
+    )
+    targets, _ = plan_sync_targets(
+        parsed, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+    assert targets[0].action is SyncAction.UPDATE
+    assert targets[0].recheck is False
+
+
+def test_only_a_withdrawn_stamped_row_is_rechecked():
+    stamped = "2026-09-30T10:00:00Z"
+    targets, _ = _plan_withdraw_rows([
+        _withdraw_row(1, withdrawn="yes", ia_withdrawn=stamped),
+        _withdraw_row(2, withdrawn="yes"),
+        _withdraw_row(3, withdrawn="no", ia_withdrawn=stamped),
+        _withdraw_row(4, withdrawn="no"),
+    ])
+
+    assert [target.recheck for target in targets] == [True, False, False, False]
+
+
+def _pointing_at(row, item):
+    """The row with its ia_url naming `item` instead of its own item."""
+    row[4] = f"https://archive.org/details/{item}"
+    return row
+
+
+def test_a_live_withdraw_of_an_item_that_is_not_the_rows_own_is_refused():
+    row = _pointing_at(_withdraw_row(withdrawn="yes", live=True), "lcps-astoriaphotos-00002")
+    targets, problems = _plan_withdraw_rows([row], live=True)
+
+    assert targets == []
+    assert "not this row's own item 'lcps-astoriaphotos-00001'" in problems[0].errors[0]
+
+
+def test_a_test_mode_withdraw_of_its_own_item_under_any_stamp_is_accepted():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="yes"), "zztest-20990101t000000-lcps-astoriaphotos-00001"
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert problems == []
+    assert targets[0].action is SyncAction.WITHDRAW
+
+
+def test_a_test_mode_withdraw_of_another_rows_item_is_refused():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="yes"), f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert targets == []
+    assert "refusing to delete files from it" in problems[0].errors[0]
+
+
+def test_a_recheck_of_an_item_that_is_not_the_rows_own_is_refused():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="yes", ia_withdrawn="2026-09-30T10:00:00Z"),
+        f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert targets == []
+    assert len(problems) == 1
+
+
+def test_an_ordinary_update_is_not_held_to_the_delete_identity_rule():
+    """The rule guards deletes only; an ordinary push keeps today's ia_url behavior."""
+    row = _pointing_at(
+        _withdraw_row(withdrawn="no"), f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert problems == []
+    assert targets[0].action is SyncAction.UPDATE
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
