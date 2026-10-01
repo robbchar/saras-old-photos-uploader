@@ -123,6 +123,8 @@ BROKEN_REGISTRIES = {
         "projects": {"p\n": VALID_REGISTRY["projects"]["p"]},
     },
     "trailing newline in required_for_upload": _registry_with(required_for_upload=["title\n"]),
+    "blank withdrawn_title": _registry_with(withdrawn_title="   "),
+    "non-string withdrawn_description": _registry_with(withdrawn_description=7),
 }
 
 
@@ -152,6 +154,7 @@ def test_schema_rejects_a_mediatype_outside_ia_mediatypes():
         {"batch_column": "theme"},
         {"live_sheet_tab": "Live", "test_sheet_tab": "Test"},
         {"upload_log_tab": "", "sync_log_tab": "Sync Log"},
+        {"withdrawn_title": "Removed", "withdrawn_description": "Taken down on request."},
     ],
     ids=lambda keys: ",".join(keys),
 )

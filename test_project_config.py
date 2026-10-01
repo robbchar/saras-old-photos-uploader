@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from project_config import (
+    DEFAULT_WITHDRAWN_DESCRIPTION,
+    DEFAULT_WITHDRAWN_TITLE,
     REQUIRED_KEYS,
     TEST_COLLECTION,
     ConfigError,
@@ -566,3 +568,29 @@ def test_a_log_tab_may_not_collide_with_a_per_document_metadata_tab(metadata_key
     assert "upload_log_tab" in message
     assert "Photographs" in message
     assert metadata_key in message
+
+
+def test_withdrawn_text_defaults_to_the_approved_wording():
+    config = load_project_config(_registry(), "p")
+
+    assert config.withdrawn_title == DEFAULT_WITHDRAWN_TITLE == "Withdrawn"
+    assert config.withdrawn_description == DEFAULT_WITHDRAWN_DESCRIPTION == (
+        "This item has been withdrawn by the Lower Columbia Preservation Society."
+    )
+
+
+def test_withdrawn_text_can_be_set_per_project():
+    config = load_project_config(
+        _registry(withdrawn_title=" Removed ", withdrawn_description="Taken down on request."),
+        "p",
+    )
+
+    assert config.withdrawn_title == "Removed"
+    assert config.withdrawn_description == "Taken down on request."
+
+
+@pytest.mark.parametrize("key", ["withdrawn_title", "withdrawn_description"])
+@pytest.mark.parametrize("value", ["", "   ", 5, ["Withdrawn"]])
+def test_withdrawn_text_must_be_non_blank_text(key, value):
+    with pytest.raises(ConfigError, match=key):
+        load_project_config(_registry(**{key: value}), "p")

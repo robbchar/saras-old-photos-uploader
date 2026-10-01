@@ -32,6 +32,8 @@ OPTIONAL_KEYS = (
     "sync_log_tab",
     "batch_column",
     "photo_extensions",
+    "withdrawn_title",
+    "withdrawn_description",
 )
 
 # Which files on the drive count as photographs. Optional with a default,
@@ -43,6 +45,12 @@ DEFAULT_PHOTO_EXTENSIONS = (".jpg", ".jpeg", ".tif", ".tiff", ".png")
 
 # Internet Archive's sandbox; every test-mode run uploads here.
 TEST_COLLECTION = "test_collection"
+
+# What a withdrawn item's title and description become on Internet Archive.
+DEFAULT_WITHDRAWN_TITLE = "Withdrawn"
+DEFAULT_WITHDRAWN_DESCRIPTION = (
+    "This item has been withdrawn by the Lower Columbia Preservation Society."
+)
 
 # Sheet ID marker: not yet set in projects_registry.json; required (never live) in e2e_fixtures/registry.json.
 _PLACEHOLDER_SHEET_ID_PREFIX = "REPLACE_WITH"
@@ -135,6 +143,9 @@ class ProjectConfig:
     # SHEET-PROTOCOL.md, "The metadata tab may be named per document".
     live_sheet_tab: str | None = None
     test_sheet_tab: str | None = None
+    # Replace a withdrawn item's title and description; see docs/decisions/WITHDRAWAL.md.
+    withdrawn_title: str = DEFAULT_WITHDRAWN_TITLE
+    withdrawn_description: str = DEFAULT_WITHDRAWN_DESCRIPTION
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
@@ -213,6 +224,19 @@ def registry_id_error(registry: dict) -> str | None:
             message += " (hyphens separate an identifier's parts)"
         return message
     return None
+
+
+def _withdrawn_text(block: dict, key: str, default: str, project_id: str) -> str:
+    """An optional withdrawn_* key: absent means the default; present must be non-blank text."""
+    value = block.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            f"project '{project_id}': {key} must be non-blank text, got {value!r}. Remove the "
+            "key to use the default wording."
+        )
+    return value.strip()
 
 
 def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
@@ -403,4 +427,8 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
         required_for_upload=tuple(required_for_upload),
         photo_extensions=photo_extensions,
         batch_column=batch_column,
+        withdrawn_title=_withdrawn_text(block, "withdrawn_title", DEFAULT_WITHDRAWN_TITLE, project_id),
+        withdrawn_description=_withdrawn_text(
+            block, "withdrawn_description", DEFAULT_WITHDRAWN_DESCRIPTION, project_id
+        ),
     )
