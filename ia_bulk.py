@@ -74,6 +74,7 @@ from sync_state import (
     locate_sync_columns,
     stamp_updates,
     sync_hash,
+    withdrawn_updates,
 )
 from utc_time import UTC_TIMESTAMP_FORMAT, utc_now
 from withdrawal import SyncAction, WithdrawnValue, read_withdrawn_cell, sync_action
@@ -1596,6 +1597,88 @@ def update_metadata_row(row: dict, target_identifier: str) -> None:
             )
 
     retry_ia_call(send, f"metadata update of '{target_identifier}'")
+
+
+# IA's own record of an item: IA refuses to delete these, and none holds a photograph.
+IA_SYSTEM_FILE_SUFFIXES = (
+    "_meta.xml", "_files.xml", "_meta.sqlite", "_archive.torrent", "_reviews.xml",
+)
+# IA rebuilds the item tile from any image still in the item, so it is deleted last.
+IA_ITEM_TILE = "__ia_thumb.jpg"
+# Sent as "0" on every delete: no history/ backup of a withdrawn file, whatever the default.
+NO_BACKUP_HEADER = "x-archive-keep-old-version"
+
+
+def deletable_files(identifier: str, names: list[str]) -> list[str]:
+    """Every file a withdraw deletes, in order: content first, the tile last; never IA's system files."""
+    system = {f"{identifier}{suffix}" for suffix in IA_SYSTEM_FILE_SUFFIXES}
+    return sorted((name for name in names if name not in system), key=lambda name: name == IA_ITEM_TILE)
+
+
+@dataclass(frozen=True)
+class DeletePass:
+    """One pass of deletes over an item: names IA accepted, and "name: why" for each it refused."""
+
+    deleted: tuple[str, ...] = ()
+    refused: tuple[str, ...] = ()
+
+    @property
+    def started(self) -> bool:
+        """IA accepted a delete, or nothing was left to delete."""
+        return bool(self.deleted) or not self.refused
+
+
+class DeleteFailed(RuntimeError):
+    """A file delete IA answered with anything but 204; status_code is read like UploadFailed's."""
+
+    def __init__(self, message: str, *, status_code: int | None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _delete_file(identifier: str, file: internetarchive.File) -> None:
+    """The retried unit: one file, with IA's cascade so its derivatives go too."""
+    # A fresh dict per call: File.delete adds its cascade header into the one it is given.
+    response = file.delete(cascade_delete=True, headers={NO_BACKUP_HEADER: "0"})
+    # See update_metadata_row(): a Request comes back only with debug=True, never passed here.
+    if isinstance(response, requests.Request):
+        raise RuntimeError(
+            f"delete of '{identifier}/{file.name}' returned an unprepared Request instead of a "
+            "Response - this should be unreachable since debug is never passed"
+        )
+    if response.status_code != 204:
+        raise DeleteFailed(
+            f"delete of '{identifier}/{file.name}' failed with status {response.status_code}: "
+            f"{response.text}",
+            status_code=response.status_code,
+        )
+
+
+def _delete_in_order(identifier: str, files: list[internetarchive.File]) -> DeletePass:
+    """Deletes each deletable file in deletable_files() order. A 404 counts as gone; any other
+    failure is named and the pass carries on, so one refusal never leaves the rest in place."""
+    by_name = {file.name: file for file in files}
+    deleted: list[str] = []
+    refused: list[str] = []
+    for name in deletable_files(identifier, list(by_name)):
+        try:
+            retry_ia_call(
+                functools.partial(_delete_file, identifier, by_name[name]),
+                f"delete of '{identifier}/{name}'",
+            )
+        except Exception as exc:
+            if parsed_status_code(exc) != 404:
+                refused.append(f"{name}: {format_row_error(exc)}")
+                continue
+        deleted.append(name)
+    return DeletePass(deleted=tuple(deleted), refused=tuple(refused))
+
+
+def delete_item_files(identifier: str) -> DeletePass:
+    """A withdraw's deletes over the item's current file list. Raises only when that list
+    cannot be read, in which case nothing was deleted."""
+    item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    return _delete_in_order(identifier, list(item.get_files()))
 
 
 def build_sheets_service(key_path: Path):
@@ -4682,6 +4765,18 @@ class RowFailure:
         return {"identifier": self.identifier, "error": self.error}
 
 
+@dataclass(frozen=True)
+class RowAction:
+    """One item a sync withdrew, restored or re-checked, named in the log tab like a RowFailure."""
+
+    identifier: str
+    uploaded_as: str
+    detail: str
+
+    def as_record(self) -> dict[str, str]:
+        return {"identifier": self.identifier, "detail": self.detail}
+
+
 def skipped_rows(problems: list[RowValidation]) -> list[RowFailure]:
     """The rows a run declined to send, as summary entries.
 
@@ -4707,6 +4802,11 @@ class PushOutcome:
     succeeded: int = 0
     unchanged: int = 0
     failures: tuple[RowFailure, ...] = ()
+    # Named, and not in `succeeded`, which counts metadata updates only.
+    withdrawn: tuple[RowAction, ...] = ()
+    restored: tuple[RowAction, ...] = ()
+    # Already counted in `failures`; listed only so the darkening hand-off still names them.
+    withdraw_started: tuple[RowAction, ...] = ()
 
     @property
     def failed(self) -> int:
@@ -4714,7 +4814,9 @@ class PushOutcome:
 
     @property
     def pushed(self) -> int:
-        return self.succeeded + self.unchanged + self.failed
+        return (
+            self.succeeded + self.unchanged + self.failed + len(self.withdrawn) + len(self.restored)
+        )
 
 
 @dataclass(frozen=True)
@@ -5228,6 +5330,13 @@ def split_unchanged(targets: list[SyncTarget]) -> tuple[list[SyncTarget], list[S
     return to_push, already_synced
 
 
+SYNC_PROGRESS_VERBS = {
+    SyncAction.UPDATE: "updating metadata for",
+    SyncAction.WITHDRAW: "withdrawing",
+    SyncAction.RESTORE: "restoring",
+}
+
+
 @dataclass(frozen=True)
 class SheetSyncRun:
     """The push -> stamp loop, chunked. Mirrors SheetUploadRun, which does
@@ -5253,18 +5362,68 @@ class SheetSyncRun:
         succeeded = 0
         unchanged = 0
         failures: list[RowFailure] = []
+        withdrawn: list[RowAction] = []
+        withdraw_started: list[RowAction] = []
         total = len(targets)
         position = 0
 
         for chunk in chunk_rows(targets, self.chunk_size):
             stamped: list[tuple[int, str]] = []
             pushed: list[SyncTarget] = []
+            # (row_number, ia_withdrawn value) for rows whose files this chunk moved.
+            marks: list[tuple[int, str]] = []
+            refusals = self._refused_deletes(
+                [target for target in chunk if target.action is SyncAction.WITHDRAW]
+            )
 
             for target in chunk:
                 position += 1
-                print(f"[{position}/{total}] updating metadata for {target.uploaded_as}")
+                print(f"[{position}/{total}] {SYNC_PROGRESS_VERBS[target.action]} {target.uploaded_as}")
+                refusal = refusals.get(target.row_number)
+                if refusal is not None:
+                    failures.append(RowFailure(identifier=target.identifier, error=refusal))
+                    print(f"    - {refusal}")
+                    self._log(target, "failure", error=refusal)
+                    continue
+                if target.action is SyncAction.WITHDRAW:
+                    deletes, error = self._withdraw(target)
+                    started = deletes is not None and deletes.started
+                    if deletes is not None and deletes.deleted:
+                        print(f"    - Internet Archive accepted deletes: {', '.join(deletes.deleted)}")
+                    if started:
+                        # Withdrawal started: marked now, even if the text write failed.
+                        pushed.append(target)
+                        marks.append((target.row_number, utc_timestamp()))
+                    if error is None:
+                        stamped.append((target.row_number, target.content_hash))
+                        withdrawn.append(
+                            RowAction(
+                                identifier=target.identifier,
+                                uploaded_as=target.uploaded_as,
+                                detail=f"files deleted and text replaced on {target.uploaded_as}",
+                            )
+                        )
+                        self._log(target, "withdrawn")
+                        continue
+                    if started:
+                        # Counted once, as a failure; the next run finishes it.
+                        error = (
+                            f"withdrawal started on {target.uploaded_as} but is incomplete "
+                            f"({error}); the next run finishes it"
+                        )
+                        withdraw_started.append(
+                            RowAction(
+                                identifier=target.identifier,
+                                uploaded_as=target.uploaded_as,
+                                detail=error,
+                            )
+                        )
+                    failures.append(RowFailure(identifier=target.identifier, error=error))
+                    print(f"    - {_elide(' '.join(error.split()), CONSOLE_ERROR_WIDTH)}")
+                    self._log(target, "failure", error=error)
+                    continue
                 try:
-                    update_metadata_row(target.metadata, target.uploaded_as)
+                    self._send(target)
                 except MetadataUnchanged:
                     # Internet Archive saying "no changes to _meta.xml" means
                     # the item already matches the Sheet. That is a successful
@@ -5283,16 +5442,106 @@ class SheetSyncRun:
                     print(f"    - {format_row_error(exc)}")
                     self._log(target, "failure", error=str(exc), http_status=parsed_status_code(exc))
                 else:
-                    succeeded += 1
                     stamped.append((target.row_number, target.content_hash))
                     pushed.append(target)
+                    succeeded += 1
                     self._log(target, "success")
 
-            self._stamp(stamped, pushed)
+            self._stamp(stamped, pushed, marks)
 
-        return PushOutcome(succeeded=succeeded, unchanged=unchanged, failures=tuple(failures))
+        return PushOutcome(
+            succeeded=succeeded,
+            unchanged=unchanged,
+            failures=tuple(failures),
+            withdrawn=tuple(withdrawn),
+            withdraw_started=tuple(withdraw_started),
+        )
 
-    def _stamp(self, stamped: list[tuple[int, str]], pushed: list[SyncTarget]) -> None:
+    def _withdraw(self, target: SyncTarget) -> tuple[DeletePass | None, str | None]:
+        """Deletes, then replaces the text. Returns (the delete pass, or None when the file list
+        could not be read; why the withdraw is incomplete, or None). The text is written even
+        after a refused delete: the notice should replace it either way."""
+        try:
+            deletes = delete_item_files(target.uploaded_as)
+        except Exception as exc:
+            return None, f"could not read the item's files, so nothing was deleted: {exc}"
+        problems = [f"IA refused to delete {', '.join(deletes.refused)}"] if deletes.refused else []
+        try:
+            update_metadata_row(target.metadata, target.uploaded_as)
+        except MetadataUnchanged:
+            pass
+        except Exception as exc:
+            problems.append(str(exc))
+        return deletes, "; ".join(problems) or None
+
+    def _send(self, target: SyncTarget) -> None:
+        """One row's metadata push."""
+        update_metadata_row(target.metadata, target.uploaded_as)
+
+    def _reread(self) -> SheetSnapshot | str:
+        """A fresh read with the sync columns where this run found them, or why not (a sentence).
+        Shared by _verified() (before stamping) and _refused_deletes() (before deleting)."""
+        try:
+            snapshot = read_sheet_snapshot(self.client, self.file_template)
+        except MissingWriteBackColumns as exc:
+            return (
+                f"a column this run reads to confirm a row's identity is gone: {exc}. It was "
+                "there when this run started."
+            )
+        except Exception as exc:
+            return f"the Sheet could not be re-read: {exc}."
+        try:
+            columns_now = locate_sync_columns(snapshot.column_map)
+        except MissingSyncColumns as exc:
+            return str(exc)
+        if columns_now != self.columns:
+            return (
+                "the Sheet's columns moved while this run was in progress, so every cell it "
+                "would stamp now lands in the wrong column."
+            )
+        return snapshot
+
+    @staticmethod
+    def _moved_reason(target: SyncTarget) -> str:
+        """Why a target failed the moved-row guard. A blank fingerprint never matches, so it
+        must not be blamed on an edit that may never have happened."""
+        if not target.source_fingerprint:
+            return (
+                f"row {target.row_number} ('{target.identifier}') has no file_template "
+                "fingerprint to confirm it is still the same row it was when this run started"
+            )
+        return (
+            f"row {target.row_number} is no longer the row this run read for "
+            f"'{target.identifier}' - the Sheet was edited while the run was in progress"
+        )
+
+    def _refused_deletes(self, withdrawing: list[SyncTarget]) -> dict[int, str]:
+        """row_number -> why its files are NOT deleted, for each withdraw whose row may have moved.
+
+        Checked before deleting, unlike _verified(): a delete cannot be sent again."""
+        if not withdrawing:
+            return {}
+        fresh = self._reread()
+        if isinstance(fresh, str):
+            reason = f"{fresh} Nothing was deleted - this row is withdrawn on the next run"
+            return {target.row_number: reason for target in withdrawing}
+        _still_there, moved = split_moved_targets(withdrawing, fresh, reserved_already=True)
+        return {
+            target.row_number: f"{self._moved_reason(target)}. Nothing was deleted - "
+            + (
+                "fill in its file_template cells, then run again"
+                if not target.source_fingerprint
+                else "this row is withdrawn on the next run"
+            )
+            for target in moved
+        }
+
+    def _stamp(
+        self,
+        stamped: list[tuple[int, str]],
+        pushed: list[SyncTarget],
+        marks: list[tuple[int, str]],
+    ) -> None:
         """Records what this chunk pushed, in one batch, at the rows this run
         planned for - having first proved those are still the same rows.
 
@@ -5301,26 +5550,49 @@ class SheetSyncRun:
         `stamped`), while whether the row is still the same row is decided
         now. Re-deriving the hash from the Sheet's current cells instead
         would stamp a human edit made during the run as already-synced, and
-        that edit would be lost permanently with nothing to notice it."""
-        if not stamped:
+        that edit would be lost permanently with nothing to notice it.
+
+        `marks` are ia_withdrawn values for rows whose deletes started; a mark
+        that cannot be written is warned about by name (_warn_unmarked)."""
+        if not stamped and not marks:
             return
 
         safe = self._verified(pushed)
         safe_rows = {target.row_number for target in safe}
-        updates = stamp_updates(
-            [(row, digest) for row, digest in stamped if row in safe_rows],
-            self.columns,
-            utc_timestamp(),
+        # A withdraw's mark is a timestamp; a restore's (Task 9) is "" and needs no warning.
+        marked_rows = {row for row, value in marks if value}
+        started_on = {
+            target.row_number: target.uploaded_as
+            for target in pushed
+            if target.row_number in marked_rows
+        }
+        self._warn_unmarked([item for row, item in started_on.items() if row not in safe_rows])
+        safe_stamps = [(row, digest) for row, digest in stamped if row in safe_rows]
+        updates = stamp_updates(safe_stamps, self.columns, utc_timestamp()) + withdrawn_updates(
+            [(row, value) for row, value in marks if row in safe_rows], self.columns
         )
         try:
             write_cells_if_any(self.client, updates)
         except Exception as exc:
             print(
                 f"the Sheet stamp write failed: {exc}. The metadata IS on Internet Archive; "
-                f"{_pluralize(len(updates) // 2, 'row')} will simply be sent again next run "
+                f"{_pluralize(len(safe_stamps), 'row')} will simply be sent again next run "
                 "and reported as unchanged. Continuing.",
                 file=sys.stderr,
             )
+            self._warn_unmarked([item for row, item in started_on.items() if row in safe_rows])
+
+    @staticmethod
+    def _warn_unmarked(identifiers: list[str]) -> None:
+        """Deletes started but the Sheet doesn't say so; un-withdrawing now would not restore the files."""
+        if not identifiers:
+            return
+        print(
+            f"WARNING: deletes were started on {', '.join(identifiers)} but ia_withdrawn was not "
+            "written. keep withdrawn set to yes and run sync-metadata again; setting it to no "
+            "before then will NOT restore the files.",
+            file=sys.stderr,
+        )
 
     def _verified(self, pushed: list[SyncTarget]) -> list[SyncTarget]:
         """The rows still at the position this run planned for them.
@@ -5344,73 +5616,19 @@ class SheetSyncRun:
         operator reading any other one is told - an inconsistency here reads
         as "some of these failures mean the run failed" when none of them
         do."""
-        try:
-            snapshot = read_sheet_snapshot(self.client, self.file_template)
-        except MissingWriteBackColumns as exc:
-            # sync-metadata only READS these four columns - it never writes
-            # them, unlike upload's own equivalent message this one used to
-            # share verbatim. And by the time this runs, locate_write_back_
-            # columns() has already passed once, at startup (sync_from_sheet),
-            # so reaching this branch means the column was there when the run
-            # began and disappeared while it was in progress.
+        fresh = self._reread()
+        if isinstance(fresh, str):
             print(
-                f"a column this run reads to confirm a row's identity is gone: {exc}. It was "
-                "there when this run started. The metadata IS on Internet Archive; these rows "
-                "are sent again next run and reported as unchanged. Nothing stamped this "
-                "chunk.",
-                file=sys.stderr,
-            )
-            return []
-        except Exception as exc:
-            print(
-                f"the Sheet could not be re-read before stamping: {exc}. The metadata IS on "
-                "Internet Archive; these rows re-push next run and report as unchanged.",
-                file=sys.stderr,
-            )
-            return []
-
-        try:
-            columns_now = locate_sync_columns(snapshot.column_map)
-        except MissingSyncColumns as exc:
-            print(
-                f"{exc} The metadata IS on Internet Archive; these rows are sent again next "
+                f"{fresh} The metadata IS on Internet Archive; these rows are sent again next "
                 "run and reported as unchanged. Nothing stamped this chunk.",
                 file=sys.stderr,
             )
             return []
-        if columns_now != self.columns:
-            print(
-                "the Sheet's columns moved while this run was in progress, so every cell it "
-                "would stamp now lands in the wrong column. The metadata IS on Internet "
-                "Archive; these rows are sent again next run and reported as unchanged. "
-                "Nothing stamped this chunk.",
-                file=sys.stderr,
-            )
-            return []
-
-        still_there, moved = split_moved_targets(pushed, snapshot, reserved_already=True)
+        still_there, moved = split_moved_targets(pushed, fresh, reserved_already=True)
         for target in moved:
-            if not target.source_fingerprint:
-                # A row whose file_template columns were already blank at
-                # read time fingerprints as "" (sheet_row_fingerprints()),
-                # which can never match - so this row lands here on every
-                # run regardless of whether anyone touched the Sheet. Telling
-                # the operator "the Sheet was edited" below would send them
-                # looking for an edit that may never have happened.
-                print(
-                    f"row {target.row_number} ('{target.identifier}') has no file_template "
-                    "fingerprint to confirm it is still the same row it was when this run "
-                    "started, so it is not stamped this run. The metadata IS on Internet "
-                    "Archive; this row is sent again next run and reported as unchanged.",
-                    file=sys.stderr,
-                )
-                continue
             print(
-                f"row {target.row_number} is no longer the row this run read for "
-                f"'{target.identifier}' - the Sheet was edited while the run was in progress, "
-                "so stamping there would mark a different photograph as synced. The metadata "
-                "IS on Internet Archive; this row is sent again next run and reported as "
-                "unchanged.",
+                f"{self._moved_reason(target)}, so it is not stamped this run. The metadata IS "
+                "on Internet Archive; this row is sent again next run and reported as unchanged.",
                 file=sys.stderr,
             )
         return still_there
