@@ -10,7 +10,7 @@ import type { Ending, RunState, ValidateDoc } from "../api/schemas";
 // boundary before an action reaches here.
 // ---------------------------------------------------------------------
 
-const SAMPLE_VERDICTS = { ready: 1, invalid: 0, not_ready: 0 };
+const SAMPLE_VERDICTS = { ready: 1, invalid: 0, not_ready: 0, held: 0 };
 const SAMPLE_COUNTS = { unassigned: SAMPLE_VERDICTS, done: SAMPLE_VERDICTS, reserved: SAMPLE_VERDICTS };
 
 const SAMPLE_PREVIEW: ValidateDoc = {

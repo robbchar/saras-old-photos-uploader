@@ -14,17 +14,20 @@
     "unassigned": {
       "ready": 1,
       "invalid": 1,
-      "not_ready": 2
+      "not_ready": 2,
+      "held": 1
     },
     "done": {
       "ready": 1,
       "invalid": 0,
-      "not_ready": 0
+      "not_ready": 0,
+      "held": 0
     },
     "reserved": {
       "ready": 1,
       "invalid": 0,
-      "not_ready": 0
+      "not_ready": 0,
+      "held": 0
     }
   },
   "batches": null,
@@ -90,6 +93,15 @@
       "missing_fields": [
         "title"
       ]
+    },
+    {
+      "row": 12,
+      "state": "unassigned",
+      "verdict": "held",
+      "identifier": "",
+      "file": "photo12.jpg",
+      "errors": [],
+      "missing_fields": []
     }
   ]
 }

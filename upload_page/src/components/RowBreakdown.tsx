@@ -1,7 +1,7 @@
-// The three per-row sections of a theme: what has been uploaded, what needs
-// fixing (invalid), and what is not yet catalogued (missing fields). Shared by
-// the Preview (before a run) and the Finished screen (after one) so both show
-// the same breakdown for a theme.
+// The per-row sections of a theme: what has been uploaded, what needs
+// fixing (invalid), what is not yet catalogued (missing fields), and any rows
+// withdrawn before upload. Shared by the Preview (before a run) and the
+// Finished screen (after one) so both show the same breakdown for a theme.
 
 import type { ValidateRow } from "../api/schemas";
 import { UploadedList } from "./UploadedList";
@@ -61,6 +61,11 @@ export function RowBreakdown({ rows }: RowBreakdownProps) {
     rows.filter((row) => row.verdict === "not_ready"),
     reasonForNotReadyRow,
   );
+  // Rare, so this section renders only when it has rows.
+  const withdrawn = compressToRanges(
+    rows.filter((row) => row.verdict === "held" && row.state !== "done"),
+    () => "withdrawn - upload skips it",
+  );
 
   return (
     <>
@@ -101,6 +106,22 @@ export function RowBreakdown({ rows }: RowBreakdownProps) {
           </ul>
         )}
       </div>
+
+      {withdrawn.length > 0 && (
+        <div className="mt-4">
+          <h3 className="caps text-xs text-muted">Withdrawn</h3>
+          <ul className="mt-1 space-y-1">
+            {withdrawn.map((range) => (
+              <li
+                key={`${range.start}-${range.end}`}
+                className="rounded border border-border-strong bg-raised px-2 py-1 font-mono text-sm text-text"
+              >
+                {formatRange(range)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </>
   );
 }

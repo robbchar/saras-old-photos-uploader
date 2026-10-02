@@ -39,7 +39,7 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
-const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0 };
+const ZERO_VERDICTS = { ready: 0, invalid: 0, not_ready: 0, held: 0 };
 const ZERO_COUNTS = { unassigned: ZERO_VERDICTS, done: ZERO_VERDICTS, reserved: ZERO_VERDICTS };
 
 const STATUS_IDLE: Status = {
@@ -83,7 +83,7 @@ const THEMES: ValidateDoc = {
     {
       value: "Fishing",
       ready_to_upload: 5,
-      counts: { ...ZERO_COUNTS, unassigned: { ready: 5, invalid: 0, not_ready: 0 } },
+      counts: { ...ZERO_COUNTS, unassigned: { ready: 5, invalid: 0, not_ready: 0, held: 0 } },
     },
   ],
   rows: null,
@@ -234,7 +234,7 @@ describe("App", () => {
         {
           value: "Fishing",
           ready_to_upload: 0,
-          counts: { ...ZERO_COUNTS, unassigned: { ready: 0, invalid: 0, not_ready: 2 } },
+          counts: { ...ZERO_COUNTS, unassigned: { ready: 0, invalid: 0, not_ready: 2, held: 0 } },
         },
       ],
     };
@@ -245,13 +245,13 @@ describe("App", () => {
     const zeroReadyPreview: ValidateDoc = {
       ...PREVIEW,
       ready_to_upload: 0,
-      counts: { ...ZERO_COUNTS, unassigned: { ready: 0, invalid: 0, not_ready: 2 } },
+      counts: { ...ZERO_COUNTS, unassigned: { ready: 0, invalid: 0, not_ready: 2, held: 0 } },
       rows: twoNotReadyRows,
     };
     const oneReadyPreview: ValidateDoc = {
       ...PREVIEW,
       ready_to_upload: 1,
-      counts: { ...ZERO_COUNTS, unassigned: { ready: 1, invalid: 0, not_ready: 1 } },
+      counts: { ...ZERO_COUNTS, unassigned: { ready: 1, invalid: 0, not_ready: 1, held: 0 } },
       rows: [{ ...twoNotReadyRows[0], verdict: "ready", missing_fields: [] }, twoNotReadyRows[1]],
     };
     mockGetThemes.mockResolvedValue(notReadyThemes);

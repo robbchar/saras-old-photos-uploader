@@ -28,6 +28,8 @@ const Verdicts = z.object({
   ready: z.number(),
   invalid: z.number(),
   not_ready: z.number(),
+  // Rows whose `withdrawn` cell says yes (ia_bulk.py's UploadVerdict.HELD).
+  held: z.number(),
 });
 
 const Counts = z.object({
@@ -45,7 +47,7 @@ const Batch = z.object({
 const Row = z.object({
   row: z.number(),
   state: z.enum(["unassigned", "done", "reserved"]),
-  verdict: z.enum(["ready", "invalid", "not_ready"]),
+  verdict: z.enum(["ready", "invalid", "not_ready", "held"]),
   identifier: z.string(),
   // The row's templated file path (folder/file_name), from validate --json.
   // Empty when the Sheet cell is blank or the file could not be resolved.

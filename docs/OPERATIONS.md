@@ -227,6 +227,16 @@ return non-zero on every run until all ~2,900 uncatalogued rows are filled
 in, which trains an operator to stop trusting the exit code at all. See §2
 below for `upload`'s modes.
 
+A row whose `withdrawn` cell says yes is **held**: someone decided it must
+not go out (see "Withdrawing an item" below). `validate` marks it
+`(withdrawn - held back)` and counts it on its own line under its state —
+``N rows withdrawn before upload - held back from `upload` while 'withdrawn'
+says yes``, or, for an uploaded row, `N rows already uploaded and marked
+withdrawn`. `upload` skips it, keeps any identifier it already reserved, and
+prints `N rows held back from upload (withdrawn = yes)`. A held row does not
+flip `upload`'s exit code; one that also carries an error still makes
+`validate` exit 1.
+
 It also prints a **field receipt** — every metadata field name the run would
 create, plus the columns held back as `(LCPS Internal)` and the ones only used
 to find each row's file (the columns `file_template` names, by their normalized
@@ -460,9 +470,11 @@ On the page:
 
 1. Pick a theme from the picker. Each one shows how many of its rows are
    ready to upload; a theme with nothing ready is listed but disabled, with
-   the reason ("all uploaded", "3 need fixing").
+   the reason ("all uploaded", "3 not ready", "1 withdrawn").
 2. Read the preview — the same counts and per-row reasons `validate --batch`
-   would print, with **Re-check** if the Sheet has changed since.
+   would print, with **Re-check** if the Sheet has changed since. Rows
+   marked withdrawn before upload are listed under **Withdrawn**, and an
+   uploaded row marked withdrawn reads `(withdrawn)` in the uploaded list.
 3. Press Start, then confirm in the dialog that restates the theme and count
    (and, in live mode, that the upload cannot be undone or renamed).
 4. Watch it run: a live output pane streaming the upload's own console
@@ -597,7 +609,10 @@ a separate `skipped` list naming the rows the run declined to send at all.
 `already_synced` is the hash gate at work — rows read, found to match their
 last push, and never sent — and on a healthy run it is nearly the whole
 Sheet. `failures` and `skipped` answer different questions: a failure
-means the item was contacted, a skip means it was never touched. The same
+means the item was contacted, a skip means it was never touched. A run that
+withdrew, restored or re-checked items also names them, under `withdrawn`,
+`restored`, `clearing`, `clear` and `recheck_failures` (see "Withdrawing an
+item" below). The same
 numbers are what the run printed on screen — they come from one place and
 cannot disagree. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
@@ -674,6 +689,215 @@ Two limits on what a manual pass can show:
   Archive to genuinely refuse a send. Expect `failures: []` on a
   rehearsal, and read that as normal rather than as a gap. That leg is
   covered by the test suite instead.
+
+## Withdrawing an item
+
+For the day a donor, family member or rights holder asks for a photo to come
+down. Internet Archive never deletes an item, so "withdrawn" means: its files
+are deleted (with IA's thumbnails and other derivatives), its title and
+description become the project's withdrawn notice, every other field is
+removed, and you ask IA to darken it. See
+[`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md).
+
+The Sheet needs two extra header cells first, once: `withdrawn` (yours) and
+`ia_withdrawn` (the tool's). `sync-metadata` refuses to run with the first and
+not the second. A Sheet without `withdrawn` never withdraws anything.
+
+1. Type `yes` in the row's `withdrawn` cell (`y`, `true`, `x`, `1` or a
+   ticked checkbox also work; blank, `no`, `n`, `false`, `0` or an unticked
+   box mean keep it; anything else is an error and the row is left alone).
+2. Preview, then run:
+
+   ```bash
+   python ia_bulk.py sync-metadata --project sarasoldphotos --live --dry-run
+   python ia_bulk.py sync-metadata --project sarasoldphotos --live
+   ```
+
+   The dry run lists, for each item, the files it would delete (content
+   first, `__ia_thumb.jpg` last), the fields it would change or remove, and
+   what it leaves alone (`identifier`, `collection`, `mediatype`, and IA's
+   own `_meta.xml`-style files), and notes that a real run first checks IA
+   isn't running a task on the item or holding a paused or failed one. With a withdraw or
+   restore pending, both
+   commands first confirm the project's collection on archive.org, as
+   `upload --live` does, and refuse if they cannot.
+
+   The real run re-reads the Sheet just before each item's deletes and goes
+   ahead only if the row is still where it was and still says `yes`; a row
+   changed mid-run is refused by name, nothing is deleted from it, and the
+   run exits 1 — the next run does what the Sheet says then. It then asks
+   Internet Archive about the item's tasks: while IA is running one (usually
+   the derive that follows an upload, for its first few minutes) or holds a
+   paused or failed one, the row is refused by name — `Internet Archive is running a
+   task on <item> (derive.php); nothing was deleted - run sync-metadata
+   again later` — nothing is deleted, written or stamped, and the run exits
+   1; the next run tries again. Deletes sent while IA was running a task on
+   the item were paused for IA staff, so the tool no longer sends them then.
+   Tasks merely queued don't hold it up. Otherwise, as soon as IA accepts
+   the deletes, it fills `ia_withdrawn` with the time the withdrawal started,
+   then replaces the text, prints
+   `N items withdrawn (files deleted, text replaced)`, and ends by printing
+   the identifiers and archive.org URLs to send to Internet Archive.
+3. Ask Internet Archive to darken each item — only their staff can, and only
+   they can undo it. Email them the identifiers and URLs the run printed; the
+   tool never contacts IA itself. Until they do, the item page still exists,
+   empty, showing the withdrawn notice. This can go at once; it does not wait
+   for step 4.
+4. Run `sync-metadata` again an hour or so later (or let the hourly agent),
+   until every withdrawn item reports `clear`. IA processes deletes in its
+   own queue and can rebuild the item's thumbnail from a file it has not
+   removed yet, so every run re-checks every withdrawn item: once IA has no
+   task open on the item it deletes whatever is left (while IA has any task
+   open — even its own queued deletes — it deletes nothing that run; a
+   running, paused or failed task is printed under the item),
+   and while anything remains, or IA still has a task open for the item, it
+   reports
+   `N withdrawn items still clearing: <identifiers>`. **Accepted
+   trade-off:** until a run reports the item clear, its thumbnail can still
+   show the photograph — for hours if IA's queue is busy. The tool never waits
+   on IA's queue. Re-checks never change the item's text or the Sheet.
+
+If the hourly agent is enabled, it does steps 2 and 4 on its own within the
+hour, so the dry run is for checking, not a gate. Never type into
+`ia_withdrawn`; clearing it makes the tool treat the item as present again.
+
+**When the agent ran it, read the Sync Log tab.** Nobody watches the agent's
+console, so its darkening hand-off for step 3 is only in
+`logs/launchagent-sarasoldphotos.log` on the Mac. The project's
+`sync_log_tab` (the `Sync Log` tab) has a `withdrawn` row per item withdrawn,
+naming the item it went to, which is enough to write the darkening request
+(a withdraw that started but did not finish is a `failure` row reading
+"withdrawal started on …" — ask for that item too), and a `clearing` row per item still clearing, whose detail says what was
+deleted again, how many tasks IA still has queued (nothing was deleted that
+run), that IA is running a task on it, or which paused or failed tasks IA
+staff must release.
+The console's "still clearing" line names the items only; that detail is in
+the tab (and the run's JSONL), whoever ran it — the console prints it under
+an item only when IA's tasks stopped that run's deletes.
+
+**If a withdraw fails.** The run names the row and exits 1, and the
+`sync_log_tab`, if the project has one, gets a `failure` row. A withdraw of an item Internet Archive does not have deletes
+nothing and stamps nothing — check the row's `ia_url`. One that started but
+did not finish ("withdrawal started on … but is incomplete") is finished by
+the next run, and is still listed for darkening. A re-check that fails (IA
+unreachable, or no such item) is named the same way and never reported clear.
+
+**If the run warns `the withdrawn notice replaced the text of <item> but
+ia_sync_hash was not written`.** IA refused every delete, but the notice
+went up and the Sheet could not record it. Keeping `withdrawn` at `yes`
+retries the withdraw; before setting it to `no`, clear that row's
+`ia_sync_hash` cell, or the run will read the row as in sync and leave the
+notice up.
+
+**If the run warns `ia_withdrawn was not written`.** The deletes started but
+the Sheet could not record it (the row moved mid-run, or the Sheet write
+failed). Keep `withdrawn` at `yes` and run `sync-metadata` again: that run
+finishes the withdraw and records it. Setting `withdrawn` to `no` before then
+leaves the files deleted with nothing to put them back.
+
+**If the run says `Internet Archive has paused N task(s) on <item>` or
+`N failed task(s)`, `IA staff must release them`.** IA has put the item's
+task on hold for its staff, or it failed (it shows as `paused` or `error` on
+the item's task list). Neither resumes on
+its own, so until IA staff release or cancel it, every run refuses that
+item's withdraw (nothing is deleted, so it is not in the darkening hand-off
+either), its re-check deletes nothing and reports it still clearing, and a
+restore is refused. Email Internet Archive staff the identifier and ask them
+to release the item's held tasks — in the same email as the darkening
+request, which you are sending them anyway; for a withdraw that was refused,
+ask for both. Then run `sync-metadata` again. See
+[`KNOWN-ISSUES.md` #8](KNOWN-ISSUES.md#8-an-errored-or-paused-internet-archive-task-blocks-clear-and-restore).
+
+**If an item stays "still clearing" for a day or more** and its `clearing`
+rows in the Sync Log tab say "Internet Archive has N tasks queued on
+<item>; nothing was deleted", an IA task is probably stuck in IA's queue (a paused or
+failed one is named as IA staff's to release instead, as above). Ask
+Internet Archive staff to clear it — see [`KNOWN-ISSUES.md` #8](KNOWN-ISSUES.md#8-an-errored-or-paused-internet-archive-task-blocks-clear-and-restore).
+
+**Checking an item really is clear, by hand.** After a run reports it clear,
+run this from the tool's folder on the Mac. The first line waits: paste the
+item's identifier (the part of its `ia_url` cell after `/details/`) and press
+Return.
+
+```bash
+read -r ITEM
+./.venv/bin/ia list "$ITEM"
+curl -sI "https://archive.org/services/img/$ITEM"
+```
+
+`ia list` should print only IA's own files (the identifier followed by
+`_meta.xml`, `_files.xml`, `_meta.sqlite`, `_archive.torrent`, and
+`_reviews.xml` if present), and `curl`'s
+first line should be a `302` redirect to IA's placeholder, not `200`.
+
+The e2e rehearsal leaves its row 3 withdrawn for exactly this check, but only
+when run on its own:
+`python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s`.
+Running the whole file also runs the upload-page e2e test, which resets the
+Test Sheet and wipes row 3. Afterwards, on the dev box, repeat
+`python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e`
+until it reports that item clear, then check it as above — on the dev box,
+use `ia` in place of `./.venv/bin/ia`.
+
+**Putting it back.** Set the cell back to `no` (or clear it) and run
+`sync-metadata`. It re-uploads the original from the drive — found the same
+way `upload` finds it — then writes the Sheet's text back, and prints
+`N items restored (file re-uploaded, text put back)`. Two things refuse the
+row by name, leave it withdrawn and exit 1:
+
+- **IA is still processing the withdrawal** ("Internet Archive is still
+  processing this item's withdrawal"), or the tool could not ask. A file
+  uploaded while the withdrawal's deletes are still queued would be deleted
+  again. Nothing was uploaded; run `sync-metadata` again later — the hourly
+  agent retries on its own. If it says instead that IA has paused or failed
+  tasks on the item and "IA staff must release them", waiting won't help:
+  ask IA staff, as above.
+- **The original is not on the drive** ("restore refused: the original file
+  was not found"), matches more than one file, or the row's file cells are
+  blank. Put the file back (or fix the cells) first, or set the cell back to
+  `yes`.
+
+If the run warns `the restore of <item> landed but ia_withdrawn was not
+cleared`, the file and text are back but the Sheet could not record it (the
+row moved mid-run, or the Sheet write failed). Leave `withdrawn` at `no` and
+let the next run finish: it restores the item again and clears the cell.
+Setting `withdrawn` back to `yes` before then would leave the restored text
+and photo up, with the re-check deleting only the files.
+
+If IA has already darkened the item, ask them to undo that too.
+
+**Before upload.** A row that says `yes` before it was ever uploaded is held:
+`upload` skips it, keeps any identifier it already reserved, and prints how
+many it held back; `validate` counts it as withdrawn, and the upload page
+lists it under **Withdrawn**. Set it back to `no` and the next upload sends
+it.
+
+A **reserved** row (an `ia_identifier` but no `ia_uploaded`) whose upload
+may already have landed is held the same way, and `sync-metadata` acts only
+on rows marked uploaded, so nothing takes it down yet. To withdraw it: set
+`withdrawn` to `no`, run `upload` (it retries the row under the identifier
+it already reserved and confirms it), set `withdrawn` back to `yes`, and run
+`sync-metadata`. The photo is public on Internet Archive from that upload
+until the `sync-metadata` run, so run the two back to back.
+
+**More than ten at once.** A run that would withdraw or restore more than 10
+items in total refuses before sending anything and names the rows
+(`refusing to run: this run would withdraw … more than the 10 one run may
+change without --allow-bulk-withdraw`) — a fill-down or a paste over the
+column looks exactly like that. The dry run shows the same refusal after its
+preview. Every row whose `withdrawn` disagrees with `ia_withdrawn` counts,
+even one that would be refused on its own (say, a restore whose original is
+missing). Re-checks of items already withdrawn don't count. If every one is
+meant:
+
+```bash
+python ia_bulk.py sync-metadata --project sarasoldphotos --live --allow-bulk-withdraw
+```
+
+The hourly agent never passes that flag, so a bulk change waits for someone at
+the keyboard; each refused agent run leaves a `refused` row, naming the rows,
+in the Sync Log tab and a `run_summary` with `refused` in its log. Restores re-upload files but are not counted in the 5,000/day
+total — see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#7-restores-are-not-counted-in-the-daily-upload-total).
 
 ## Pacing and batch limits
 
@@ -896,8 +1120,10 @@ anyone through Terminal.
 
 One row per run, then one row per problem. Each row names `when`, the `run`
 (the log file to go and read for per-file detail), the `outcome`
-(`summary`, `failure`, `unconfirmed` or `skipped`), the `identifier`, and the
-`detail`. A clean run is a single row, and a sync run that found everything
+(`summary`, `failure`, `unconfirmed` or `skipped`; a `sync-metadata` run
+refused before sending anything — too many withdraws or restores, or a live
+collection check that failed — is a `refused` row in place of `summary`,
+with the reason as its detail), the `identifier`, and the `detail`. A clean run is a single row, and a sync run that found everything
 already in sync writes nothing at all — the tab stays scannable on purpose.
 
 The tabs are written to and never read from, so nothing there can affect a
@@ -911,10 +1137,12 @@ record.
 **This whole recipe is automated.** Run
 
 ```bash
-python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s
 ```
 
-Each command's output streams live under its step header, upload progress
+Name `::test_rehearsal` on its own: the file's upload-page e2e test resets
+the Test Sheet afterward, wiping the withdrawn row this run leaves for
+"Withdrawing an item"'s hand clear check. Each command's output streams live under its step header, upload progress
 bars included, as it would in a terminal (`-s` is what lets it through).
 
 It rewrites the Test Sheet from `e2e_fixtures/` first, so the Test Sheet now
@@ -933,7 +1161,8 @@ rehearsal (the steps below) takes no lock, so check that the Test Sheet has
 no `E2E Lock` tab before starting one.
 
 After a passing run, rows 2, 3, 5, 7 and 8 are uploaded and synced, row 2's
-`Title` is edited, and row 6 is still not ready (no theme); reset rows per
+`Title` is edited, row 2 has been withdrawn and restored, row 3 is left
+withdrawn, and row 6 is still not ready (no theme); reset rows per
 ["Re-rehearsing a row that is already done"](#re-rehearsing-a-row-that-is-already-done)
 (§2) before a hand upload.
 
@@ -947,6 +1176,9 @@ After a passing run, rows 2, 3, 5, 7 and 8 are uploaded and synced, row 2's
 | Pre-live checklist: open a `zztest-…` item and read it | 5, 8 |
 | DEPLOYMENT §16 step 2: `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e --dry-run` | 6 |
 | Step 3: edit a Title, `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e`, twice | 7, 9 |
+| "Withdrawing an item" steps 1-2: `withdrawn` = yes on two rows, then `sync-metadata` | 9a |
+| "Withdrawing an item" step 4: `sync-metadata` again, which re-checks them | 9a2 |
+| "Withdrawing an item", putting it back: `withdrawn` = no on one row, then `sync-metadata` | 9b (after IA's queue for the item empties) |
 | Step 4: `grep '<when value>' logs/<run value>` | 10 |
 | Step 5: File → Version history, by eye | 11 |
 | Step 2: put the cell back | 12 |

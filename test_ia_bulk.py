@@ -64,9 +64,11 @@ from ia_bulk import (
     CollectionMissing,
     CollectionUnchecked,
     NotACollection,
+    TaskState,
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
 from utc_time import format_utc
+from withdrawal import SyncAction, withdrawn_error
 
 
 class FakeResponse:
@@ -1159,6 +1161,8 @@ def _one_row_in(state: str, kind: str) -> tuple[list[dict[str, str]], list[RowVa
             errors=["some validation error"],
             missing_fields=["title"],
         )
+    elif kind == "held":
+        result = RowValidation(row_number=2, identifier=identifier, held=True)
     else:
         raise ValueError(f"_one_row_in: unknown kind {kind!r}")
 
@@ -1231,6 +1235,53 @@ def test_lifecycle_summary_prints_exact_text_for_a_not_ready_done_row():
         "column was cleared after upload; needs a human to look, not an "
         "automatic retry"
     ) in summary.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("state", "line"),
+    [
+        (
+            "unassigned",
+            "1 row withdrawn before upload - held back from `upload` while 'withdrawn' says yes",
+        ),
+        (
+            "reserved",
+            "1 row reserved but withdrawn - kept under the identifier already reserved, held "
+            "back from `upload` while 'withdrawn' says yes",
+        ),
+        (
+            "done",
+            "1 row already uploaded and marked withdrawn - `sync-metadata` keeps the files and "
+            "text off Internet Archive",
+        ),
+    ],
+)
+def test_lifecycle_summary_names_held_rows_under_their_state(state, line):
+    rows, results = _one_row_in(state, "held")
+    summary = format_lifecycle_summary(rows, results)
+
+    assert line in summary.splitlines()
+    assert sum(int(n) for n in re.findall(r"^(\d+) ", summary, re.MULTILINE)) == 1
+
+
+def test_a_held_row_is_marked_withdrawn_in_the_row_report():
+    lines = _format_result_lines([RowValidation(row_number=5, identifier="", held=True)])
+
+    assert lines == ["[PASS] row 5  (withdrawn - held back)"]
+
+
+def test_validate_json_counts_held_rows_in_their_own_bucket():
+    from ia_bulk import build_lifecycle_report, lifecycle_counts_json, ready_to_upload_count
+
+    report = build_lifecycle_report(
+        [{"ia_identifier": "", "ia_uploaded": ""}],
+        [RowValidation(row_number=2, identifier="", held=True)],
+    )
+
+    assert lifecycle_counts_json(report)["unassigned"] == {
+        "ready": 0, "invalid": 0, "not_ready": 0, "held": 1,
+    }
+    assert ready_to_upload_count(report) == 0
 
 
 class _RecordingSheetsValues:
@@ -2906,6 +2957,461 @@ def test_update_metadata_row_raises_metadata_unchanged_when_ia_reports_no_change
         update_metadata_row(row, target_identifier="zztest-lcps-astoriaphotos-00001")
 
 
+class _FakeIAFile:
+    def __init__(self, name, deletes, status_code=204, raises=None, source=None):
+        self.name = name
+        self.source = source
+        self._deletes = deletes
+        self._status_code = status_code
+        self._raises = raises
+
+    def delete(self, cascade_delete=False, headers=None):
+        self._deletes.append((self.name, cascade_delete, dict(headers or {})))
+        if self._raises is not None:
+            raise self._raises
+        return FakeResponse(ok=self._status_code == 204, status_code=self._status_code)
+
+
+class _FakeIAItem:
+    def __init__(self, files, exists=True):
+        self._files = files
+        self.exists = exists
+
+    def get_files(self):
+        return iter(self._files)
+
+
+NO_BACKUP = {"x-archive-keep-old-version": "0"}
+
+
+def _originals(*names):
+    """fetch_item_files()'s (name, source) pairs for files IA lists as originals."""
+    return [(name, "original") for name in names]
+
+
+class _FakeCatalogTask:
+    """internetarchive's CatalogTask: the catalog row is task_dict; unset keys are left out."""
+
+    def __init__(self, status=None, color=None, cmd: str | None = "derive.php"):
+        fields = {"status": status, "color": color, "cmd": cmd}
+        self.task_dict = {key: value for key, value in fields.items() if value is not None}
+
+
+def _tasks(*states, cmd="derive.php"):
+    return {_FakeCatalogTask(status=state, cmd=cmd) for state in states}
+
+
+def test_item_task_state_sorts_open_tasks_by_status(monkeypatch):
+    from ia_bulk import IA_HTTP_ADAPTER_KWARGS, TaskState, item_task_state
+
+    asked = []
+
+    def fake_get_tasks(**kwargs):
+        asked.append(kwargs)
+        return {
+            _FakeCatalogTask(status="queued", color="green", cmd="archive.php"),
+            _FakeCatalogTask(status="running", color="blue", cmd="derive.php"),
+            _FakeCatalogTask(status="paused", color="brown", cmd="archive.php"),
+            _FakeCatalogTask(status="error", color="red", cmd="book_op.php"),
+        }
+
+    monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
+
+    assert item_task_state("item") == TaskState(
+        queued=("archive.php",), running=("derive.php",), paused=("archive.php",), error=("book_op.php",)
+    )
+    assert asked == [{
+        "identifier": "item",
+        "params": {"catalog": 1, "history": 0},
+        "http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS,
+    }]
+
+
+@pytest.mark.parametrize(
+    ("color", "state"),
+    [("green", "queued"), ("blue", "running"), ("brown", "paused"), ("red", "error")],
+)
+def test_item_task_state_reads_a_task_without_a_status_by_its_color(monkeypatch, color, state):
+    from ia_bulk import item_task_state
+
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: {_FakeCatalogTask(color=color)}
+    )
+
+    assert getattr(item_task_state("item"), state) == ("derive.php",)
+
+
+def test_item_task_state_counts_a_task_it_cannot_read_as_running(monkeypatch):
+    """Never clear and never deleted past: a task of unknown state is treated as busy."""
+    from ia_bulk import TaskState, item_task_state
+
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: {_FakeCatalogTask(status="mystery", cmd=None)}
+    )
+
+    assert item_task_state("item") == TaskState(running=("unknown command",))
+
+
+def test_item_task_state_asks_with_a_given_session(monkeypatch):
+    from typing import cast
+
+    from ia_bulk import item_task_state
+
+    session = cast(internetarchive.ArchiveSession, object())
+    asked = []
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: asked.append(kwargs) or set()
+    )
+
+    assert item_task_state("item", archive_session=session).total == 0
+    assert asked == [
+        {"identifier": "item", "params": {"catalog": 1, "history": 0}, "archive_session": session}
+    ]
+
+
+def test_task_state_says_what_blocks_deletes():
+    from ia_bulk import TaskState
+
+    assert TaskState(queued=("archive.php",)).busy_reason("x") is None
+    assert TaskState(queued=("archive.php",), error=("derive.php",)).busy_reason("x") == (
+        "Internet Archive has 1 failed task(s) on x; IA staff must release them"
+    )
+    assert TaskState(error=("derive.php",)).refusal("x") == (
+        "Internet Archive has 1 failed task(s) on x; IA staff must release them - nothing was deleted"
+    )
+    assert TaskState(running=("derive.php", "derive.php")).busy_reason("x") == (
+        "Internet Archive is running a task on x (derive.php)"
+    )
+    assert TaskState(running=("derive.php",), paused=("archive.php", "archive.php")).busy_reason("x") == (
+        "Internet Archive has paused 2 task(s) on x; IA staff must release them"
+    )
+    assert TaskState(paused=("a",), error=("b",)).held("x") == (
+        "Internet Archive has paused 1 task(s) and 1 failed task(s) on x; IA staff must release them"
+    )
+    assert TaskState(queued=("a", "b"), running=("c",)).counts() == "1 task(s) running, 2 task(s) queued"
+
+
+def test_delete_item_files_deletes_content_first_and_the_tile_last(monkeypatch):
+    """IA rebuilds the tile from any image still in the item, so the tile goes last."""
+    from ia_bulk import IA_HTTP_ADAPTER_KWARGS, DeletePass, delete_item_files
+
+    deletes, asked = [], []
+    names = (
+        "__ia_thumb.jpg", "photo1.jpg", "photo1_thumb.jpg", "item_meta.xml", "item_files.xml",
+        "item_meta.sqlite", "item_archive.torrent", "item_reviews.xml",
+    )
+    files = [_FakeIAFile(name, deletes) for name in names]
+
+    def fake_get_item(identifier, **kwargs):
+        asked.append((identifier, kwargs))
+        return _FakeIAItem(files)
+
+    monkeypatch.setattr(internetarchive, "get_item", fake_get_item)
+
+    result = delete_item_files("item")
+
+    assert result == DeletePass(deleted=("photo1.jpg", "photo1_thumb.jpg", "__ia_thumb.jpg"))
+    assert deletes == [
+        ("photo1.jpg", True, NO_BACKUP),
+        ("photo1_thumb.jpg", True, NO_BACKUP),
+        ("__ia_thumb.jpg", True, NO_BACKUP),
+    ]
+    assert asked == [("item", {"http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS})]
+
+
+def test_delete_item_files_sends_no_delete_for_a_derivative_its_original_cascades(monkeypatch):
+    from ia_bulk import DeletePass, delete_item_files
+
+    deletes = []
+    files = [
+        _FakeIAFile("photo1.jpg", deletes, source="original"),
+        _FakeIAFile("photo1_thumb.jpg", deletes, source="derivative"),
+        _FakeIAFile("__ia_thumb.jpg", deletes, source="original"),
+    ]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    assert delete_item_files("item") == DeletePass(deleted=("photo1.jpg", "__ia_thumb.jpg"))
+    assert [name for name, _cascade, _headers in deletes] == ["photo1.jpg", "__ia_thumb.jpg"]
+
+
+def test_delete_item_files_counts_an_already_deleted_file_as_gone(monkeypatch):
+    """A cascade can take a derivative before its own delete; that is not a refusal."""
+    from ia_bulk import DeletePass, delete_item_files
+
+    deletes = []
+    gone = requests.exceptions.HTTPError(
+        "404 Client Error", response=FakeResponse(ok=False, status_code=404)
+    )
+    files = [_FakeIAFile("photo1_thumb.jpg", deletes, raises=gone), _FakeIAFile("photo1.jpg", deletes)]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    assert delete_item_files("item") == DeletePass(deleted=("photo1_thumb.jpg", "photo1.jpg"))
+
+
+def test_delete_item_files_names_a_refused_delete_and_carries_on(monkeypatch):
+    from ia_bulk import delete_item_files
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    deletes = []
+    files = [_FakeIAFile("photo1.jpg", deletes, status_code=403), _FakeIAFile("photo1_thumb.jpg", deletes)]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    result = delete_item_files("item")
+
+    assert result.deleted == ("photo1_thumb.jpg",)
+    assert len(result.refused) == 1
+    assert result.refused[0].startswith("photo1.jpg: ")
+    assert "403" in result.refused[0]
+    assert result.started is True
+
+
+def test_delete_item_files_raises_when_the_item_cannot_be_read(monkeypatch):
+    from ia_bulk import delete_item_files
+
+    def unreachable(identifier, **kwargs):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(internetarchive, "get_item", unreachable)
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        delete_item_files("item")
+
+
+def test_a_delete_pass_has_started_once_ia_accepted_a_delete_or_nothing_was_left():
+    from ia_bulk import DeletePass
+
+    assert DeletePass().started is True
+    assert DeletePass(deleted=("a.jpg",), refused=("b.jpg: 403",)).started is True
+    assert DeletePass(refused=("a.jpg: 403",)).started is False
+
+
+def test_deletable_files_keeps_ias_system_files_and_puts_the_tile_last():
+    from ia_bulk import deletable_files
+
+    listed = ["__ia_thumb.jpg", "a.jpg", "x_meta.xml", "x_files.xml", "y_meta.xml"]
+    assert deletable_files("x", [(name, "original") for name in listed]) == [
+        "a.jpg", "y_meta.xml", "__ia_thumb.jpg"
+    ]
+
+
+def test_deletable_files_leaves_derivatives_to_their_originals_cascade():
+    """A derivative is deleted by name only once no original is left to cascade it."""
+    from ia_bulk import deletable_files
+
+    assert deletable_files("x", [
+        ("a_thumb.jpg", "derivative"), ("a.jpg", "original"), ("__ia_thumb.jpg", "original"),
+    ]) == ["a.jpg", "__ia_thumb.jpg"]
+    assert deletable_files("x", [
+        ("a_thumb.jpg", "derivative"), ("__ia_thumb.jpg", "original"), ("x_meta.xml", "metadata"),
+    ]) == ["a_thumb.jpg", "__ia_thumb.jpg"]
+
+
+def test_recheck_deletes_what_is_left_in_order_and_asks_about_tasks_once(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    deletes = []
+    asked = []
+    files = [
+        _FakeIAFile(name, deletes) for name in ("__ia_thumb.jpg", "photo1_thumb.jpg", "item_meta.xml")
+    ]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: asked.append(1) or set())
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.deletes.deleted == ("photo1_thumb.jpg", "__ia_thumb.jpg")
+    assert check.clear is False
+    assert asked == [1]
+    assert deletes == [("photo1_thumb.jpg", True, NO_BACKUP), ("__ia_thumb.jpg", True, NO_BACKUP)]
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "paused", "error"])
+def test_recheck_deletes_nothing_while_ia_has_any_task_open(monkeypatch, state):
+    """A queued delete would be sent twice; a delete sent while IA runs a task was paused for IA staff."""
+    from ia_bulk import recheck_withdrawn_item
+
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: _tasks(state))
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: pytest.fail("listed a busy item")
+    )
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.deletes.deleted == ()
+    assert getattr(check.tasks, state) == ("derive.php",)
+    assert check.clear is False
+
+
+def test_recheck_with_only_system_files_is_not_clear_while_a_task_is_paused(monkeypatch):
+    """Paused tasks never clear by themselves, so an item holding one never reports clear."""
+    from ia_bulk import recheck_withdrawn_item
+
+    answers = iter([set(), _tasks("paused")])
+    files = [_FakeIAFile("item_meta.xml", [])]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: next(answers))
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.tasks.paused == ("derive.php",)
+    assert check.clear is False
+
+
+def test_recheck_raises_when_it_cannot_ask_about_tasks_and_deletes_nothing(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    def refused(**kwargs):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(internetarchive, "get_tasks", refused)
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: pytest.fail("deleted blind")
+    )
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        recheck_withdrawn_item("item")
+
+
+def test_recheck_is_clear_with_only_system_files_and_nothing_queued(monkeypatch):
+    from ia_bulk import IA_HTTP_ADAPTER_KWARGS, recheck_withdrawn_item
+
+    asked = []
+    files = [_FakeIAFile(name, []) for name in ("item_meta.xml", "item_files.xml")]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    def fake_get_tasks(**kwargs):
+        asked.append(kwargs)
+        return set()
+
+    monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.clear is True
+    # Once before any delete, once more before reporting clear.
+    assert asked == 2 * [{
+        "identifier": "item",
+        "params": {"catalog": 1, "history": 0},
+        "http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS,
+    }]
+
+
+def test_recheck_is_not_clear_while_ia_has_tasks_queued(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    files = [_FakeIAFile("item_meta.xml", [])]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: _tasks("queued", cmd="derive.php") | _tasks("queued", cmd="archive.php")
+    )
+
+    check = recheck_withdrawn_item("item")
+
+    assert sorted(check.tasks.queued) == ["archive.php", "derive.php"]
+    assert check.clear is False
+
+
+def test_recheck_raises_when_the_item_cannot_be_read(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    def unreachable(identifier, **kwargs):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: set())
+    monkeypatch.setattr(internetarchive, "get_item", unreachable)
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        recheck_withdrawn_item("item")
+
+
+def test_recheck_lists_again_after_no_tasks_and_deletes_what_a_derive_added(monkeypatch):
+    """A derive that finished between the listing and the task query leaves a photo file behind."""
+    from ia_bulk import recheck_withdrawn_item
+
+    deletes = []
+    listings = iter([
+        [_FakeIAFile("item_meta.xml", deletes)],
+        [_FakeIAFile("item_meta.xml", deletes), _FakeIAFile("x_thumb.jpg", deletes)],
+    ])
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(next(listings))
+    )
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: set())
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.clear is False
+    assert check.deletes.deleted == ("x_thumb.jpg",)
+    assert deletes == [("x_thumb.jpg", True, NO_BACKUP)]
+
+
+def test_recheck_of_an_item_ia_does_not_have_is_never_clear(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
+    )
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: set())
+
+    with pytest.raises(RuntimeError, match="^Internet Archive has no item 'item'$"):
+        recheck_withdrawn_item("item")
+
+
+def test_clearing_detail_says_what_was_deleted_again_or_what_ia_is_doing():
+    from ia_bulk import ClearCheck, DeletePass, TaskState, clearing_detail
+
+    assert clearing_detail(ClearCheck(deletes=DeletePass(deleted=("a.jpg", "__ia_thumb.jpg"))), "x") == (
+        "deleted again: a.jpg, __ia_thumb.jpg"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(queued=("a", "b"))), "x") == (
+        "Internet Archive has 2 tasks queued on x; nothing was deleted - run sync-metadata again later"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(running=("derive.php",))), "x") == (
+        "Internet Archive is running a task on x (derive.php); nothing was deleted - run "
+        "sync-metadata again later"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(paused=("archive.php",))), "x") == (
+        "Internet Archive has paused 1 task(s) on x; IA staff must release them - nothing was deleted"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(error=("derive.php",))), "x") == (
+        "Internet Archive has 1 failed task(s) on x; IA staff must release them - nothing was deleted"
+    )
+
+
+def test_delete_item_files_counts_any_2xx_as_an_accepted_delete(monkeypatch):
+    """File.delete raises on non-2xx itself; a 200 is a delete IA took, never a refusal."""
+    from ia_bulk import DeletePass, delete_item_files
+
+    files = [_FakeIAFile("photo1.jpg", [], status_code=200)]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    result = delete_item_files("item")
+
+    assert result == DeletePass(deleted=("photo1.jpg",))
+    assert result.started is True
+
+
+def test_a_refused_content_delete_keeps_the_tile_for_a_later_pass(monkeypatch):
+    """IA rebuilds the tile from the surviving original, so deleting it now is pointless."""
+    from ia_bulk import delete_item_files
+
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    deletes = []
+    files = [
+        _FakeIAFile("__ia_thumb.jpg", deletes),
+        _FakeIAFile("photo1.jpg", deletes, status_code=403),
+        _FakeIAFile("photo1_thumb.jpg", deletes),
+    ]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    result = delete_item_files("item")
+
+    assert [name for name, _cascade, _headers in deletes] == ["photo1.jpg", "photo1_thumb.jpg"]
+    assert result.deleted == ("photo1_thumb.jpg",)
+    assert [refusal.split(":")[0] for refusal in result.refused] == ["photo1.jpg"]
+    assert result.skipped == ("__ia_thumb.jpg",)
+
+
 def test_build_parser_validate_subcommand_defaults():
     parser = build_parser()
     args = parser.parse_args(["validate", "--project", "astoriaphotos"])
@@ -4472,6 +4978,69 @@ def setup_sheet_upload(
     monkeypatch.setattr("ia_bulk.run_stamp", lambda: FIXED_STAMP)
 
     return recorder, client, registry_path, build_calls
+
+
+WITHDRAWN_UPLOAD_HEADER = SHEET_HEADER + ["withdrawn"]
+
+
+def test_upload_skips_a_withdrawn_row_and_says_so(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [
+        WITHDRAWN_UPLOAD_HEADER,
+        ["First photo", "photo1.jpg", "", "", "", "", "yes"],
+        ["Second photo", "photo2.jpg", "", "", "", "", ""],
+    ]
+    captured = []
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg"), captured=captured
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
+    assert [entry["row"]["file"] for entry in captured] == ["photo2.jpg"]
+    assert client.grid[1][2] == ""
+    assert "1 row held back from upload (withdrawn = yes)" in out.splitlines()
+
+
+def test_a_withdrawn_reserved_row_keeps_its_identifier_and_its_number_stays_spent(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    grid = [
+        WITHDRAWN_UPLOAD_HEADER,
+        ["First photo", "photo1.jpg", "lcps-astoriaphotos-00001", "", "", "", "y"],
+        ["Second photo", "photo2.jpg", "", "", "", "", ""],
+    ]
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, files=("photo1.jpg", "photo2.jpg")
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002"]
+    assert client.grid[1][2] == "lcps-astoriaphotos-00001"
+    assert client.grid[1][3] == ""
+
+
+def test_a_row_set_back_to_no_uploads_on_the_next_run(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [WITHDRAWN_UPLOAD_HEADER, ["First photo", "photo1.jpg", "", "", "", "", "FALSE"]]
+    recorder, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert recorder.uploads == [f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-00001"]
+    assert "held back" not in out
 
 
 def test_cmd_upload_default_mode_writes_nothing_to_the_sheet_and_only_uploads_prefixed_identifiers(
@@ -8438,6 +9007,48 @@ def test_a_broken_filename_produces_exactly_one_error(tmp_path):
     assert results[0].errors[0] == _unresolved_message(tmp_path / "SOP CD1", "Finnis.jpg")
 
 
+def test_a_withdrawn_row_is_held_not_ready_or_invalid(tmp_path):
+    rows = [_sheet_row(withdrawn="yes")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].errors == []
+    assert results[0].held is True
+    assert results[0].verdict is UploadVerdict.HELD
+
+
+def test_held_beats_not_ready_and_invalid(tmp_path):
+    rows = [_sheet_row(withdrawn="TRUE", title="", name="Finnis.jpg")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].missing_fields == ["title"]
+    assert results[0].errors != []
+    assert results[0].verdict is UploadVerdict.HELD
+
+
+def test_a_kept_row_is_not_held(tmp_path):
+    rows = [_sheet_row(withdrawn="FALSE")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].held is False
+    assert results[0].verdict is UploadVerdict.READY
+
+
+def test_a_broken_withdrawn_value_is_a_row_error_and_not_held(tmp_path):
+    rows = [_sheet_row(withdrawn="maybe")]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].errors == [withdrawn_error("maybe")]
+    assert results[0].held is False
+    assert results[0].verdict is UploadVerdict.INVALID
+
+
+def test_a_sheet_without_the_withdrawn_column_holds_nothing(tmp_path):
+    rows = [_sheet_row()]
+    _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
+
+    assert results[0].held is False
+
+
 def test_a_broken_filename_in_an_uncatalogued_row_is_both(tmp_path):
     rows = [_sheet_row(title="", theme="", name="Finnis.jpg")]
     _, results = _validate(rows, required_for_upload=("title", "theme"), tmp_path=tmp_path)
@@ -9424,6 +10035,1824 @@ def test_split_unchanged_preserves_order():
 
     assert [t.row_number for t in to_push] == [2, 4]
     assert [t.row_number for t in already] == [3]
+
+
+# A..H as SYNC_SHEET_HEADER, then I=withdrawn, J=ia_withdrawn.
+WITHDRAW_SYNC_HEADER = SYNC_SHEET_HEADER + ["withdrawn", "ia_withdrawn"]
+
+
+def _withdraw_row(number=1, withdrawn="yes", ia_withdrawn="", stored_hash="", live=False):
+    """One uploaded row; `live` names the real item in ia_url instead of the zztest one."""
+    identifier = f"lcps-astoriaphotos-{number:05d}"
+    item = identifier if live else f"zztest-{SYNC_STAMP}-{identifier}"
+    return [
+        f"Photo {number}", f"photo{number}.jpg", identifier, "2026-08-23T16:13:31Z",
+        f"https://archive.org/details/{item}", f"photo{number}.jpg",
+        stored_hash, "", withdrawn, ia_withdrawn,
+    ]
+
+
+def _plan_withdraw_rows(rows, live=False, **withdrawn_text):
+    from ia_bulk import plan_sync_targets
+
+    column_map, parsed = grid_to_rows([WITHDRAW_SYNC_HEADER] + rows)
+    return plan_sync_targets(
+        parsed, column_map, live=live, project_id="astoriaphotos", file_template="{file}",
+        **withdrawn_text,
+    )
+
+
+WITHDRAWN_PAYLOAD = {
+    "title": "Withdrawn",
+    "description": "This item has been withdrawn by the Lower Columbia Preservation Society.",
+    "identifier-bib": "REMOVE_TAG",
+    "date": "REMOVE_TAG",
+}
+
+
+def test_a_withdrawn_row_not_yet_stamped_plans_a_withdraw():
+    targets, problems = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert problems == []
+    assert targets[0].action is SyncAction.WITHDRAW
+
+
+def test_a_kept_row_with_its_files_removed_plans_a_restore():
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="", ia_withdrawn="2026-09-30T10:00:00Z")])
+
+    assert targets[0].action is SyncAction.RESTORE
+
+
+def test_rows_that_agree_with_ia_withdrawn_plan_ordinary_updates():
+    targets, _ = _plan_withdraw_rows([
+        _withdraw_row(1, withdrawn="yes", ia_withdrawn="2026-09-30T10:00:00Z"),
+        _withdraw_row(2, withdrawn="no"),
+    ])
+
+    assert [target.action for target in targets] == [SyncAction.UPDATE, SyncAction.UPDATE]
+
+
+def test_a_withdrawn_row_sends_the_notice_and_removes_everything_else():
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert targets[0].metadata == {
+        "title": "Withdrawn",
+        "description": "This item has been withdrawn by the Lower Columbia Preservation Society.",
+        "identifier-bib": "REMOVE_TAG",
+        "date": "REMOVE_TAG",
+    }
+
+
+def test_the_withdrawn_wording_comes_from_the_caller():
+    targets, _ = _plan_withdraw_rows(
+        [_withdraw_row(withdrawn="yes")],
+        withdrawn_title="Removed",
+        withdrawn_description="Taken down on request.",
+    )
+
+    assert targets[0].metadata["title"] == "Removed"
+    assert targets[0].metadata["description"] == "Taken down on request."
+
+
+def test_withdrawn_metadata_replaces_title_and_description_and_removes_every_other_field():
+    from ia_bulk import withdrawn_metadata
+
+    sent = withdrawn_metadata(
+        {
+            "title": "Pier 39",
+            "description": "",
+            "subject": "Docks",
+            "date": "1908",
+            "folder_on_lacie_drive": "REMOVE_TAG",
+        },
+        "Withdrawn",
+        "Gone.",
+    )
+
+    assert sent == {
+        "title": "Withdrawn",
+        "description": "Gone.",
+        "subject": "REMOVE_TAG",
+        "date": "REMOVE_TAG",
+        "folder_on_lacie_drive": "REMOVE_TAG",
+        "identifier-bib": "REMOVE_TAG",
+    }
+
+
+def test_withdrawn_metadata_never_names_identifier_collection_or_mediatype():
+    from ia_bulk import withdrawn_metadata
+
+    sent = withdrawn_metadata(
+        {"identifier": "x", "collection": "y", "mediatype": "image", "title": "t"}, "W", "D"
+    )
+
+    assert not {"identifier", "collection", "mediatype"} & set(sent)
+
+
+def test_a_withdrawn_rows_hash_is_of_the_withdrawn_notice():
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert targets[0].content_hash == sync_hash(metadata_to_send(WITHDRAWN_PAYLOAD))
+
+
+def test_editing_another_cell_of_a_withdrawn_row_changes_nothing_it_sends():
+    """Edits wait for a restore: the hash input is the notice, not the row."""
+    stamped = "2026-09-30T10:00:00Z"
+    before, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes", ia_withdrawn=stamped)])
+    edited = _withdraw_row(withdrawn="yes", ia_withdrawn=stamped)
+    edited[0] = "A corrected title"
+    after, _ = _plan_withdraw_rows([edited])
+
+    assert after[0].content_hash == before[0].content_hash
+
+
+def test_flipping_the_column_pushes_even_with_a_matching_hash():
+    from ia_bulk import split_unchanged
+
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+    stale = dataclasses.replace(targets[0], stored_hash=targets[0].content_hash)
+
+    to_push, already = split_unchanged([stale])
+
+    assert to_push == [stale]
+    assert already == []
+
+
+def test_a_stamped_withdrawn_row_is_already_in_sync():
+    from ia_bulk import split_unchanged
+
+    targets, _ = _plan_withdraw_rows(
+        [_withdraw_row(withdrawn="yes", ia_withdrawn="2026-09-30T10:00:00Z")]
+    )
+    synced = dataclasses.replace(targets[0], stored_hash=targets[0].content_hash)
+
+    to_push, already = split_unchanged([synced])
+
+    assert to_push == []
+    assert already == [synced]
+
+
+def test_a_broken_withdrawn_value_is_a_problem_and_never_a_target():
+    targets, problems = _plan_withdraw_rows([_withdraw_row(withdrawn="maybe")])
+
+    assert targets == []
+    assert problems[0].errors == [withdrawn_error("maybe")]
+
+
+def _plan_without_withdrawn_column(header, row):
+    from ia_bulk import plan_sync_targets
+
+    column_map, parsed = grid_to_rows([header, row])
+    return plan_sync_targets(
+        parsed, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
+    )
+
+
+def test_without_a_withdrawn_column_a_leftover_stamp_restores_nothing():
+    """Deleting the column must not republish the item's text: the row is named, nothing sent."""
+    targets, problems = _plan_without_withdrawn_column(
+        SYNC_SHEET_HEADER + ["ia_withdrawn"], _synced_grid()[1] + ["2026-09-30T10:00:00Z"]
+    )
+
+    assert targets == []
+    assert [problem.row_number for problem in problems] == [2]
+    assert "restore the 'withdrawn' column" in problems[0].errors[0]
+    assert problems[0].errors[0].isascii()
+
+
+def test_without_either_withdrawal_column_a_withdrawn_hash_restores_nothing():
+    """Both columns deleted: the stored hash of the withdrawn notice still names the row."""
+    stamped, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes", ia_withdrawn=WITHDRAWN_STAMP)])
+    row = _synced_grid()[1]
+    row[6] = stamped[0].content_hash
+
+    targets, problems = _plan_without_withdrawn_column(SYNC_SHEET_HEADER, row)
+
+    assert targets == []
+    assert [problem.row_number for problem in problems] == [2]
+    assert "restore the 'withdrawn' column" in problems[0].errors[0]
+
+
+def test_without_a_withdrawn_column_an_ordinary_row_plans_as_it_always_has():
+    plain, plain_problems = _plan_without_withdrawn_column(SYNC_SHEET_HEADER, _synced_grid()[1])
+    blank_stamp, problems = _plan_without_withdrawn_column(
+        SYNC_SHEET_HEADER + ["ia_withdrawn"], _synced_grid()[1] + [""]
+    )
+
+    assert plain_problems == problems == []
+    assert blank_stamp[0].action is SyncAction.UPDATE
+    assert blank_stamp[0].recheck is False
+    assert blank_stamp[0].metadata == plain[0].metadata
+    assert blank_stamp[0].content_hash == plain[0].content_hash
+
+
+def test_only_a_withdrawn_stamped_row_is_rechecked():
+    stamped = "2026-09-30T10:00:00Z"
+    targets, _ = _plan_withdraw_rows([
+        _withdraw_row(1, withdrawn="yes", ia_withdrawn=stamped),
+        _withdraw_row(2, withdrawn="yes"),
+        _withdraw_row(3, withdrawn="no", ia_withdrawn=stamped),
+        _withdraw_row(4, withdrawn="no"),
+    ])
+
+    assert [target.recheck for target in targets] == [True, False, False, False]
+
+
+def _pointing_at(row, item):
+    """The row with its ia_url naming `item` instead of its own item."""
+    row[4] = f"https://archive.org/details/{item}"
+    return row
+
+
+def test_a_live_withdraw_of_an_item_that_is_not_the_rows_own_is_refused():
+    row = _pointing_at(_withdraw_row(withdrawn="yes", live=True), "lcps-astoriaphotos-00002")
+    targets, problems = _plan_withdraw_rows([row], live=True)
+
+    assert targets == []
+    assert "not this row's own item 'lcps-astoriaphotos-00001'" in problems[0].errors[0]
+
+
+def test_a_test_mode_withdraw_of_its_own_item_under_any_stamp_is_accepted():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="yes"), "zztest-20990101t000000-lcps-astoriaphotos-00001"
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert problems == []
+    assert targets[0].action is SyncAction.WITHDRAW
+
+
+def test_a_test_mode_withdraw_of_another_rows_item_is_refused():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="yes"), f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert targets == []
+    assert "refusing to delete files from it" in problems[0].errors[0]
+
+
+def test_a_recheck_of_an_item_that_is_not_the_rows_own_is_refused():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="yes", ia_withdrawn="2026-09-30T10:00:00Z"),
+        f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert targets == []
+    assert "refusing to delete files from it" in problems[0].errors[0]
+
+
+def test_a_restore_of_an_item_that_is_not_the_rows_own_is_refused():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="no", ia_withdrawn="2026-09-30T10:00:00Z"),
+        f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert targets == []
+    assert "not this row's own item 'lcps-astoriaphotos-00001'" in problems[0].errors[0]
+    assert "refusing to restore this row's file into it" in problems[0].errors[0]
+
+
+ROW_ID = "lcps-astoriaphotos-00001"
+
+
+@pytest.mark.parametrize(
+    ("uploaded_as", "live", "own"),
+    [
+        (ROW_ID, True, True),
+        ("lcps-astoriaphotos-00002", True, False),
+        (f"zztest-{SYNC_STAMP}-{ROW_ID}", False, True),
+        (f"zztest-20990101t000000-{ROW_ID}", False, True),
+        (f"zztest-{SYNC_STAMP}-{ROW_ID}-extra", False, False),
+        (f"zztest-a-b-{ROW_ID}", False, False),
+        (f"zztest--{ROW_ID}", False, False),
+        (f"zztest-{ROW_ID}", False, False),
+    ],
+)
+def test_item_is_rows_own(uploaded_as, live, own):
+    from ia_bulk import item_is_rows_own
+
+    assert item_is_rows_own(uploaded_as, ROW_ID, live) is own
+
+
+def test_an_ordinary_update_is_not_held_to_the_delete_identity_rule():
+    """The rule guards deletes only; an ordinary push keeps today's ia_url behavior."""
+    row = _pointing_at(
+        _withdraw_row(withdrawn="no"), f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert problems == []
+    assert targets[0].action is SyncAction.UPDATE
+
+
+def _setup_withdraw_sync(
+    tmp_path, monkeypatch, rows, calls, *, files=("photo1.jpg",), fail=None,
+    before_read=None, registry=None, collection_check=None, recheck_result=None,
+    tasks=None,
+):
+    """The sync world plus every IA call a withdraw or restore makes, in one ordered list.
+    `fail` is a set of call kinds to refuse ("refuse" = IA refuses every delete); clear it to let a rerun through.
+    `tasks` is the TaskState every task query sees (none open by default)."""
+    from ia_bulk import ClearCheck, DeletePass
+
+    failing = fail if fail is not None else set()
+    for name in files:
+        (tmp_path / name).write_bytes(b"x")
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(registry or make_sheet_registry(files_dir=str(tmp_path))), encoding="utf-8"
+    )
+    client = RecordingSheetClient(
+        [WITHDRAW_SYNC_HEADER] + rows, SheetUploadRecorder(), before_read=before_read
+    )
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: client)
+
+    def fake_delete(identifier):
+        calls.append(("delete", identifier))
+        if "delete" in failing:
+            raise RuntimeError("archive.org unreachable")
+        if "refuse" in failing:
+            return DeletePass(refused=("photo1.jpg: refused",))
+        return DeletePass(deleted=("photo1.jpg",))
+
+    def fake_metadata(metadata, target):
+        calls.append(("metadata", target, dict(metadata)))
+        if "metadata" in failing:
+            raise RuntimeError("metadata refused")
+
+    def fake_upload(row, target_identifier, collection, files_dir):
+        calls.append(("upload", target_identifier, dict(row), collection))
+        if "upload" in failing:
+            raise RuntimeError("upload refused")
+
+    def fake_check(collection):
+        calls.append(("collection_check", collection))
+        return collection_check or CollectionConfirmed()
+
+    monkeypatch.setattr("ia_bulk.delete_item_files", fake_delete)
+    monkeypatch.setattr("ia_bulk.update_metadata_row", fake_metadata)
+    monkeypatch.setattr("ia_bulk.upload_row", fake_upload)
+    monkeypatch.setattr("ia_bulk.check_ia_collection", fake_check)
+
+    def fake_recheck(identifier):
+        calls.append(("recheck", identifier))
+        if "recheck" in failing:
+            raise RuntimeError("archive.org unreachable")
+        return recheck_result or ClearCheck()
+
+    monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", fake_recheck)
+
+    def fake_task_state(identifier):
+        if "task_query" in failing:
+            raise RuntimeError("tasks query refused")
+        return tasks or TaskState()
+
+    monkeypatch.setattr("ia_bulk.item_task_state", fake_task_state)
+    return registry_path, client
+
+
+WITHDRAWN_ITEM = f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
+
+
+@pytest.mark.parametrize(
+    ("tasks", "refusal"),
+    [
+        (
+            TaskState(running=("derive.php",), queued=("archive.php",)),
+            "Internet Archive is running a task on lcps-astoriaphotos-00001 (derive.php); nothing "
+            "was deleted - run sync-metadata again later",
+        ),
+        (
+            TaskState(paused=("archive.php", "archive.php")),
+            "Internet Archive has paused 2 task(s) on lcps-astoriaphotos-00001; IA staff must "
+            "release them - nothing was deleted",
+        ),
+        (
+            TaskState(queued=("derive.php",), error=("book_op.php",)),
+            "Internet Archive has 1 failed task(s) on lcps-astoriaphotos-00001; IA staff must "
+            "release them - nothing was deleted",
+        ),
+    ],
+)
+def test_a_withdraw_while_ia_runs_or_holds_a_task_deletes_nothing(
+    tmp_path, monkeypatch, capsys, tasks, refusal
+):
+    """Deletes sent while IA ran a task on the item were paused for IA staff, on the live service."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls, tasks=tasks
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert [call for call in calls if call[0] != "collection_check"] == []
+    assert f"    - {refusal}" in out.splitlines()
+    assert "Withdrawn this run" not in out
+    assert "withdrawn (files deleted" not in out
+    assert client.grid[1][6] == ""
+    assert client.grid[1][9] == ""
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["failures"] == [{"identifier": "lcps-astoriaphotos-00001", "error": refusal}]
+
+
+def test_a_withdraw_with_only_queued_tasks_goes_ahead(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls,
+        tasks=TaskState(queued=("derive.php",)),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert calls == [("delete", WITHDRAWN_ITEM), ("metadata", WITHDRAWN_ITEM, WITHDRAWN_PAYLOAD)]
+    assert client.grid[1][9] != ""
+
+
+def test_a_withdraw_that_cannot_ask_about_ias_tasks_deletes_nothing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, fail={"task_query"}
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert calls == []
+    assert (
+        f"    - could not check whether Internet Archive is running or holding a task on "
+        f"{WITHDRAWN_ITEM} (tasks query refused); nothing was deleted - run sync-metadata again later"
+    ) in capsys.readouterr().out.splitlines()
+    assert client.grid[1][9] == ""
+
+
+def test_a_withdraw_checks_ias_tasks_after_the_sheet_reread(tmp_path, monkeypatch):
+    """A row changed back to no is refused by the re-read first; IA is never asked."""
+    from ia_bulk import cmd_sync_metadata
+
+    def untick(grid, read_count):
+        if read_count == 2:
+            grid[1][8] = "no"
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, before_read=untick
+    )
+    asked = []
+    monkeypatch.setattr(
+        "ia_bulk.item_task_state", lambda identifier: asked.append(identifier) or TaskState()
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == []
+    assert asked == []
+
+
+def test_sync_withdraws_a_row_marked_withdrawn(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+    from utc_time import parse_utc
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 0
+    assert "    - Internet Archive accepted deletes: photo1.jpg" in capsys.readouterr().out.splitlines()
+    assert calls == [("delete", WITHDRAWN_ITEM), ("metadata", WITHDRAWN_ITEM, WITHDRAWN_PAYLOAD)]
+    parse_utc(client.grid[1][9])
+    planned, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+    assert client.grid[1][6] == planned[0].content_hash
+
+
+def test_a_withdraw_stamps_what_it_sent_so_the_next_run_sends_nothing(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    calls.clear()
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert [call for call in calls if call[0] in ("delete", "metadata")] == []
+    assert exit_code == 0
+
+
+def test_a_withdraw_whose_file_list_cannot_be_read_is_not_stamped_and_retries_whole(
+    tmp_path, monkeypatch
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls, fail = [], {"delete"}
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, fail=fail
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == [("delete", WITHDRAWN_ITEM)]
+    assert client.grid[1][6] == ""
+    assert client.grid[1][9] == ""
+
+    fail.clear()
+    calls.clear()
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["delete", "metadata"]
+    assert client.grid[1][9] != ""
+
+
+def test_a_withdraw_whose_text_write_fails_is_still_marked_started(tmp_path, monkeypatch):
+    """The files are going: ia_withdrawn says so at once, and the next run pushes the text.
+    Counted once, as a failure that says the withdrawal started - never also as withdrawn."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls, fail = [], {"metadata"}
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, fail=fail
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert client.grid[1][9] != ""
+    assert client.grid[1][6] == ""
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [entry["status"] for entry in rows] == ["failure"]
+    assert rows[0]["error"].startswith(f"withdrawal started on {WITHDRAWN_ITEM} but is incomplete")
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["pushed"] == 1
+    assert len(summary["failures"]) == 1
+
+    fail.clear()
+    calls.clear()
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call for call in calls if call[0] != "recheck"] == [
+        ("metadata", WITHDRAWN_ITEM, WITHDRAWN_PAYLOAD)
+    ]
+    assert client.grid[1][6] != ""
+
+
+def test_a_withdraw_ia_refused_entirely_is_not_marked_but_its_notice_is_hashed(tmp_path, monkeypatch):
+    """The notice landed, so un-withdrawing must push the Sheet's text back rather than read as in sync."""
+    from ia_bulk import cmd_sync_metadata, split_unchanged
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, fail={"refuse"}
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    planned, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+    assert exit_code == 1
+    assert [call[0] for call in calls] == ["delete", "metadata"]
+    assert client.grid[1][9] == ""
+    assert client.grid[1][6] == planned[0].content_hash
+    unwithdrawn, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="no", stored_hash=client.grid[1][6])])
+    to_push, _already = split_unchanged(unwithdrawn)
+    assert [target.row_number for target in to_push] == [2]
+
+
+def test_a_withdraw_ia_refused_entirely_warns_when_its_notice_hash_is_not_written(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row_after_the_text(grid, read_count):
+        if read_count == 3:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], [], fail={"refuse"},
+        before_read=insert_a_row_after_the_text,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert f"WARNING: the withdrawn notice replaced the text of {WITHDRAWN_ITEM}" in err
+    assert client.write_count == 0
+
+
+def test_a_withdraw_deletes_nothing_when_the_row_moved_since_the_read(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row(grid, read_count):
+        if read_count == 2:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, before_read=insert_a_row
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert calls == []
+
+
+def test_a_withdraw_is_marked_before_the_next_row_is_sent(tmp_path, monkeypatch):
+    """An interrupt later in the chunk must not lose the mark of deletes IA already accepted."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1, withdrawn="yes"), _withdraw_row(2, withdrawn="no")],
+        calls,
+    )
+
+    def interrupted_on_row_two(metadata, target):
+        if target.endswith("-00002"):
+            raise KeyboardInterrupt
+        calls.append(("metadata", target, dict(metadata)))
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", interrupted_on_row_two)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][9] != ""
+    # The notice's hash waits for the chunk's batch; losing it costs one re-push of the notice.
+    assert client.grid[1][6] == ""
+    assert client.grid[2][6] == ""
+
+
+def test_a_withdraw_interrupted_during_its_text_write_keeps_its_mark(tmp_path, monkeypatch):
+    """Deletes IA accepted are recorded before the text write, so Ctrl-C there cannot lose them."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+
+    def interrupted(metadata, target):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][9] != ""
+    assert client.grid[1][6] == ""
+
+
+def test_a_withdraw_whose_row_moved_after_its_deletes_warns_by_name(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row_after_the_deletes(grid, read_count):
+        if read_count == 3:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls,
+        before_read=insert_a_row_after_the_deletes,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert [call[0] for call in calls] == ["delete", "metadata"]
+    assert f"WARNING: deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
+    assert client.write_count == 0
+    assert [row[9] for row in client.grid[1:]] == ["", ""]
+
+
+def test_a_withdraw_writes_its_mark_once(tmp_path, monkeypatch):
+    """The withdraw's mark goes in its own write before its text; its hash rides with the chunk's stamp."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1, withdrawn="yes"), _withdraw_row(2, withdrawn="no")],
+        [],
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    writes = client._recorder.writes
+    assert [sorted(a1 for a1, _value in write) for write in writes] == [
+        ["J2"],
+        ["G2", "G3", "H2", "H3"],
+    ]
+
+
+def test_an_update_only_run_keeps_its_sheet_reads_and_writes(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1, withdrawn="no"), _withdraw_row(2, withdrawn="no")],
+        [],
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert client.read_count == 2
+    assert client.write_count == 1
+
+
+def test_sync_sends_the_projects_own_withdrawn_wording(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry = make_sheet_registry(
+        files_dir=str(tmp_path),
+        withdrawn_title="Removed",
+        withdrawn_description="Taken down on request.",
+    )
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, registry=registry
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert calls[1][2]["title"] == "Removed"
+    assert calls[1][2]["description"] == "Taken down on request."
+
+
+def test_a_withdraw_is_logged_as_withdrawn(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [entry["status"] for entry in rows] == ["withdrawn"]
+
+
+def test_a_withdraw_whose_stamp_fails_names_the_item_and_says_keep_it_withdrawn(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+    monkeypatch.setattr(
+        "ia_bulk.write_cells_if_any",
+        lambda client, updates: (_ for _ in ()).throw(RuntimeError("quota")),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    err = capsys.readouterr().err
+    assert WITHDRAWN_ITEM in err
+    assert "ia_withdrawn was not written" in err
+    assert "keep withdrawn set to yes" in err
+
+
+def test_push_outcome_counts_each_row_once():
+    from ia_bulk import PushOutcome, RowAction, RowFailure
+
+    started = RowAction(identifier="c", uploaded_as="c", detail="withdrawal started on c ...")
+    outcome = PushOutcome(
+        succeeded=1,
+        failures=(RowFailure(identifier="c", error=started.detail),),
+        withdrawn=(RowAction(identifier="a", uploaded_as="a", detail="x"),),
+        restored=(RowAction(identifier="b", uploaded_as="b", detail="y"),),
+        withdraw_started=(started,),
+    )
+
+    assert outcome.pushed == 4
+
+
+def test_a_withdraw_unticked_after_the_read_deletes_nothing(tmp_path, monkeypatch, capsys):
+    """A mistaken withdraw un-ticked mid-run must stop before its deletes, not after."""
+    from ia_bulk import cmd_sync_metadata
+
+    def untick(grid, read_count):
+        if read_count == 2:
+            grid[1][8] = "no"
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, before_read=untick
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert calls == []
+    assert client.grid[1][9] == ""
+    assert "no longer says withdrawn = yes" in capsys.readouterr().out
+
+
+def test_each_withdraw_rereads_the_sheet_just_before_its_deletes(tmp_path, monkeypatch):
+    """Read 2 checks row 1; read 3, after row 1's deletes, checks row 2."""
+    from ia_bulk import cmd_sync_metadata
+
+    def untick_row_two(grid, read_count):
+        if read_count == 3:
+            grid[2][8] = ""
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1), _withdraw_row(2)], calls,
+        before_read=untick_row_two,
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert [call[:2] for call in calls] == [("delete", WITHDRAWN_ITEM), ("metadata", WITHDRAWN_ITEM)]
+    assert client.grid[1][9] != ""
+    assert client.grid[2][9] == ""
+
+
+def test_an_update_only_run_reads_the_sheet_no_more_than_before(tmp_path, monkeypatch):
+    """The initial read and one stamp verify; the pre-delete read is for withdraws only."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no")], calls
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["metadata"]
+    assert client.read_count == 2
+
+
+def test_a_started_withdraw_whose_text_and_stamp_failed_is_not_called_on_ia(
+    tmp_path, monkeypatch, capsys
+):
+    """Its text never landed: the WARNING covers it, and nothing claims "0 rows" or the metadata."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], [], fail={"metadata"}
+    )
+    monkeypatch.setattr(
+        "ia_bulk.write_cells_if_any",
+        lambda client, updates: (_ for _ in ()).throw(RuntimeError("quota")),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    err = capsys.readouterr().err
+    assert "the Sheet stamp write failed: quota" in err
+    assert "IS on Internet Archive" not in err
+    assert "0 rows" not in err
+    assert f"deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
+
+
+def test_a_started_withdraw_whose_text_failed_and_stamp_reread_failed_is_not_called_on_ia(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    def fail_the_stamp_reread(grid, read_count):
+        if read_count == 3:
+            raise RuntimeError("Sheets API returned 503")
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], [], fail={"metadata"},
+        before_read=fail_the_stamp_reread,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    err = capsys.readouterr().err
+    assert "could not be re-read" in err
+    assert "IS on Internet Archive" not in err
+    assert f"deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
+
+
+WITHDRAWN_STAMP = "2026-09-30T10:00:00Z"
+RERUN_LINE = (
+    "run sync-metadata again later (an hour or so) until every withdrawn item reports clear - "
+    "Internet Archive can rebuild a thumbnail from a file it has not removed yet"
+)
+
+
+def _stamped_withdrawn_row(number=1):
+    """Withdrawn, stamped, its hash matching what it sends: nothing to push, only a re-check."""
+    row = _withdraw_row(number, withdrawn="yes", ia_withdrawn=WITHDRAWN_STAMP)
+    targets, _ = _plan_withdraw_rows([row])
+    row[6] = targets[0].content_hash
+    return row
+
+
+def test_every_run_rechecks_a_withdrawn_item_and_reports_it_clear(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert calls == [("recheck", WITHDRAWN_ITEM)]
+    assert client.write_count == 0
+    assert (
+        "1 withdrawn item clear (only Internet Archive's own files left, no task open)" in lines
+    )
+    assert RERUN_LINE not in lines
+    assert _all_sync_log_lines(tmp_path)[-1]["clear"] == [
+        {"identifier": "lcps-astoriaphotos-00001", "detail": "only Internet Archive's own files left, no task open"}
+    ]
+
+
+def test_an_item_still_holding_files_is_reported_still_clearing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import ClearCheck, DeletePass, cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], calls,
+        recheck_result=ClearCheck(deletes=DeletePass(deleted=("__ia_thumb.jpg",))),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert client.write_count == 0
+    assert "1 withdrawn item still clearing: lcps-astoriaphotos-00001" in lines
+    assert RERUN_LINE in lines
+
+
+def test_the_run_after_a_withdraw_only_rechecks(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    calls.clear()
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert calls == [("recheck", WITHDRAWN_ITEM)]
+
+
+def test_a_withdraw_run_asks_for_a_later_run(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert RERUN_LINE in capsys.readouterr().out.splitlines()
+
+
+def test_one_failed_recheck_is_reported_and_the_others_still_run(tmp_path, monkeypatch, capsys):
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row(1), _stamped_withdrawn_row(2)], calls
+    )
+
+    def flaky(identifier):
+        calls.append(("recheck", identifier))
+        if identifier.endswith("00001"):
+            raise requests.exceptions.ConnectionError("down")
+        return ClearCheck()
+
+    monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", flaky)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert [call[1][-5:] for call in calls] == ["00001", "00002"]
+    assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in lines
+    assert "1 withdrawn item clear (only Internet Archive's own files left, no task open)" in lines
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["failures"] == []
+    assert summary["recheck_failures"][0]["identifier"] == "lcps-astoriaphotos-00001"
+
+
+def test_rechecks_are_logged_clear_or_clearing(tmp_path, monkeypatch):
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
+        recheck_result=ClearCheck(tasks=TaskState(queued=("archive.php",))),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [entry["status"] for entry in rows] == ["clearing"]
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["clearing"] == [{
+        "identifier": "lcps-astoriaphotos-00001",
+        "detail": f"Internet Archive has 1 task queued on {WITHDRAWN_ITEM}; nothing was deleted - "
+        "run sync-metadata again later",
+    }]
+    assert summary["clear"] == []
+    assert summary["recheck_failures"] == []
+
+
+@pytest.mark.parametrize(
+    ("tasks", "reason"),
+    [
+        (
+            TaskState(running=("derive.php",)),
+            f"Internet Archive is running a task on {WITHDRAWN_ITEM} (derive.php); "
+            "nothing was deleted - run sync-metadata again later",
+        ),
+        (
+            TaskState(paused=("archive.php",)),
+            f"Internet Archive has paused 1 task(s) on {WITHDRAWN_ITEM}; IA staff must "
+            "release them - nothing was deleted",
+        ),
+    ],
+)
+def test_a_recheck_of_a_busy_item_is_still_clearing_and_says_why(
+    tmp_path, monkeypatch, capsys, tasks, reason
+):
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
+        recheck_result=ClearCheck(tasks=tasks),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert f"    - {reason}" in lines
+    assert "1 withdrawn item still clearing: lcps-astoriaphotos-00001" in lines
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["clearing"] == [{"identifier": "lcps-astoriaphotos-00001", "detail": reason}]
+    assert summary["clear"] == []
+
+
+def test_a_refused_recheck_delete_is_a_failure_and_still_clearing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import ClearCheck, DeletePass, cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
+        recheck_result=ClearCheck(
+            deletes=DeletePass(refused=("photo1_thumb.jpg: 403",), skipped=("__ia_thumb.jpg",))
+        ),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in lines
+    assert "1 withdrawn item still clearing: lcps-astoriaphotos-00001" in lines
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [(entry["status"], entry["error"]) for entry in rows] == [("clearing", None)]
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["recheck_failures"] == [{
+        "identifier": "lcps-astoriaphotos-00001",
+        "error": "Internet Archive refused to delete photo1_thumb.jpg: 403",
+    }]
+    assert summary["clearing"] == [{
+        "identifier": "lcps-astoriaphotos-00001",
+        "detail": "Internet Archive refused a delete; see the failure",
+    }]
+    assert summary["failures"] == []
+
+
+@pytest.mark.parametrize(("pending", "mirrored"), [(0, False), (1, True)])
+def test_only_a_still_clearing_recheck_is_mirrored_to_the_log_tab(
+    tmp_path, monkeypatch, pending, mirrored
+):
+    """A clear re-check is a withdrawn item's steady state: hourly rows would bury the tab."""
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    registry = make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [], registry=registry,
+        recheck_result=ClearCheck(tasks=TaskState(queued=("archive.php",) * pending)),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert ("Sync Log" in client.log_tabs) is mirrored
+
+
+RESTORED_STAMP = WITHDRAWN_STAMP
+
+
+def test_sync_restores_a_row_set_back_to_no(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 0
+    assert calls == [
+        ("upload", WITHDRAWN_ITEM, {
+            "title": "Photo 1", "mediatype": "image",
+            "identifier-bib": "photo1.jpg", "file": "photo1.jpg",
+        }, "test_collection"),
+        ("metadata", WITHDRAWN_ITEM, {
+            "title": "Photo 1", "identifier-bib": "photo1.jpg", "date": "[n.d.]",
+            "description": "REMOVE_TAG",
+        }),
+    ]
+    assert client.grid[1][9] == ""
+    assert client.grid[1][6] == sync_hash(metadata_to_send({"title": "Photo 1"}))
+
+
+UNCLEARED_RESTORE_WARNING = (
+    f"WARNING: the restore of {WITHDRAWN_ITEM} landed but ia_withdrawn was not cleared; let the "
+    "next run finish before setting withdrawn back to yes"
+)
+
+
+def test_a_restore_whose_row_moved_before_its_stamp_warns_by_name(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row_before_the_stamp(grid, read_count):
+        if read_count == 2:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], calls,
+        before_read=insert_a_row_before_the_stamp,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert [call[0] for call in calls] == ["upload", "metadata"]
+    assert client.write_count == 0
+    assert UNCLEARED_RESTORE_WARNING in capsys.readouterr().err
+
+
+def test_a_restore_whose_stamp_write_fails_warns_by_name(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], [],
+    )
+    client._raise_on_write = 1
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][9] == RESTORED_STAMP
+    assert UNCLEARED_RESTORE_WARNING in capsys.readouterr().err
+
+
+def test_a_restore_whose_upload_fails_does_not_warn(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], [],
+        fail={"upload"},
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_a_restore_whose_original_is_missing_is_refused_by_name_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, files=(),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "[FAIL] row 2 lcps-astoriaphotos-00001" in out
+    assert "restore refused: the original file was not found" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_restore_that_now_finds_a_different_file_is_refused_by_name_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """A restore never puts a different photograph into the permanent item."""
+    from ia_bulk import cmd_sync_metadata
+
+    row = _withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)
+    row[5] = "photo0.jpg"
+    calls = []
+    registry_path, client = _setup_withdraw_sync(tmp_path, monkeypatch, [row], calls)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert (
+        "restore refused: the row's file_template cells now find 'photo1.jpg', but "
+        "'ia_identifier_bib' says 'photo0.jpg' was uploaded"
+    ) in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+@pytest.mark.parametrize("failing", ["upload", "metadata"])
+def test_a_restore_that_fails_partway_stays_withdrawn_and_retries(tmp_path, monkeypatch, failing):
+    from ia_bulk import cmd_sync_metadata
+
+    calls, fail = [], {failing}
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, fail=fail,
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert client.grid[1][9] == RESTORED_STAMP
+
+    fail.clear()
+    calls.clear()
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["upload", "metadata"]
+    assert client.grid[1][9] == ""
+
+
+def test_a_restore_while_the_withdrawals_deletes_are_queued_uploads_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, tasks=TaskState(queued=("archive.php",) * 3),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "still processing this item's withdrawal (3 task(s) queued)" in out
+    assert "nothing was uploaded - run sync-metadata again later" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_restore_while_ia_holds_a_paused_task_names_ia_staff(tmp_path, monkeypatch, capsys):
+    """A paused task never clears by itself, so "still processing" would be wrong."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, tasks=TaskState(paused=("archive.php",), queued=("derive.php",)),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert (
+        f"Internet Archive has paused 1 task(s) on {WITHDRAWN_ITEM}; IA staff must release them "
+        "- nothing was uploaded"
+    ) in out
+    assert "still processing" not in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_restore_while_ia_runs_a_task_says_what_it_is_waiting_for(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, tasks=TaskState(running=("archive.php",), queued=("derive.php",)),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == []
+    assert (
+        "still processing this item's withdrawal (1 task(s) running, 1 task(s) queued)"
+        in capsys.readouterr().out
+    )
+
+
+def test_a_restore_that_cannot_ask_about_queued_tasks_uploads_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, fail={"task_query"},
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "could not check whether Internet Archive has finished" in out
+    assert "tasks query refused" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_refused_restore_goes_through_once_the_queue_is_empty(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, tasks=TaskState(queued=("archive.php",)),
+    )
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+
+    monkeypatch.setattr("ia_bulk.item_task_state", lambda identifier: TaskState())
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["upload", "metadata"]
+    assert client.grid[1][9] == ""
+
+
+def test_a_restore_is_logged_as_restored(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], []
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [entry["status"] for entry in rows] == ["restored"]
+
+
+def test_a_restore_into_an_item_that_is_not_the_rows_own_uploads_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """An ia_url edited after a withdraw must never send this row's photo into another item."""
+    from ia_bulk import cmd_sync_metadata
+
+    row = _pointing_at(
+        _withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP),
+        f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+    )
+    calls = []
+    registry_path, client = _setup_withdraw_sync(tmp_path, monkeypatch, [row], calls)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "[FAIL] row 2 lcps-astoriaphotos-00001" in out
+    assert "refusing to restore this row's file into it; nothing was uploaded" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def _restore_target():
+    from ia_bulk import SyncTarget
+
+    return SyncTarget(
+        row_number=2,
+        identifier="lcps-astoriaphotos-00001",
+        uploaded_as=WITHDRAWN_ITEM,
+        metadata={
+            "title": "Pier 39", "description": "", "date": "",
+            "folder_on_lacie_drive": "REMOVE_TAG",
+        },
+        action=SyncAction.RESTORE,
+        restore_file="SOP CD1/pier.jpg",
+    )
+
+
+def test_restore_metadata_puts_back_what_upload_sets_and_clears_the_notice_where_blank():
+    from ia_bulk import restore_metadata
+
+    assert restore_metadata(_restore_target()) == {
+        "title": "Pier 39",
+        "description": "REMOVE_TAG",
+        "date": "[n.d.]",
+        "folder_on_lacie_drive": "REMOVE_TAG",
+        "identifier-bib": "SOP CD1/pier.jpg",
+    }
+
+
+def test_restore_upload_row_is_what_upload_sends_without_the_remove_tags():
+    from ia_bulk import restore_upload_row
+
+    assert restore_upload_row(_restore_target(), "image") == {
+        "title": "Pier 39",
+        "description": "",
+        "date": "",
+        "mediatype": "image",
+        "identifier-bib": "SOP CD1/pier.jpg",
+        "file": "SOP CD1/pier.jpg",
+    }
+
+
+def test_attach_restore_files_leaves_other_targets_alone(tmp_path):
+    from ia_bulk import attach_restore_files
+
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert attach_restore_files(targets, tmp_path) == (targets, [])
+
+
+def test_sync_dry_run_previews_a_withdraw_in_ias_terms_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+    monkeypatch.setattr(
+        "ia_bulk.fetch_current_metadata",
+        lambda identifier: {"title": "Photo 1", "date": "[n.d.]", "identifier-bib": "photo1.jpg"},
+    )
+    monkeypatch.setattr(
+        "ia_bulk.fetch_item_files",
+        lambda identifier: _originals(
+            "photo1.jpg", "__ia_thumb.jpg", f"{identifier}_meta.xml", f"{identifier}_files.xml",
+        ),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert calls == []
+    assert client.write_count == 0
+    assert "1 to withdraw and 0 to restore - sent whatever their last push, since 'withdrawn' changed" in lines
+    assert f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW" in lines
+    assert "      would delete 2 files, with their derivatives: photo1.jpg, __ia_thumb.jpg" in lines
+    title = lines.index("      title")
+    assert lines[title + 1:title + 3] == ["          now: Photo 1", "          new: Withdrawn"]
+    date = lines.index("      date")
+    assert lines[date + 2] == "          new: (deleted)"
+    assert (
+        "      left untouched: identifier, collection, mediatype, and Internet Archive's own "
+        "files (_meta.xml, _files.xml, _meta.sqlite, _archive.torrent, _reviews.xml)"
+    ) in lines
+
+
+def test_sync_dry_run_says_how_a_real_withdraw_deletes(tmp_path, monkeypatch, capsys):
+    """Content first, the tile last and kept on a refusal, after a fresh Sheet read the dry run skips."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {"title": "Photo 1"})
+    monkeypatch.setattr(
+        "ia_bulk.fetch_item_files", lambda identifier: _originals("__ia_thumb.jpg", "photo1.jpg")
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    preview = lines.index(f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW")
+    assert lines[preview + 1:preview + 5] == [
+        "      would delete 2 files, with their derivatives: photo1.jpg, __ia_thumb.jpg",
+        "      in that order: content files first, __ia_thumb.jpg last (kept while a content "
+        "delete is refused)",
+        "      a real run re-reads the Sheet just before deleting, and deletes only if this row "
+        "still says withdrawn = yes",
+        "      it then checks Internet Archive is not running a task on the item or holding a "
+        "paused or failed one, and deletes nothing while it is",
+    ]
+
+
+def test_sync_dry_run_previews_a_restore_with_the_file_it_found(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], calls
+    )
+    monkeypatch.setattr(
+        "ia_bulk.fetch_current_metadata", lambda identifier: {"title": "Withdrawn"}
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert calls == []
+    assert f"  row 2: {WITHDRAWN_ITEM} - would RESTORE" in lines
+    assert "      would re-upload photo1.jpg (found on disk)" in lines
+    assert (
+        "      a real run first checks Internet Archive has finished processing the item's "
+        "withdrawal"
+    ) in lines
+    title = lines.index("      title")
+    assert lines[title + 1:title + 3] == ["          now: Withdrawn", "          new: Photo 1"]
+
+
+def test_sync_summary_names_withdrawn_and_restored_items():
+    from ia_bulk import PushOutcome, RowAction, SyncSummary, sync_summary_lines
+
+    summary = SyncSummary(
+        checked=3,
+        outcome=PushOutcome(
+            withdrawn=(RowAction(identifier="a", uploaded_as="a", detail="d"),),
+            restored=(
+                RowAction(identifier="b", uploaded_as="b", detail="e"),
+                RowAction(identifier="c", uploaded_as="c", detail="f"),
+            ),
+        ),
+    )
+
+    assert sync_summary_lines(summary) == [
+        "0 item(s) updated successfully, 0 unchanged, 0 error(s)",
+        "1 item withdrawn (files deleted, text replaced)",
+        "2 items restored (file re-uploaded, text put back)",
+        RERUN_LINE,
+    ]
+    record = summary.as_record(live=True)
+    assert record["withdrawn"] == [{"identifier": "a", "detail": "d"}]
+    assert [entry["identifier"] for entry in record["restored"]] == ["b", "c"]
+
+
+def test_a_live_withdraw_prints_the_darkening_hand_off(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], []
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert (
+        "Withdrawn this run - only Internet Archive staff can darken an item (take it fully "
+        "offline). Ask them to darken:"
+    ) in lines
+    assert (
+        "  lcps-astoriaphotos-00001  https://archive.org/details/lcps-astoriaphotos-00001"
+    ) in lines
+    assert (
+        "Sending that request is the operator's to do; this tool never contacts Internet "
+        "Archive staff. See docs/OPERATIONS.md, \"Withdrawing an item\"."
+    ) in lines
+
+
+def test_an_incomplete_live_withdraw_is_a_failure_but_still_in_the_hand_off(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], [], fail={"metadata"}
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in lines
+    assert not any(line.endswith("withdrawn (files deleted, text replaced)") for line in lines)
+    assert any(
+        line.startswith("    - withdrawal started on lcps-astoriaphotos-00001 but is incomplete")
+        for line in lines
+    )
+    assert (
+        "  lcps-astoriaphotos-00001  https://archive.org/details/lcps-astoriaphotos-00001"
+    ) in lines
+    assert RERUN_LINE in lines
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["withdrawn"] == []
+    assert summary["failures"][0]["error"].startswith(
+        "withdrawal started on lcps-astoriaphotos-00001 but is incomplete"
+    )
+
+
+def test_a_test_mode_withdraw_prints_no_hand_off(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "darken" not in capsys.readouterr().out
+
+
+def test_sync_dry_run_previews_a_recheck_and_deletes_nothing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row(), _stamped_withdrawn_row(2)], calls
+    )
+    monkeypatch.setattr(
+        "ia_bulk.fetch_item_files",
+        lambda identifier: (
+            _originals("photo1.jpg", "__ia_thumb.jpg", f"{identifier}_meta.xml")
+            if identifier.endswith("00001")
+            else _originals(f"{identifier}_meta.xml", f"{identifier}_files.xml")
+        ),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    second = f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002"
+    assert exit_code == 0
+    assert calls == []
+    assert client.write_count == 0
+    assert "re-checking 2 withdrawn items (deletes only; the text is not touched):" in lines
+    held = lines.index(
+        f"  row 2: {WITHDRAWN_ITEM} - still holds files; would delete again, in this order: "
+        "photo1.jpg, __ia_thumb.jpg"
+    )
+    assert lines[held + 1] == (
+        "      a real run first checks Internet Archive has no task open on the item (queued, "
+        "running, paused or failed), and deletes nothing while it has"
+    )
+    assert (
+        f"  row 3: {second} - holds only Internet Archive's own files; a real run asks "
+        "Internet Archive whether anything is still queued, running or paused before reporting "
+        "it clear"
+    ) in lines
+
+
+def test_fetch_item_files_returns_none_instead_of_raising(monkeypatch):
+    from ia_bulk import fetch_item_files
+
+    def unreachable(identifier, **kwargs):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(internetarchive, "get_item", unreachable)
+
+    assert fetch_item_files("item") is None
+
+
+class _MissingItem:
+    """What internetarchive.get_item returns for an identifier IA does not have: no raise."""
+
+    exists = False
+    metadata: dict = {}
+
+    def get_files(self):
+        return iter(())
+
+
+def test_sync_dry_run_previews_a_withdraw_of_an_item_ia_does_not_have(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _MissingItem())
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    preview = lines.index(f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW")
+    assert lines[preview + 1:preview + 3] == [
+        f"      Internet Archive has no item {WITHDRAWN_ITEM}; a real run fails on it",
+        "",
+    ]
+    assert not any("would delete" in line or "(not set)" in line for line in lines)
+
+
+def test_sync_dry_run_previews_a_recheck_of_an_item_ia_does_not_have(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], []
+    )
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _MissingItem())
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert (
+        f"  row 2: {WITHDRAWN_ITEM} - Internet Archive has no item {WITHDRAWN_ITEM}; a real run "
+        "fails on it"
+    ) in lines
+    assert not any("holds only Internet Archive's own files" in line for line in lines)
+
+
+def test_sync_dry_run_previews_a_withdraw_it_cannot_read(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: None)
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    preview = lines.index(f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW")
+    assert lines[preview + 1] == "      could not list its files, so which would be deleted is unknown"
+    assert (
+        "      could not read its current metadata, so which fields would change is unknown"
+    ) in lines[preview:]
+
+
+def test_sync_dry_run_previews_a_recheck_it_cannot_list(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], []
+    )
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+
+    assert (
+        f"  row 2: {WITHDRAWN_ITEM} - could not list its files"
+        in capsys.readouterr().out.splitlines()
+    )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_run_whose_every_row_was_refused_does_not_claim_none_is_uploaded(
+    tmp_path, monkeypatch, capsys, dry_run
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, files=(),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=dry_run))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert calls == []
+    assert "nothing to sync - no row is marked uploaded yet" not in lines
+    assert lines[-1] == (
+        "nothing to sync - every row marked uploaded was skipped (1 row, listed above)"
+    )
+
+
+def test_the_log_tab_names_each_clearing_item_and_failed_recheck(tmp_path, monkeypatch):
+    from ia_bulk import ClearCheck, DeletePass, cmd_sync_metadata
+
+    registry = make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row(1), _stamped_withdrawn_row(2)], [],
+        registry=registry,
+    )
+
+    def recheck(identifier):
+        if identifier.endswith("00002"):
+            raise requests.exceptions.ConnectionError("down")
+        return ClearCheck(deletes=DeletePass(deleted=("__ia_thumb.jpg",)))
+
+    monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", recheck)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = client.log_tabs["Sync Log"].appended
+    assert [row[2:] for row in rows[1:]] == [
+        ["clearing", "lcps-astoriaphotos-00001", "deleted again: __ia_thumb.jpg"],
+        [
+            "failure", "lcps-astoriaphotos-00002",
+            f"could not re-check zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002: down",
+        ],
+    ]
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
@@ -11219,6 +13648,20 @@ def test_sync_from_sheet_pins_a_null_planned_in_its_run_header(tmp_path, monkeyp
     assert _sync_log_entries(tmp_path)[0]["planned"] is None
 
 
+def test_sync_refuses_a_sheet_with_withdrawn_but_no_ia_withdrawn(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    grid = [SYNC_SHEET_HEADER + ["withdrawn"], _synced_grid()[1] + ["yes"]]
+    sent = []
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, grid, sent)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert sent == []
+    assert "ia_withdrawn" in capsys.readouterr().err
+
+
 def test_the_summary_names_each_failing_row_and_why_it_failed(tmp_path, monkeypatch):
     """The failure list is what makes the summary actionable rather than
     merely countable - a run reporting "1 error(s)" and nothing else sends
@@ -12947,14 +15390,14 @@ CONTRACT_FIXTURES = Path(__file__).resolve().parent / "contract_fixtures"
 
 
 def _contract_grid(tmp_path):
-    """Every lifecycle case the upload page shows, across two batches and one unbatched row."""
+    """Every lifecycle case the upload page shows, held included, across two batches and one unbatched row."""
     for name in (
         "photo1.jpg", "photo2.jpg", "photo4.jpg", "photo5.jpg", "photo6.jpg", "photo7.jpg",
-        "photo10.jpg",
+        "photo10.jpg", "photo12.jpg",
     ):
         (tmp_path / name).write_bytes(b"x")
     return [
-        BATCH_SHEET_HEADER,
+        BATCH_SHEET_HEADER + ["withdrawn"],
         ["First photo", "photo1.jpg", "", "", "", "", "Logging"],
         ["Second photo", "photo2.jpg", "", "", "", "", "Fishing"],
         ["Third photo", "photo3.jpg", "", "", "", "", "logging"],
@@ -12968,6 +15411,7 @@ def _contract_grid(tmp_path):
         ["", "photo9.jpg", "", "", "", "", "Fishing"],
         ["", "photo10.jpg", "", "", "", "", "Logging"],
         ["", "photo11.jpg", "", "", "", "", "Logging"],
+        ["Twelfth photo", "photo12.jpg", "", "", "", "", "Logging", "yes"],
     ]
 
 
@@ -13008,9 +15452,9 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["valid"] is False
     assert document["rows"] is None
     assert document["counts"] == {
-        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4},
-        "done": {"ready": 1, "invalid": 0, "not_ready": 0},
-        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
+        "unassigned": {"ready": 3, "invalid": 1, "not_ready": 4, "held": 1},
+        "done": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
+        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
     }
     # Row 9 is not-ready (blank title) AND broken (unresolvable file), and not_ready
     # beats invalid - it must not also be counted as invalid.
@@ -13018,12 +15462,14 @@ def test_validate_json_lists_each_batch_with_its_lifecycle_counts(tmp_path, monk
     assert document["rows_with_errors"] == [4, 9, 11]
     assert document["ready_to_upload"] == 4
     assert [batch["value"] for batch in document["batches"]] == ["Fishing", "Logging"]
-    assert document["batches"][0]["counts"]["unassigned"] == {"ready": 1, "invalid": 0, "not_ready": 2}
+    assert document["batches"][0]["counts"]["unassigned"] == {
+        "ready": 1, "invalid": 0, "not_ready": 2, "held": 0,
+    }
     assert document["batches"][0]["ready_to_upload"] == 1
     assert document["batches"][1]["counts"] == {
-        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2},
-        "done": {"ready": 1, "invalid": 0, "not_ready": 0},
-        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0},
+        "unassigned": {"ready": 1, "invalid": 1, "not_ready": 2, "held": 1},
+        "done": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
+        "reserved": {"ready": 1, "invalid": 0, "not_ready": 0, "held": 0},
     }
     assert document["batches"][1]["ready_to_upload"] == 2
 
@@ -13049,6 +15495,7 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
         (8, "reserved", "ready"),
         (10, "unassigned", "not_ready"),
         (11, "unassigned", "not_ready"),
+        (12, "unassigned", "held"),
     ]
     assert document["rows"][1]["errors"] != []
     assert document["rows"][2]["identifier"] == "lcps-astoriaphotos-00001"
@@ -13056,6 +15503,7 @@ def test_validate_json_for_a_batch_lists_its_rows_with_their_reasons(tmp_path, m
     assert document["rows"][2]["file"] == "photo6.jpg"
     assert document["rows"][4]["missing_fields"] == ["title"]
     assert document["rows"][5]["errors"] != []
+    assert document["rows"][6]["file"] == "photo12.jpg"
     # Row 9 is Fishing, not Logging, so it is out of this batch's scope.
     assert document["rows_with_errors"] == [4, 11]
     assert document["ready_to_upload"] == 2
@@ -14173,3 +16621,375 @@ def test_main_dispatches_to_cmd_serve(monkeypatch):
     monkeypatch.setattr(ia_bulk, "cmd_serve", lambda args: called.append(args.command) or 0)
     assert ia_bulk.main(["serve", "--project", "demo"]) == 0
     assert called == ["serve"]
+
+
+def _bulk_rows(withdrawing, restoring=0):
+    rows = [_withdraw_row(n, withdrawn="yes") for n in range(1, withdrawing + 1)]
+    rows += [
+        _withdraw_row(n, withdrawn="no", ia_withdrawn=RESTORED_STAMP)
+        for n in range(withdrawing + 1, withdrawing + restoring + 1)
+    ]
+    return rows
+
+
+BULK_FILES = tuple(f"photo{n}.jpg" for n in range(1, 13))
+
+
+def test_ten_withdrawals_in_one_run_go_through(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(10), calls, files=BULK_FILES
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 10
+
+
+def test_eleven_withdrawals_refuse_the_run_and_name_the_rows(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == []
+    assert client.write_count == 0
+    assert "would withdraw 11 and restore 0 items" in err
+    assert "(withdraw rows 2-12)" in err
+    assert "--allow-bulk-withdraw" in err
+
+
+def test_withdraws_and_restores_count_together(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(6, restoring=5), calls, files=BULK_FILES
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == []
+    assert "(withdraw rows 2-7; restore rows 8-12)" in err
+
+
+def _sync_log_tab_registry(tmp_path):
+    return make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+
+
+def test_a_bulk_refusal_is_recorded_in_the_log_and_the_log_tab(tmp_path, monkeypatch, capsys):
+    """The hourly agent's refusal is otherwise only on a console nobody reads."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES,
+        registry=_sync_log_tab_registry(tmp_path),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    err = capsys.readouterr().err
+
+    assert calls == []
+    assert client.write_count == 0
+    records = _all_sync_log_lines(tmp_path)
+    assert [record.get("record") for record in records] == ["run_header", "run_summary"]
+    assert records[-1]["refused"].startswith("refusing to run: this run would withdraw 11")
+    assert records[-1]["refused"] in err
+    assert records[-1]["pushed"] == 0
+    tab_rows = client.log_tabs["Sync Log"].appended
+    assert [row[2:] for row in tab_rows] == [["refused", "", records[-1]["refused"]]]
+    assert tab_rows[0][0] == records[-1]["timestamp"]
+
+
+def test_a_live_collection_refusal_is_recorded_in_the_log_and_the_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls,
+        collection_check=CollectionUnchecked(reason="ConnectionError", retry_later=True),
+        registry=_sync_log_tab_registry(tmp_path),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True)) == 1
+    err = capsys.readouterr().err
+
+    assert calls == [("collection_check", "lcpsociety")]
+    assert client.write_count == 0
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["refused"].startswith("could not confirm Internet Archive collection 'lcpsociety'")
+    assert summary["refused"] in err
+    assert [row[2] for row in client.log_tabs["Sync Log"].appended] == ["refused"]
+
+
+def test_a_refused_dry_run_writes_no_log_and_no_log_tab_row(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), [], files=BULK_FILES,
+        registry=_sync_log_tab_registry(tmp_path),
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: [])
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True)) == 1
+    assert not (tmp_path / "logs").exists()
+    assert client.log_tabs == {}
+
+
+def test_rows_refused_for_other_reasons_still_count_toward_the_limit(tmp_path, monkeypatch, capsys):
+    """12 disagreeing rows refuse the run even when 3 of them would be refused on their own."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(0, restoring=12), calls, files=BULK_FILES[:9]
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == []
+    assert client.write_count == 0
+    assert "would withdraw 0 and restore 12 items" in err
+    assert "(restore rows 2-13)" in err
+
+
+def test_a_withdraw_refused_by_the_own_item_rule_still_counts(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    rows = _bulk_rows(10) + [
+        _pointing_at(_withdraw_row(11, withdrawn="yes"), f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002")
+    ]
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, rows, calls, files=BULK_FILES)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == []
+    assert "would withdraw 11 and restore 0 items" in capsys.readouterr().err
+
+
+def test_the_flag_lets_a_bulk_withdraw_through(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES
+    )
+
+    exit_code = cmd_sync_metadata(
+        _sync_sheet_args(tmp_path, registry_path, allow_bulk_withdraw=True)
+    )
+
+    assert exit_code == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 11
+
+
+def test_an_already_withdrawn_row_does_not_count_toward_the_limit(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    rows = _bulk_rows(10) + [_withdraw_row(11, withdrawn="yes", ia_withdrawn=RESTORED_STAMP)]
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, rows, calls, files=BULK_FILES)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 10
+
+
+def test_rechecks_do_not_count_toward_the_limit(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    rows = _bulk_rows(10) + [_stamped_withdrawn_row(n) for n in (11, 12, 13)]
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, rows, calls, files=BULK_FILES)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 10
+    assert sum(1 for call in calls if call[0] == "recheck") == 3
+
+
+def test_the_dry_run_shows_the_same_refusal(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: [])
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == []
+    assert "would WITHDRAW" in captured.out
+    assert "--dry-run: a real run would be refused now:" in captured.err
+    assert "would withdraw 11 and restore 0 items" in captured.err
+
+
+def test_sync_parser_takes_allow_bulk_withdraw():
+    parser = build_parser()
+
+    assert parser.parse_args(["sync-metadata", "--project", "p"]).allow_bulk_withdraw is False
+    assert parser.parse_args(
+        ["sync-metadata", "--project", "p", "--allow-bulk-withdraw"]
+    ).allow_bulk_withdraw is True
+
+
+def test_delete_item_files_fails_for_an_item_ia_does_not_have(monkeypatch):
+    from ia_bulk import delete_item_files
+
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
+    )
+
+    with pytest.raises(RuntimeError, match="^Internet Archive has no item 'item'$"):
+        delete_item_files("item")
+
+
+def test_a_live_withdraw_of_an_item_ia_does_not_have_starts_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata, delete_item_files
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls
+    )
+    monkeypatch.setattr("ia_bulk.delete_item_files", delete_item_files)
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert [call for call in calls if call[0] == "metadata"] == []
+    assert client.grid[1][9] == ""
+    assert client.grid[1][6] == ""
+    assert "Internet Archive has no item 'lcps-astoriaphotos-00001'" in out
+    assert "withdrawal started" not in out
+    assert "Ask them to darken" not in out
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["withdrawn"] == []
+    assert len(summary["failures"]) == 1
+    assert "no item" in summary["failures"][0]["error"]
+
+
+def test_a_live_withdraw_confirms_the_collection_first(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 0
+    assert [call[0] for call in calls] == ["collection_check", "delete", "metadata"]
+    assert calls[0] == ("collection_check", "lcpsociety")
+
+
+def test_a_live_withdraw_refuses_when_archive_org_cannot_be_reached(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls,
+        collection_check=CollectionUnchecked(reason="ConnectionError", retry_later=True),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == [("collection_check", "lcpsociety")]
+    assert client.write_count == 0
+    assert (
+        "could not confirm Internet Archive collection 'lcpsociety' exists (ConnectionError), "
+        "and a live withdraw or restore runs only against a confirmed collection. Nothing was "
+        "sent; archive.org was unreachable or busy, so run this again later."
+    ) in err
+    assert "Nothing was uploaded" not in err
+
+
+def test_the_sync_collection_refusal_speaks_of_sending_not_uploading():
+    from ia_bulk import SYNC_COLLECTION_WORDING, collection_refusal
+
+    message = collection_refusal(
+        CollectionMissing(), "astoriaphotos", "lcpsociety", SYNC_COLLECTION_WORDING
+    )
+
+    assert message.endswith("Check ia_collection in the registry. Nothing was sent.")
+    assert "upload" not in message
+
+
+def test_a_live_dry_run_with_a_withdraw_checks_the_collection_too(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: [])
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True, dry_run=True))
+
+    assert calls == [("collection_check", "lcpsociety")]
+
+
+def test_a_test_mode_withdraw_does_not_ask_archive_org(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "collection_check" not in [call[0] for call in calls]
+
+
+def test_a_live_recheck_does_not_ask_archive_org(tmp_path, monkeypatch):
+    """A re-check only deletes from an item already withdrawn; nothing goes into a collection."""
+    from ia_bulk import cmd_sync_metadata
+
+    row = _withdraw_row(withdrawn="yes", ia_withdrawn=WITHDRAWN_STAMP, live=True)
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, [row], calls)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert "collection_check" not in [call[0] for call in calls]
+    assert ("recheck", "lcps-astoriaphotos-00001") in calls
+
+
+def test_a_live_run_with_only_ordinary_updates_does_not_ask_archive_org(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", live=True)], calls
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert [call[0] for call in calls] == ["metadata"]

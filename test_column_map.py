@@ -199,16 +199,24 @@ def test_check_grid_shape_empty_grid():
     assert errors == []
 
 
-def test_reserved_fields_are_all_ia_prefixed_except_file():
+def test_reserved_fields_are_all_ia_prefixed_except_file_and_withdrawn():
     assert RESERVED_FIELDS == {
         "file",
+        "withdrawn",
         "ia_identifier",
         "ia_identifier_bib",
         "ia_uploaded",
         "ia_url",
         "ia_sync_hash",
         "ia_last_synced",
+        "ia_withdrawn",
     }
+
+
+def test_the_withdrawal_columns_never_upload():
+    column_map = build_column_map(["Title", "Withdrawn", "ia_withdrawn"])
+
+    assert column_map.uploadable_fields() == ["title"]
 
 
 def test_identifier_is_no_longer_reserved_so_donor_references_upload():

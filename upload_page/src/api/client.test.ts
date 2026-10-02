@@ -31,9 +31,9 @@ const SAMPLE_VALIDATE_DOC = {
   rows_with_errors: [],
   ready_to_upload: 0,
   counts: {
-    unassigned: { ready: 0, invalid: 0, not_ready: 0 },
-    done: { ready: 0, invalid: 0, not_ready: 0 },
-    reserved: { ready: 0, invalid: 0, not_ready: 0 },
+    unassigned: { ready: 0, invalid: 0, not_ready: 0, held: 0 },
+    done: { ready: 0, invalid: 0, not_ready: 0, held: 0 },
+    reserved: { ready: 0, invalid: 0, not_ready: 0, held: 0 },
   },
   batches: [],
   rows: null,

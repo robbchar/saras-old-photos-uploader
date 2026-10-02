@@ -1,8 +1,10 @@
 # Known Issues
 
 Verified against the code and the real data in `data/` as of 2026-08-08. Each
-entry was reproduced, not inferred. Ordered by how much damage it can do to a
-`--live` run.
+entry was reproduced, not inferred, unless it says otherwise: a by-design
+limit or one inferred from the code says so in its *Found* line (#7, and #8's
+errored case; #8's paused case was observed).
+Ordered by how much damage it can do to a `--live` run.
 
 These are the open ones. Issues fixed since this file was written are recorded
 at the bottom under [Fixed](#fixed), so the reasoning survives. Numbers are
@@ -131,6 +133,55 @@ which are naturally multi-valued.
 **Mitigation today:** the raw `ia` CLI —
 `ia metadata <identifier> --modify 'subject[1]:...'` — or the item's
 archive.org edit page. Neither is recorded in the Sheet.
+
+## 7. Restores are not counted in the daily upload total
+
+**Severity: low — bounded by the per-run withdraw limit.**
+
+*Found 2026-10-01, by design (withdrawal).* A restore re-uploads an item's
+original file, but the 5,000/day cap `upload` enforces counts only the Sheet's
+`ia_uploaded` cells, which a restore never writes. A day of restores spends
+Internet Archive's daily quota without `upload` seeing it.
+
+**Mitigation today:** `sync-metadata` refuses a run that would withdraw or
+restore more than 10 items unless `--allow-bulk-withdraw` is passed, so
+restores stay small unless someone overrides that on purpose. On a day with a
+bulk restore, size that day's uploads with `upload --limit`.
+
+## 8. An errored or paused Internet Archive task blocks clear and restore
+
+**Severity: low — visible, never silent, but needs IA staff to resolve.**
+
+*Found 2026-10-01, in review of the withdrawal work, as an inference; the
+paused case observed 2026-10-02 on `test_collection`, the errored case still
+inferred.* A re-check reports an item
+*clear* only when IA's task catalog has nothing open for it, and a restore
+is refused while anything is (see
+[`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-restore-waits-until-internet-archive-has-finished-the-withdrawal)).
+A task that errors, or that IA pauses for its staff, stays in that catalog
+until IA staff act. The e2e rehearsal saw the second: delete tasks submitted
+while the item's first derive was running were set to `paused` with
+`wait_admin`, no task log, and were unchanged nine hours later. One such task
+keeps the item *still clearing* and any restore of it refused, run after run.
+
+The tool now tells these apart from a slow queue and stops sending deletes
+into one: a withdraw waits while IA is running a task on the item or holding
+a paused or failed one, and a re-check's deletes wait while any task is open
+(see
+[`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-delete-waits-while-ia-runs-or-holds-a-task-on-the-item)),
+which avoids the case observed. A paused task already there is named —
+"Internet Archive has paused N task(s) on <item>; IA staff must release
+them" — in the withdraw's refusal, the re-check's still-clearing reason and
+the restore's refusal, and an errored one ("N failed task(s)") the same way:
+deletes sent behind it might never run, so it holds up a withdraw too.
+
+**Mitigation today:** that message is the sign. Ask Internet Archive staff to
+release or clear the item's held tasks — the same contact as the darkening
+request. Nothing on the tool's side needs undoing: the next run after they do
+withdraws it, reports it clear, or restores it. A task whose state the tool
+cannot read (no status or color it knows) is treated as running: the item is
+never deleted past or reported clear, but the message says "running" rather
+than naming IA staff.
 
 ## Fixed
 

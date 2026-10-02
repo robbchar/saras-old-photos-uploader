@@ -1,6 +1,8 @@
 """E2E rehearsal: the real CLI against the real Test Sheet and IA's test_collection.
 
-Opt-in, takes minutes: python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+Opt-in, takes minutes: python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s
+Run test_rehearsal alone: the upload-page e2e resets the Test Sheet afterward and wipes the
+withdrawn row step 9a leaves for the hand clear check.
 Each step label names the hand check it replaces.
 """
 
@@ -16,12 +18,14 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import IO, Any, Protocol, TextIO, TypeVar
+from unittest.mock import patch
 
 import internetarchive
+import internetarchive.config
 import pytest
 from googleapiclient.errors import HttpError
 
@@ -46,9 +50,12 @@ from ia_bulk import (
     CollectionConfirmed,
     CollectionMissing,
     build_sheets_service,
+    TaskState,
     check_ia_collection,
+    item_task_state,
 )
 from log_tab import LOG_TAB_HEADER
+from project_config import DEFAULT_WITHDRAWN_DESCRIPTION, DEFAULT_WITHDRAWN_TITLE
 from sheet_client import SheetClient
 
 # For test_upload_page_drives_a_real_run_end_to_end: a real upload_server,
@@ -77,6 +84,7 @@ LOCK_LEASE = timedelta(seconds=2 * CLI_TIMEOUT_SECONDS)
 
 UPLOAD_COLUMNS = ("ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib")
 SYNC_COLUMNS = ("ia_sync_hash", "ia_last_synced.")
+WITHDRAW_COLUMNS = ("Withdrawn", "ia_withdrawn")
 BROKEN_FILENAME = "does-not-exist.jpg"
 # ia_bulk.py prints this on stderr when IA refuses a request as rate limited and the run stops.
 IA_RATE_LIMIT_NOTICE = "Internet Archive asked us to slow down"
@@ -98,6 +106,9 @@ STEP_6 = "step 6 - sync dry run (DEPLOYMENT §16 step 2)"
 STEP_7 = "step 7 - sync an edit (OPERATIONS 'Rehearsing the log tabs' step 3, first run)"
 STEP_8 = "step 8 - edit reached IA (OPERATIONS pre-live checklist: zztest item eyeballed)"
 STEP_9 = "step 9 - quiet sync (OPERATIONS 'Rehearsing the log tabs' step 3, second run)"
+STEP_9A = "step 9a - withdraw two items (OPERATIONS 'Withdrawing an item' steps 1-2)"
+STEP_9A2 = "step 9a2 - the next run re-checks them (OPERATIONS 'Withdrawing an item' step 4)"
+STEP_9B = "step 9b - restore one (OPERATIONS 'Withdrawing an item', putting it back)"
 STEP_10 = "step 10 - tabs match log files (OPERATIONS 'Rehearsing the log tabs' step 4)"
 STEP_11 = "step 11 - only expected cells changed (OPERATIONS 'Rehearsing the log tabs' step 5)"
 STEP_12 = "step 12 - restore the broken filename (OPERATIONS 'Rehearsing the log tabs' step 2: put the cell back)"
@@ -293,7 +304,15 @@ def expect_recorded(step: str, sheet: RehearsalSheet, grid: list[list[str]], row
     )
 
 
-def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], *, lock: RehearsalLock) -> Found:
+def wait_for_ia(
+    step: str,
+    description: str,
+    probe: Callable[[], Found | None],
+    *,
+    lock: RehearsalLock,
+    on_timeout: str | Callable[[], str] | None = None,
+) -> Found:
+    """`on_timeout` may be a callable, read only at the timeout, for a message built from the last probe."""
     check_in(lock, step)
     deadline = time.monotonic() + IA_POLL_TIMEOUT_SECONDS
     while True:
@@ -301,13 +320,86 @@ def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], 
         if found is not None:
             return found
         if time.monotonic() >= deadline:
-            pytest.fail(f"{step}: IA did not show {description} within {IA_POLL_TIMEOUT_SECONDS // 60} min")
+            message = on_timeout() if callable(on_timeout) else on_timeout
+            pytest.fail(f"{step}: {message or f'IA did not show {description}'} (waited {IA_POLL_TIMEOUT_SECONDS // 60} min)")
         time.sleep(IA_POLL_INTERVAL_SECONDS)
+
+
+def real_ia_session() -> internetarchive.ArchiveSession:
+    """A session with the credentials the CLI runs use; conftest hides them from this process, and IA's task queue needs them."""
+    with patch.dict(os.environ):
+        for name, value in REAL_IA_ENVIRONMENT.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        config = internetarchive.config.get_config()
+    return internetarchive.get_session(config=config, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+
+
+def ia_task_state(identifier: str) -> TaskState:
+    return item_task_state(identifier, archive_session=real_ia_session())
+
+
+def open_tasks(identifiers: Sequence[str]) -> dict[str, TaskState]:
+    """The items IA has any task open on, in any state, with those tasks."""
+    states = {identifier: ia_task_state(identifier) for identifier in identifiers}
+    return {identifier: state for identifier, state in states.items() if state.total}
+
+
+def still_busy_message(busy: dict[str, TaskState], refused: str) -> str:
+    """A wait's timeout message; a paused or failed task needs IA staff, so re-running won't help."""
+    message = f"{' and '.join(busy)} still busy at Internet Archive, so {refused}"
+    held = [reason for identifier, state in busy.items() if (reason := state.held(identifier))]
+    if not held:
+        return f"{message}; re-run later"
+    return (
+        f"{message}: {'; '.join(held)} - re-running won't help until they do "
+        "(see docs/OPERATIONS.md, 'Withdrawing an item')"
+    )
+
+
+def wait_until_idle(step: str, identifiers: Sequence[str], refused: str, *, lock: RehearsalLock) -> None:
+    """Waits until IA has no task open on any of the items. Not just none running: a queued derive
+    can start before the CLI's own check, which then refuses."""
+    busy: dict[str, TaskState] = {}
+
+    def idle() -> bool | None:
+        busy.clear()
+        busy.update(open_tasks(identifiers))
+        return None if busy else True
+
+    wait_for_ia(
+        step,
+        f"no open task on {' or '.join(identifiers)}",
+        idle,
+        lock=lock,
+        on_timeout=lambda: still_busy_message(busy, refused),
+    )
 
 
 def item_metadata(identifier: str) -> dict[str, Any] | None:
     """Not fetch_current_metadata: it returns None on any error, which would wait out the timeout instead of failing."""
     return dict(internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS).metadata) or None
+
+
+def item_file_mtime(identifier: str, name: str) -> int | None:
+    """When IA last stored the named file (epoch seconds), or None when the item has no such file."""
+    item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    for file in item.get_files():
+        if file.name == name:
+            return int(getattr(file, "mtime", 0) or 0)
+    return None
+
+
+def has_withdrawn_text(identifier: str) -> bool:
+    """IA shows the withdrawn notice and no identifier-bib; the files may still be clearing."""
+    metadata = item_metadata(identifier) or {}
+    return (
+        metadata.get("title") == DEFAULT_WITHDRAWN_TITLE
+        and metadata.get("description") == DEFAULT_WITHDRAWN_DESCRIPTION
+        and "identifier-bib" not in metadata
+    )
 
 
 class RehearsalSheet:
@@ -562,6 +654,77 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_9, len(sheet.log_rows(target.sync_log_tab)) == len(sync_log), "the quiet run appended to Sync Log")
     expect(STEP_9, sheet.grid() == grid_after_sync, "the quiet run changed the Sheet")
 
+    # Row 3 stays withdrawn after the rehearsal, for the hand clear check (OPERATIONS).
+    second_identifier = identifiers[SECOND_UPLOADED]
+    # The restore's proof: the original reappears with a newer mtime, since 9a's deletes may still be queued.
+    original_mtime = item_file_mtime(first_identifier, "e2e-01.jpg")
+    expect(STEP_9A, bool(original_mtime), f"{first_identifier} lists no mtime for e2e-01.jpg before the withdraw")
+    # A withdraw is refused while IA runs or holds a task on the item (the upload's derive, here).
+    wait_until_idle(
+        STEP_9A, (first_identifier, second_identifier), "the withdraw would be refused", lock=lock
+    )
+    check_in(lock, STEP_9A)
+    sheet.edit(FIRST_UPLOADED, "Withdrawn", "yes")
+    sheet.edit(SECOND_UPLOADED, "Withdrawn", "yes")
+    result = run_cli(STEP_9A, "sync-metadata", lock=lock, log_dir=log_dir)
+    expect_run(
+        STEP_9A, result, 0,
+        "2 items withdrawn (files deleted, text replaced)",
+        "until every withdrawn item reports clear",
+    )
+    for original in ("e2e-01.jpg", "e2e-02.jpg"):
+        accepted = [
+            line for line in result.stdout.splitlines()
+            if "Internet Archive accepted deletes: " in line and original in line
+        ]
+        expect(STEP_9A, accepted != [], f"no accepted delete of {original} in the run's output")
+    sync_log = sheet.log_rows(target.sync_log_tab)
+    expect(STEP_9A, [row[2] for row in sync_log[-3:]] == ["summary", "withdrawn", "withdrawn"], f"Sync Log rows: {sync_log[1:]}")
+    grid = sheet.grid()
+    for row in (FIRST_UPLOADED, SECOND_UPLOADED):
+        expect(STEP_9A, sheet.cell(grid, row, "ia_withdrawn") != "", f"row {row + 1} ia_withdrawn was not stamped")
+    for identifier in (first_identifier, second_identifier):
+        wait_for_ia(
+            STEP_9A,
+            f"the withdrawn notice on {identifier}",
+            lambda identifier=identifier: True if has_withdrawn_text(identifier) else None,
+            lock=lock,
+        )
+
+    grid_before_recheck = sheet.grid()
+    result = run_cli(STEP_9A2, "sync-metadata", lock=lock, log_dir=log_dir)
+    expect_run(STEP_9A2, result, 0)
+    expect(
+        STEP_9A2,
+        re.search(r"withdrawn items? (still clearing|clear \()", result.stdout) is not None,
+        f"no re-check report in:\n{result.stdout}",
+    )
+    expect(STEP_9A2, sheet.grid() == grid_before_recheck, "the re-check run changed the Sheet")
+
+    # A restore is refused while IA still has the withdrawal's tasks queued; never restore blind.
+    wait_until_idle(STEP_9B, (first_identifier,), "the restore would be refused", lock=lock)
+    check_in(lock, STEP_9B)
+    sheet.edit(FIRST_UPLOADED, "Withdrawn", "no")
+    result = run_cli(STEP_9B, "sync-metadata", lock=lock, log_dir=log_dir)
+    expect_run(STEP_9B, result, 0, "1 item restored (file re-uploaded, text put back)")
+    sync_log = sheet.log_rows(target.sync_log_tab)
+    expect(STEP_9B, "restored" in [row[2] for row in sync_log[-3:]], f"Sync Log rows: {sync_log[1:]}")
+    grid = sheet.grid()
+    expect(STEP_9B, sheet.cell(grid, FIRST_UPLOADED, "ia_withdrawn") == "", "ia_withdrawn was not cleared")
+    expect(STEP_9B, sheet.cell(grid, SECOND_UPLOADED, "ia_withdrawn") != "", "row 3 lost its ia_withdrawn")
+    wait_for_ia(
+        STEP_9B,
+        f"the restored title on {first_identifier}",
+        lambda: True if (item_metadata(first_identifier) or {}).get("title") == edited_title else None,
+        lock=lock,
+    )
+    wait_for_ia(
+        STEP_9B,
+        f"a re-uploaded e2e-01.jpg in {first_identifier}'s file list",
+        lambda: True if (item_file_mtime(first_identifier, "e2e-01.jpg") or 0) > (original_mtime or 0) else None,
+        lock=lock,
+    )
+
     # Steps 10 and 11 only read, but check in so a lock lost after step 9 fails as one.
     check_in(lock, STEP_10)
     for tab in target.log_tabs:
@@ -575,6 +738,7 @@ def test_rehearsal(tmp_path, request):
     check_in(lock, STEP_11)
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
+    allowed |= {(row, column) for row in (FIRST_UPLOADED, SECOND_UPLOADED) for column in WITHDRAW_COLUMNS}
     expect_only_allowed_changes(STEP_11, fixture, sheet.grid(), allowed)
     # Step 12 runs as the finalizer registered at step 4.
 
@@ -903,6 +1067,113 @@ def test_cli_environment_uses_the_real_ia_settings_and_the_current_proxy(monkeyp
     assert environment["HTTPS_PROXY"] == "http://proxy.invalid:3128"
 
 
+def test_real_ia_session_carries_the_cli_runs_credentials_not_this_processs_empty_config(monkeypatch, tmp_path):
+    real_config = tmp_path / "real-ia.ini"
+    real_config.write_text("\n".join(["[s3]", "access = real-access", "secret = real-secret", ""]), encoding="utf-8")
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_CONFIG_FILE", str(real_config))
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_ACCESS_KEY_ID", None)
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_SECRET_ACCESS_KEY", None)
+    config_before = os.environ["IA_CONFIG_FILE"]
+
+    session = real_ia_session()
+
+    assert (session.access_key, session.secret_key) == ("real-access", "real-secret")
+    assert os.environ["IA_CONFIG_FILE"] == config_before
+
+
+def test_real_ia_session_prefers_the_cli_runs_key_environment(monkeypatch):
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_ACCESS_KEY_ID", "env-access")
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_SECRET_ACCESS_KEY", "env-secret")
+
+    session = real_ia_session()
+
+    assert (session.access_key, session.secret_key) == ("env-access", "env-secret")
+    assert "IA_ACCESS_KEY_ID" not in os.environ
+
+
+class CatalogTask:
+    def __init__(self, status: str) -> None:
+        self.task_dict = {"status": status, "cmd": "derive.php"}
+
+
+def test_ia_task_state_asks_ia_for_the_catalog_with_the_credentialed_session(monkeypatch):
+    session = object()
+    monkeypatch.setattr("test_e2e_rehearsal.real_ia_session", lambda: session)
+    calls: list[dict[str, Any]] = []
+
+    def fake_get_tasks(**kwargs: Any) -> set[CatalogTask]:
+        calls.append(kwargs)
+        return {CatalogTask("queued"), CatalogTask("running")}
+
+    monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
+
+    assert ia_task_state("lcps-x-00001") == TaskState(queued=("derive.php",), running=("derive.php",))
+    assert calls[0]["archive_session"] is session
+    assert calls[0]["identifier"] == "lcps-x-00001"
+    assert calls[0]["params"] == {"catalog": 1, "history": 0}
+
+
+def test_open_tasks_names_every_item_with_any_task_open_even_a_queued_one(monkeypatch):
+    """A queued derive can start running before the CLI's own check, so only idle is safe."""
+    states = {
+        "idle": TaskState(),
+        "queued": TaskState(queued=("derive.php",)),
+        "running": TaskState(running=("derive.php",)),
+        "paused": TaskState(paused=("archive.php",)),
+    }
+    monkeypatch.setattr("test_e2e_rehearsal.ia_task_state", states.__getitem__)
+
+    assert open_tasks(list(states)) == {name: states[name] for name in ("queued", "running", "paused")}
+
+
+def test_still_busy_message_says_to_re_run_later_while_ia_is_working():
+    busy = {"a": TaskState(queued=("derive.php",)), "b": TaskState(running=("derive.php",))}
+
+    assert still_busy_message(busy, "the withdraw would be refused") == (
+        "a and b still busy at Internet Archive, so the withdraw would be refused; re-run later"
+    )
+
+
+def test_still_busy_message_says_ia_staff_must_release_a_paused_task():
+    busy = {"a": TaskState(paused=("archive.php",)), "b": TaskState(running=("derive.php",))}
+
+    assert still_busy_message(busy, "the restore would be refused") == (
+        "a and b still busy at Internet Archive, so the restore would be refused: Internet Archive "
+        "has paused 1 task(s) on a; IA staff must release them - re-running won't help until they "
+        "do (see docs/OPERATIONS.md, 'Withdrawing an item')"
+    )
+
+
+def test_waiting_until_idle_times_out_naming_what_ia_still_holds(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "IA_POLL_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        "test_e2e_rehearsal.ia_task_state",
+        {"a": TaskState(), "b": TaskState(paused=("archive.php",))}.__getitem__,
+    )
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match=re.escape(
+            "step 9a: b still busy at Internet Archive, so the withdraw would be refused: Internet "
+            "Archive has paused 1 task(s) on b; IA staff must release them"
+        ),
+    ):
+        wait_until_idle("step 9a", ("a", "b"), "the withdraw would be refused", lock=lock)
+
+
+def test_waiting_until_idle_returns_once_no_task_is_open(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+    answers = iter([TaskState(queued=("derive.php",)), TaskState()])
+    monkeypatch.setattr(sys.modules[__name__], "IA_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr("test_e2e_rehearsal.ia_task_state", lambda identifier: next(answers))
+
+    wait_until_idle("step 9b", ("a",), "the restore would be refused", lock=lock)
+
+    with pytest.raises(StopIteration):
+        next(answers)
+
+
 def test_run_summary_timestamp_is_none_without_a_run_summary(tmp_path):
     log_file = tmp_path / "run.jsonl"
     log_file.write_text('{"record": "row"}\n', encoding="utf-8")
@@ -1039,3 +1310,29 @@ def test_waiting_for_ia_after_the_lock_was_lost_fails_before_probing(tmp_path):
         wait_for_ia("step 5", "item zztest-x", lambda: probes.append(1) or True, lock=lock)
 
     assert probes == []
+
+
+def test_waiting_for_ia_that_times_out_says_what_it_was_given(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "IA_POLL_TIMEOUT_SECONDS", 0)
+
+    with pytest.raises(pytest.fail.Exception, match=re.escape("queue for x is still busy; re-run later")):
+        wait_for_ia("step 9b", "x's queue empty", lambda: None, lock=lock, on_timeout="queue for x is still busy; re-run later")
+
+
+def test_item_file_mtime_reads_the_named_file_and_is_none_when_it_is_absent(monkeypatch):
+    class Listed:
+        def __init__(self, name: str, mtime: str | None) -> None:
+            self.name = name
+            if mtime is not None:
+                self.mtime = mtime
+
+    class Item:
+        def get_files(self):
+            return [Listed("e2e-01.jpg_meta.xml", "5"), Listed("e2e-01.jpg", "1700000000"), Listed("e2e-02.jpg", None)]
+
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **_kwargs: Item())
+
+    assert item_file_mtime("x", "e2e-01.jpg") == 1700000000
+    assert item_file_mtime("x", "e2e-02.jpg") == 0
+    assert item_file_mtime("x", "e2e-03.jpg") is None

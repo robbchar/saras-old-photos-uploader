@@ -300,7 +300,9 @@ photos actually live on this machine.
 3. `doctor`'s `files drive` check reports `UNKNOWN` (not `FAIL`) if the path
    doesn't exist — the drive being unplugged means "could not tell what's on
    it," not "broken." See §15. It never blocks `--enable-agent` (§12):
-   `sync-metadata` does not read the drive.
+   `sync-metadata` reads the drive only to restore a withdrawn item, and
+   with the drive unplugged it refuses that row by name and restores it on a
+   later run.
 
 ## 8. The real `sheet_id`
 
@@ -344,13 +346,21 @@ would throw away the two things they are good for:
 The red background is the signal: *the tool owns this, don't type here unless
 you know why.* A cataloguer never needs to touch either column.
 
+Withdrawing items takes two more headers, added together or not at all:
+**`withdrawn`**, the yes/no a person types, and **`ia_withdrawn`**, which the
+tool writes and nobody else should (treat it like the two above). A Sheet
+with `withdrawn` but no `ia_withdrawn` is refused by `sync-metadata`, and by
+the check below. See
+[`OPERATIONS.md`, "Withdrawing an item"](OPERATIONS.md#withdrawing-an-item).
+
 ```bash
 .venv/bin/python ia_bulk.py doctor --project <project> --live
 ```
 
 `doctor`'s `sync state columns` check runs the checks `sync-metadata` makes
 on the Sheet before it sends anything, so it fails on what would make the
-agent refuse: no data rows, either sync column missing, a header problem (any
+agent refuse: no data rows, either sync column missing (or `ia_withdrawn`
+missing beside `withdrawn`), a header problem (any
 two headers that normalize to the same name, so the second would be silently
 ignored, or a blank or punctuation-only header), a missing `upload` write-back
 column, or a `file_template` naming a column the Sheet lacks. As in §8, this

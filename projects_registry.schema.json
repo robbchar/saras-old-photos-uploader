@@ -116,6 +116,14 @@
           "minItems": 1,
           "items": { "$ref": "#/$defs/nonBlankString" },
           "description": "File extensions that count as photos. Case and leading dot are optional. Default: .jpg .jpeg .tif .tiff .png."
+        },
+        "withdrawn_title": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Title a withdrawn item gets on Internet Archive. Default: Withdrawn."
+        },
+        "withdrawn_description": {
+          "$ref": "#/$defs/nonBlankString",
+          "description": "Description a withdrawn item gets on Internet Archive. Default: This item has been withdrawn by the Lower Columbia Preservation Society."
         }
       }
     }

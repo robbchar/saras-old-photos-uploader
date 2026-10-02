@@ -33,10 +33,19 @@ function countNotReady(counts: ValidateCounts): number {
   );
 }
 
+/** Not-yet-uploaded rows held back by their `withdrawn` cell; a withdrawn
+ * done row is an uploaded item, not a pending one. */
+function countHeld(counts: ValidateCounts): number {
+  return counts.unassigned.held + counts.reserved.held;
+}
+
 function unreadyReason(batch: ValidateBatch): string {
   const notReady = countNotReady(batch.counts);
-  if (notReady === 0) return "all uploaded";
-  return `${notReady} not ready`;
+  const held = countHeld(batch.counts);
+  const parts: string[] = [];
+  if (notReady > 0) parts.push(`${notReady} not ready`);
+  if (held > 0) parts.push(`${held} withdrawn`);
+  return parts.length === 0 ? "all uploaded" : parts.join(", ");
 }
 
 function labelFor(batch: ValidateBatch): string {
