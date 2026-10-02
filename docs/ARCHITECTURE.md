@@ -385,7 +385,10 @@ and any other refusal is named in the returned `DeletePass`. The withdrawn
 text then goes through `update_metadata_row()`. `ia_withdrawn`
 (`withdrawn_updates()`) is written once the pass started (a delete accepted,
 or nothing left to delete); `ia_sync_hash`/`ia_last_synced` only when every
-delete was accepted and the text landed. A restore is refused while IA's
+delete was accepted and the text landed. `_mark_started()` writes both at
+once, after its own `_verified()` re-read and before the next row is sent,
+not in the chunk's end-of-chunk `_stamp()`; a mark it cannot write is named
+by `_warn_unmarked()`. A restore is refused while IA's
 task catalog has anything queued for the item, or cannot be asked
 (`require_withdrawal_processed()`); otherwise `upload_row()` re-sends the
 original with what `upload` sends, and `restore_metadata()` goes through

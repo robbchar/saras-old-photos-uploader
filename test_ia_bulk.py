@@ -10300,6 +10300,86 @@ def test_a_withdraw_deletes_nothing_when_the_row_moved_since_the_read(tmp_path, 
     assert calls == []
 
 
+def test_a_withdraw_is_marked_before_the_next_row_is_sent(tmp_path, monkeypatch):
+    """An interrupt later in the chunk must not lose the mark of deletes IA already accepted."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1, withdrawn="yes"), _withdraw_row(2, withdrawn="no")],
+        calls,
+    )
+
+    def interrupted_on_row_two(metadata, target):
+        if target.endswith("-00002"):
+            raise KeyboardInterrupt
+        calls.append(("metadata", target, dict(metadata)))
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", interrupted_on_row_two)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    planned, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+    assert client.grid[1][9] != ""
+    assert client.grid[1][6] == planned[0].content_hash
+    assert client.grid[2][6] == ""
+
+
+def test_a_withdraw_whose_row_moved_after_its_deletes_warns_by_name(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row_after_the_deletes(grid, read_count):
+        if read_count == 3:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls,
+        before_read=insert_a_row_after_the_deletes,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert [call[0] for call in calls] == ["delete", "metadata"]
+    assert f"WARNING: deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
+    assert client.write_count == 0
+    assert [row[9] for row in client.grid[1:]] == ["", ""]
+
+
+def test_a_withdraw_writes_its_mark_once(tmp_path, monkeypatch):
+    """The withdraw's cells go in their own write; the chunk's stamp carries only the update."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1, withdrawn="yes"), _withdraw_row(2, withdrawn="no")],
+        [],
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    writes = client._recorder.writes
+    assert [sorted(a1 for a1, _value in write) for write in writes] == [
+        ["G2", "H2", "J2"],
+        ["G3", "H3"],
+    ]
+
+
+def test_an_update_only_run_keeps_its_sheet_reads_and_writes(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(1, withdrawn="no"), _withdraw_row(2, withdrawn="no")],
+        [],
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert client.read_count == 2
+    assert client.write_count == 1
+
+
 def test_sync_sends_the_projects_own_withdrawn_wording(tmp_path, monkeypatch):
     from ia_bulk import cmd_sync_metadata
 

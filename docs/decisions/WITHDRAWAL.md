@@ -91,8 +91,9 @@ Each withdraw re-reads the Sheet just before its deletes and goes ahead only
 if the row is still where the run read it (its `file_template` fingerprint and
 `ia_identifier`) **and** its `withdrawn` cell still reads yes. The re-read is
 before the delete rather than after, and per withdraw rather than per chunk,
-because a delete cannot be sent again; it costs one Sheet read per withdraw,
-at most ten a run unless the limit below is overridden. A row that fails it
+because a delete cannot be sent again. With the re-read before its mark
+(below), a withdraw costs two Sheet reads and one write, at most ten
+withdraws a run unless the limit below is overridden. A row that fails it
 is refused by name, nothing is deleted, and the run exits 1 — a row un-ticked
 mid-run included, so a destructive step never changes course unseen; the next
 run follows what the Sheet says then. A row whose `file_template` cells are
@@ -102,7 +103,11 @@ deleted or stamped, and the darkening hand-off does not list it.
 
 `ia_withdrawn` is written as soon as IA accepts a delete, even if a later
 delete or the text write fails; the hash is written only once the text landed
-and every delete was accepted. A withdraw that never started repeats whole on
+and every delete was accepted. Both are written right after that withdraw,
+after one more re-read confirms the row has not moved, and before the run
+sends the next row — not with the chunk's batch at its end — so a run
+interrupted later in the chunk (Ctrl-C, a shutdown, a crash) has already
+recorded every withdrawal it started. A withdraw that never started repeats whole on
 the next run; one that started is finished by the next run's metadata push
 and re-check (below). If even the `ia_withdrawn` write is lost — the row
 moved, or the Sheet write failed — the run names the items and says to keep

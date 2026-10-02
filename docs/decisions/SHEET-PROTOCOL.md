@@ -205,7 +205,11 @@ Four choices went into the shape:
   runs on sleeps and shuts down unpredictably, including mid-run. A single
   end-of-run batch stamps nothing when the run is killed; a per-row write
   exceeds the Sheets API's 60 writes/minute/user. Per chunk is one request per
-  chunk and costs a kill at most one chunk's stamps.
+  chunk and costs a kill at most one chunk's stamps. The exception is a
+  withdraw (at most ten a run unless overridden): its `ia_withdrawn` mark and
+  stamp are written on their own, right after its deletes, because a lost mark
+  is not a harmless re-push — see
+  [`WITHDRAWAL.md`](WITHDRAWAL.md#withdrawal-is-a-sheet-column-and-sync-metadata-makes-ia-match-it).
 
 Failure modes are deliberately safe. Deleting the column, clearing cells, or
 pasting over them causes at worst a spurious re-sync, which Internet Archive

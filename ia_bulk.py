@@ -5779,7 +5779,9 @@ class SheetSyncRun:
     run would re-push everything; one write per row would blow through the
     Sheets API's 60 writes/minute/user. One batch per chunk is a single API
     request per chunk - about 8 for a 4,000-row re-sync - and a kill costs at
-    most one chunk's stamps, whose rows simply push again next time."""
+    most one chunk's stamps, whose rows simply push again next time. A
+    withdraw is the exception: its lost mark is not a harmless re-push, so
+    _mark_started() writes it before the next row."""
 
     client: SheetClient
     columns: SyncColumns
@@ -5805,7 +5807,7 @@ class SheetSyncRun:
         for chunk in chunk_rows(targets, self.chunk_size):
             stamped: list[tuple[int, str]] = []
             pushed: list[SyncTarget] = []
-            # (row_number, ia_withdrawn value) for rows whose files this chunk moved.
+            # Restored rows' ia_withdrawn clears; a withdraw's mark is written at once (_mark_started).
             marks: list[tuple[int, str]] = []
 
             for target in chunk:
@@ -5823,11 +5825,9 @@ class SheetSyncRun:
                     if deletes is not None and deletes.deleted:
                         print(f"    - Internet Archive accepted deletes: {', '.join(deletes.deleted)}")
                     if started:
-                        # Withdrawal started: marked now, even if the text write failed.
-                        pushed.append(target)
-                        marks.append((target.row_number, utc_timestamp()))
+                        # Marked before the next row, even if the text write failed: an interrupt must not lose it.
+                        self._mark_started(target, text_landed=error is None)
                     if error is None:
-                        stamped.append((target.row_number, target.content_hash))
                         withdrawn.append(
                             RowAction(
                                 identifier=target.identifier,
@@ -6027,23 +6027,14 @@ class SheetSyncRun:
         would stamp a human edit made during the run as already-synced, and
         that edit would be lost permanently with nothing to notice it.
 
-        `marks` are ia_withdrawn values for rows whose deletes started; a mark
-        that cannot be written is warned about by name (_warn_unmarked)."""
+        `marks` are the ia_withdrawn clears of restored rows; withdraws mark
+        themselves at once (_mark_started)."""
         if not stamped and not marks:
             return
 
-        # Rows whose metadata is on IA; a withdraw whose text failed is covered by the WARNING only.
         landed = {row for row, _digest in stamped}
         safe = self._verified(pushed, landed)
         safe_rows = {target.row_number for target in safe}
-        # A withdraw's mark is a timestamp; a restore's is "" and needs no warning.
-        marked_rows = {row for row, value in marks if value}
-        started_on = {
-            target.row_number: target.uploaded_as
-            for target in pushed
-            if target.row_number in marked_rows
-        }
-        self._warn_unmarked([item for row, item in started_on.items() if row not in safe_rows])
         safe_stamps = [(row, digest) for row, digest in stamped if row in safe_rows]
         updates = stamp_updates(safe_stamps, self.columns, utc_timestamp()) + withdrawn_updates(
             [(row, value) for row, value in marks if row in safe_rows], self.columns
@@ -6056,7 +6047,27 @@ class SheetSyncRun:
                 f"{self._metadata_landed(len(safe_stamps))}Continuing.",
                 file=sys.stderr,
             )
-            self._warn_unmarked([item for row, item in started_on.items() if row in safe_rows])
+
+    def _mark_started(self, target: SyncTarget, text_landed: bool) -> None:
+        """Writes a started withdraw's ia_withdrawn (and its hash, once the text landed) before
+        the run moves on, so an interrupt later in the chunk cannot lose it."""
+        landed = {target.row_number} if text_landed else set()
+        if not self._verified([target], landed):
+            self._warn_unmarked([target.uploaded_as])
+            return
+        synced_at = utc_timestamp()
+        stamps = [(target.row_number, target.content_hash)] if text_landed else []
+        updates = stamp_updates(stamps, self.columns, synced_at) + withdrawn_updates(
+            [(target.row_number, synced_at)], self.columns
+        )
+        try:
+            write_cells_if_any(self.client, updates)
+        except Exception as exc:
+            print(
+                f"the Sheet stamp write failed: {exc}. {self._metadata_landed(len(stamps))}Continuing.",
+                file=sys.stderr,
+            )
+            self._warn_unmarked([target.uploaded_as])
 
     @staticmethod
     def _warn_unmarked(identifiers: list[str]) -> None:
