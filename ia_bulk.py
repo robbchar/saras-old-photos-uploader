@@ -5740,10 +5740,29 @@ def restore_metadata(target: SyncTarget) -> dict[str, str]:
     return restored
 
 
-def withdrawal_refusal(to_push: list[SyncTarget]) -> str | None:
+def withdrawal_disagreements(
+    rows: list[dict[str, str]], column_map: ColumnMap
+) -> tuple[list[int], list[int]]:
+    """(withdraw, restore) row numbers: every uploaded row whose `withdrawn` disagrees with
+    `ia_withdrawn`, counted before any per-row refusal so a refused row cannot shrink the count."""
+    withdrawing: list[int] = []
+    restoring: list[int] = []
+    if WITHDRAWN_COLUMN not in column_map.field_names.values():
+        return withdrawing, restoring
+    for offset, row in enumerate(rows):
+        value, problem = read_withdrawn_cell(row)
+        if problem is not None or classify_row(row) is not RowState.DONE:
+            continue
+        action = sync_action(value, bool((row.get(IA_WITHDRAWN_COLUMN) or "").strip()))
+        if action is SyncAction.WITHDRAW:
+            withdrawing.append(offset + 2)
+        elif action is SyncAction.RESTORE:
+            restoring.append(offset + 2)
+    return withdrawing, restoring
+
+
+def withdrawal_refusal(withdrawing: list[int], restoring: list[int]) -> str | None:
     """Why this run would move too many items' files at once, or None; both directions count."""
-    withdrawing = [target.row_number for target in to_push if target.action is SyncAction.WITHDRAW]
-    restoring = [target.row_number for target in to_push if target.action is SyncAction.RESTORE]
     if len(withdrawing) + len(restoring) <= BULK_WITHDRAW_LIMIT:
         return None
     named = []
@@ -6308,7 +6327,9 @@ def sync_from_sheet(args) -> int:
 
     # A dry run sends nothing, so it still previews, then names the refusal.
     bulk_refusal = (
-        None if getattr(args, "allow_bulk_withdraw", False) else withdrawal_refusal(to_push)
+        None
+        if getattr(args, "allow_bulk_withdraw", False)
+        else withdrawal_refusal(*withdrawal_disagreements(rows, column_map))
     )
     if bulk_refusal and not dry_run:
         print(bulk_refusal, file=sys.stderr)

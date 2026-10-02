@@ -16186,6 +16186,39 @@ def test_withdraws_and_restores_count_together(tmp_path, monkeypatch, capsys):
     assert "(withdraw rows 2-7; restore rows 8-12)" in err
 
 
+def test_rows_refused_for_other_reasons_still_count_toward_the_limit(tmp_path, monkeypatch, capsys):
+    """12 disagreeing rows refuse the run even when 3 of them would be refused on their own."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(0, restoring=12), calls, files=BULK_FILES[:9]
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == []
+    assert client.write_count == 0
+    assert "would withdraw 0 and restore 12 items" in err
+    assert "(restore rows 2-13)" in err
+
+
+def test_a_withdraw_refused_by_the_own_item_rule_still_counts(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    rows = _bulk_rows(10) + [
+        _pointing_at(_withdraw_row(11, withdrawn="yes"), f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002")
+    ]
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, rows, calls, files=BULK_FILES)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == []
+    assert "would withdraw 11 and restore 0 items" in capsys.readouterr().err
+
+
 def test_the_flag_lets_a_bulk_withdraw_through(tmp_path, monkeypatch):
     from ia_bulk import cmd_sync_metadata
 

@@ -846,7 +846,9 @@ items in total refuses before sending anything and names the rows
 (`refusing to run: this run would withdraw … more than the 10 one run may
 change without --allow-bulk-withdraw`) — a fill-down or a paste over the
 column looks exactly like that. The dry run shows the same refusal after its
-preview. Re-checks of items already withdrawn don't count. If every one is
+preview. Every row whose `withdrawn` disagrees with `ia_withdrawn` counts,
+even one that would be refused on its own (say, a restore whose original is
+missing). Re-checks of items already withdrawn don't count. If every one is
 meant:
 
 ```bash

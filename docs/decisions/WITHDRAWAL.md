@@ -196,7 +196,11 @@ would carry it out unattended. So a run whose withdraws plus restores exceed
 10 refuses entirely before anything is sent, and names the rows, unless
 `--allow-bulk-withdraw` is passed; the dry run previews the run, shows the
 same refusal and exits 1. Only rows whose `withdrawn` cell and
-`ia_withdrawn` disagree count. Already-withdrawn, stamped rows (re-checks)
+`ia_withdrawn` disagree count — every uploaded one, counted before any
+per-row refusal, so a row refused for another reason (a missing original, an
+`ia_url` that is not its own item) still counts: a paste over the column is
+just as much a mistake when some of the rows it hit could not be acted on.
+Already-withdrawn, stamped rows (re-checks)
 don't, and neither does a withdraw that started but did not finish: its
 `ia_withdrawn` is stamped, so it returns as an ordinary update plus a
 re-check (unless that stamp was lost too, when it repeats as a withdraw). A withdraw that never started (refused before its deletes, an item

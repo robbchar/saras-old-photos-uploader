@@ -408,7 +408,9 @@ text, need no pre-delete re-read (the item is already this row's withdrawn
 item), and never count toward the bulk limit.
 
 Before sending, `withdrawal_refusal()` refuses a run moving more than
-`BULK_WITHDRAW_LIMIT` (10) items unless `--allow-bulk-withdraw` (a dry run
+`BULK_WITHDRAW_LIMIT` (10) items — counted by `withdrawal_disagreements()`
+over every uploaded row, before any per-row refusal — unless
+`--allow-bulk-withdraw` (a dry run
 previews, then prints the refusal and exits 1), and a live run with any
 withdraw or restore first confirms `ia_collection` on archive.org
 (`confirm_collection_on_archive_org()`, worded for sync).
