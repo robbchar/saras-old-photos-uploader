@@ -640,10 +640,10 @@ rate_limited, stopped_by_request, rate_limit_status, skipped}`. The counts mean:
 
 `unconfirmed` is the one to read first. A refused send is recoverable by
 rerunning; an unconfirmed row is a photograph that exists on Internet
-Archive under a permanent identifier the Sheet does not know about, so the
-next run reads the row as un-uploaded and would upload it *again* under a
-second identifier. Keeping it out of `failures` is the whole reason the
-list is separate.
+Archive under a permanent identifier the Sheet has not marked uploaded. The
+next run retries it under that same identifier; clearing its `ia_identifier`
+first mints a second one. Keeping it out of `failures` is the whole reason
+the list is separate.
 
 `not_attempted` is the only number here that **overlaps** the lists rather
 than partitioning against them: it is the console's own "the run stopped
@@ -729,7 +729,8 @@ it hands the writer is an `AppendOnlyTab` — a type carrying `ensure_tab` and
 metadata columns even by mistake. `mirror_run()` catches everything and reports on
 stderr — by the time it runs, items exist on Internet Archive under
 permanent identifiers, and a telemetry failure reported as a failed run
-would invite the rerun that mints a second identifier.
+would invite a hand repair of rows that are already done, and clearing a
+row's `ia_identifier` is what mints a second identifier.
 
 A sync run that pushed nothing, found nothing wrong and found no withdrawn
 item still clearing is not mirrored (`sync_run_is_worth_mirroring()`); see `DECISIONS.md`, "The Sheet's log tabs

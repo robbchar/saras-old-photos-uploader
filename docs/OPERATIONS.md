@@ -1102,7 +1102,8 @@ gives the whole run in one record, without the row lines above it. For
 and `rate_limit_status`.
 Read `unconfirmed`
 first: those files **are** on Internet Archive but were never marked in the
-Sheet, so the next run would upload them again under a second identifier.
+Sheet. The next run retries them under the same identifiers; clearing their
+`ia_identifier` first would mint second ones.
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
 
 Symmetrically, `head -1` of the same log gives its `run_header`, whose

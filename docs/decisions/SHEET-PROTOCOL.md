@@ -445,9 +445,10 @@ returns before a log is opened at all.
 **A failed mirror can never fail the run.** By the time it is written, files
 are on Internet Archive under permanent identifiers and the Sheet has
 already been updated. A Sheets hiccup while writing *telemetry* that turned
-a successful upload into a failed one would invite a rerun — and a rerun is
-what mints a second identifier for a photograph that already has one. The
-failure is reported on stderr, naming the JSONL that is still on disk.
+a successful upload into a failed one would invite a hand repair of rows
+that are already done, and clearing a row's `ia_identifier` is what mints a
+second identifier for a photograph that already has one. The failure is
+reported on stderr, naming the JSONL that is still on disk.
 
 **Off unless configured.** A registry entry with neither key does no read,
 no create and no append. There is no default tab name, because a default
