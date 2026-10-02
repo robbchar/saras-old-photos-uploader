@@ -2,7 +2,8 @@
 
 Verified against the code and the real data in `data/` as of 2026-08-08. Each
 entry was reproduced, not inferred, unless it says otherwise: a by-design
-limit or one inferred from the code says so in its *Found* line (#7, #8).
+limit or one inferred from the code says so in its *Found* line (#7, and #8's
+errored case; #8's paused case was observed).
 Ordered by how much damage it can do to a `--live` run.
 
 These are the open ones. Issues fixed since this file was written are recorded
@@ -151,8 +152,9 @@ bulk restore, size that day's uploads with `upload --limit`.
 
 **Severity: low — visible, never silent, but needs IA staff to resolve.**
 
-*Found 2026-10-01, in review of the withdrawal work, as an inference;
-observed 2026-10-02 on `test_collection`.* A re-check reports an item
+*Found 2026-10-01, in review of the withdrawal work, as an inference; the
+paused case observed 2026-10-02 on `test_collection`, the errored case still
+inferred.* A re-check reports an item
 *clear* only when IA's task catalog has nothing open for it, and a restore
 is refused while anything is (see
 [`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-restore-waits-until-internet-archive-has-finished-the-withdrawal)).

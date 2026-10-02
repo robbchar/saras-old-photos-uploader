@@ -185,7 +185,7 @@ def test_a_sync_names_each_withdrawn_restored_and_clearing_item_but_not_clear_on
         "withdrawn": [{"identifier": "lcps-sarasoldphotos-00012", "detail": "files deleted and text replaced on lcps-sarasoldphotos-00012"}],
         "restored": [{"identifier": "lcps-sarasoldphotos-00013", "detail": "SOP/x.jpg re-uploaded to lcps-sarasoldphotos-00013"}],
         "clearing": [{"identifier": "lcps-sarasoldphotos-00009", "detail": "deleted again: __ia_thumb.jpg"}],
-        "clear": [{"identifier": "lcps-sarasoldphotos-00008", "detail": "only Internet Archive's own files left, nothing queued"}],
+        "clear": [{"identifier": "lcps-sarasoldphotos-00008", "detail": "only Internet Archive's own files left, no task open"}],
         "recheck_failures": [{"identifier": "lcps-sarasoldphotos-00007", "error": "could not re-check: down"}],
         "failures": [],
         "skipped": [],

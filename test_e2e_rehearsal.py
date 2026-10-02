@@ -305,8 +305,14 @@ def expect_recorded(step: str, sheet: RehearsalSheet, grid: list[list[str]], row
 
 
 def wait_for_ia(
-    step: str, description: str, probe: Callable[[], Found | None], *, lock: RehearsalLock, on_timeout: str | None = None
+    step: str,
+    description: str,
+    probe: Callable[[], Found | None],
+    *,
+    lock: RehearsalLock,
+    on_timeout: str | Callable[[], str] | None = None,
 ) -> Found:
+    """`on_timeout` may be a callable, read only at the timeout, for a message built from the last probe."""
     check_in(lock, step)
     deadline = time.monotonic() + IA_POLL_TIMEOUT_SECONDS
     while True:
@@ -314,7 +320,8 @@ def wait_for_ia(
         if found is not None:
             return found
         if time.monotonic() >= deadline:
-            pytest.fail(f"{step}: {on_timeout or f'IA did not show {description}'} (waited {IA_POLL_TIMEOUT_SECONDS // 60} min)")
+            message = on_timeout() if callable(on_timeout) else on_timeout
+            pytest.fail(f"{step}: {message or f'IA did not show {description}'} (waited {IA_POLL_TIMEOUT_SECONDS // 60} min)")
         time.sleep(IA_POLL_INTERVAL_SECONDS)
 
 
@@ -334,9 +341,41 @@ def ia_task_state(identifier: str) -> TaskState:
     return item_task_state(identifier, archive_session=real_ia_session())
 
 
-def busy_items(identifiers: Sequence[str]) -> list[str]:
-    """The items IA is running or holding a paused task on; sync-metadata refuses to withdraw those."""
-    return [identifier for identifier in identifiers if ia_task_state(identifier).busy_reason(identifier)]
+def open_tasks(identifiers: Sequence[str]) -> dict[str, TaskState]:
+    """The items IA has any task open on, in any state, with those tasks."""
+    states = {identifier: ia_task_state(identifier) for identifier in identifiers}
+    return {identifier: state for identifier, state in states.items() if state.total}
+
+
+def still_busy_message(busy: dict[str, TaskState], refused: str) -> str:
+    """A wait's timeout message; a paused or failed task needs IA staff, so re-running won't help."""
+    message = f"{' and '.join(busy)} still busy at Internet Archive, so {refused}"
+    held = [reason for identifier, state in busy.items() if (reason := state.held(identifier))]
+    if not held:
+        return f"{message}; re-run later"
+    return (
+        f"{message}: {'; '.join(held)} - re-running won't help until they do "
+        "(see docs/OPERATIONS.md, 'Withdrawing an item')"
+    )
+
+
+def wait_until_idle(step: str, identifiers: Sequence[str], refused: str, *, lock: RehearsalLock) -> None:
+    """Waits until IA has no task open on any of the items. Not just none running: a queued derive
+    can start before the CLI's own check, which then refuses."""
+    busy: dict[str, TaskState] = {}
+
+    def idle() -> bool | None:
+        busy.clear()
+        busy.update(open_tasks(identifiers))
+        return None if busy else True
+
+    wait_for_ia(
+        step,
+        f"no open task on {' or '.join(identifiers)}",
+        idle,
+        lock=lock,
+        on_timeout=lambda: still_busy_message(busy, refused),
+    )
 
 
 def item_metadata(identifier: str) -> dict[str, Any] | None:
@@ -621,17 +660,8 @@ def test_rehearsal(tmp_path, request):
     original_mtime = item_file_mtime(first_identifier, "e2e-01.jpg")
     expect(STEP_9A, bool(original_mtime), f"{first_identifier} lists no mtime for e2e-01.jpg before the withdraw")
     # A withdraw is refused while IA runs or holds a task on the item (the upload's derive, here).
-    withdrawing = (first_identifier, second_identifier)
-    wait_for_ia(
-        STEP_9A,
-        "no running or paused task on the items to withdraw",
-        lambda: True if not busy_items(withdrawing) else None,
-        lock=lock,
-        on_timeout=(
-            f"Internet Archive is still running or holding a task on {' or '.join(withdrawing)}, so the "
-            "withdraw would be refused; re-run later (a paused task needs IA staff - see "
-            "docs/OPERATIONS.md, 'Withdrawing an item')"
-        ),
+    wait_until_idle(
+        STEP_9A, (first_identifier, second_identifier), "the withdraw would be refused", lock=lock
     )
     check_in(lock, STEP_9A)
     sheet.edit(FIRST_UPLOADED, "Withdrawn", "yes")
@@ -672,13 +702,7 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_9A2, sheet.grid() == grid_before_recheck, "the re-check run changed the Sheet")
 
     # A restore is refused while IA still has the withdrawal's tasks queued; never restore blind.
-    wait_for_ia(
-        STEP_9B,
-        f"{first_identifier}'s task queue empty",
-        lambda: True if ia_task_state(first_identifier).total == 0 else None,
-        lock=lock,
-        on_timeout=f"Internet Archive's queue for {first_identifier} is still busy; re-run later",
-    )
+    wait_until_idle(STEP_9B, (first_identifier,), "the restore would be refused", lock=lock)
     check_in(lock, STEP_9B)
     sheet.edit(FIRST_UPLOADED, "Withdrawn", "no")
     result = run_cli(STEP_9B, "sync-metadata", lock=lock, log_dir=log_dir)
@@ -1089,7 +1113,8 @@ def test_ia_task_state_asks_ia_for_the_catalog_with_the_credentialed_session(mon
     assert calls[0]["params"] == {"catalog": 1, "history": 0}
 
 
-def test_busy_items_names_items_with_a_running_or_paused_task_but_not_a_queued_one(monkeypatch):
+def test_open_tasks_names_every_item_with_any_task_open_even_a_queued_one(monkeypatch):
+    """A queued derive can start running before the CLI's own check, so only idle is safe."""
     states = {
         "idle": TaskState(),
         "queued": TaskState(queued=("derive.php",)),
@@ -1098,7 +1123,55 @@ def test_busy_items_names_items_with_a_running_or_paused_task_but_not_a_queued_o
     }
     monkeypatch.setattr("test_e2e_rehearsal.ia_task_state", states.__getitem__)
 
-    assert busy_items(list(states)) == ["running", "paused"]
+    assert open_tasks(list(states)) == {name: states[name] for name in ("queued", "running", "paused")}
+
+
+def test_still_busy_message_says_to_re_run_later_while_ia_is_working():
+    busy = {"a": TaskState(queued=("derive.php",)), "b": TaskState(running=("derive.php",))}
+
+    assert still_busy_message(busy, "the withdraw would be refused") == (
+        "a and b still busy at Internet Archive, so the withdraw would be refused; re-run later"
+    )
+
+
+def test_still_busy_message_says_ia_staff_must_release_a_paused_task():
+    busy = {"a": TaskState(paused=("archive.php",)), "b": TaskState(running=("derive.php",))}
+
+    assert still_busy_message(busy, "the restore would be refused") == (
+        "a and b still busy at Internet Archive, so the restore would be refused: Internet Archive "
+        "has paused 1 task(s) on a; IA staff must release them - re-running won't help until they "
+        "do (see docs/OPERATIONS.md, 'Withdrawing an item')"
+    )
+
+
+def test_waiting_until_idle_times_out_naming_what_ia_still_holds(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "IA_POLL_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(
+        "test_e2e_rehearsal.ia_task_state",
+        {"a": TaskState(), "b": TaskState(paused=("archive.php",))}.__getitem__,
+    )
+
+    with pytest.raises(
+        pytest.fail.Exception,
+        match=re.escape(
+            "step 9a: b still busy at Internet Archive, so the withdraw would be refused: Internet "
+            "Archive has paused 1 task(s) on b; IA staff must release them"
+        ),
+    ):
+        wait_until_idle("step 9a", ("a", "b"), "the withdraw would be refused", lock=lock)
+
+
+def test_waiting_until_idle_returns_once_no_task_is_open(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+    answers = iter([TaskState(queued=("derive.php",)), TaskState()])
+    monkeypatch.setattr(sys.modules[__name__], "IA_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr("test_e2e_rehearsal.ia_task_state", lambda identifier: next(answers))
+
+    wait_until_idle("step 9b", ("a",), "the restore would be refused", lock=lock)
+
+    with pytest.raises(StopIteration):
+        next(answers)
 
 
 def test_run_summary_timestamp_is_none_without_a_run_summary(tmp_path):

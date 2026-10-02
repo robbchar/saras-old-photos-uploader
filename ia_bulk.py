@@ -5157,7 +5157,7 @@ def recheck_withdrawals(targets: list[SyncTarget], log_path: Path, live: bool) -
             failures.append(RowFailure(identifier=target.identifier, error=error))
             print(f"    - {error}")
         if check.clear:
-            detail = "only Internet Archive's own files left, nothing queued"
+            detail = "only Internet Archive's own files left, no task open"
             clear.append(RowAction(identifier=target.identifier, uploaded_as=target.uploaded_as, detail=detail))
             status = "clear"
         else:
@@ -5316,7 +5316,7 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
     if summary.clearance.clear:
         lines.append(
             f"{_pluralize(len(summary.clearance.clear), 'withdrawn item')} clear (only Internet "
-            "Archive's own files left, nothing queued)"
+            "Archive's own files left, no task open)"
         )
     if summary.clearance.clearing:
         names = ", ".join(action.identifier for action in summary.clearance.clearing)

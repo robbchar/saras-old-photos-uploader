@@ -10833,9 +10833,12 @@ def test_every_run_rechecks_a_withdrawn_item_and_reports_it_clear(tmp_path, monk
     assert calls == [("recheck", WITHDRAWN_ITEM)]
     assert client.write_count == 0
     assert (
-        "1 withdrawn item clear (only Internet Archive's own files left, nothing queued)" in lines
+        "1 withdrawn item clear (only Internet Archive's own files left, no task open)" in lines
     )
     assert RERUN_LINE not in lines
+    assert _all_sync_log_lines(tmp_path)[-1]["clear"] == [
+        {"identifier": "lcps-astoriaphotos-00001", "detail": "only Internet Archive's own files left, no task open"}
+    ]
 
 
 def test_an_item_still_holding_files_is_reported_still_clearing(tmp_path, monkeypatch, capsys):
@@ -10905,7 +10908,7 @@ def test_one_failed_recheck_is_reported_and_the_others_still_run(tmp_path, monke
     assert exit_code == 1
     assert [call[1][-5:] for call in calls] == ["00001", "00002"]
     assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in lines
-    assert "1 withdrawn item clear (only Internet Archive's own files left, nothing queued)" in lines
+    assert "1 withdrawn item clear (only Internet Archive's own files left, no task open)" in lines
     summary = _all_sync_log_lines(tmp_path)[-1]
     assert summary["failures"] == []
     assert summary["recheck_failures"][0]["identifier"] == "lcps-astoriaphotos-00001"
