@@ -2773,6 +2773,7 @@ def test_upload_row_succeeds_when_library_returns_ok_responses(tmp_path, monkeyp
     assert "identifier" not in captured["metadata"]
     assert captured["kwargs"]["verbose"] is True
     assert captured["kwargs"]["checksum"] is True
+    assert captured["kwargs"]["queue_derive"] is True
 
 
 def test_upload_row_raises_when_library_returns_failed_response(tmp_path, monkeypatch):
@@ -7838,7 +7839,7 @@ class FaultInjectingS3Adapter(HTTPAdapter):
 
     def send(self, request, *args, **kwargs):
         self.calls.append(request.url)
-        self.headers.append(dict(request.headers))
+        self.headers.append(request.headers.copy())
         # A connection failure is modeled as failing before the body is sent; every other
         # fault follows a full send, which also runs the library's progress bar to its end.
         if not isinstance(self.fault, requests.exceptions.ConnectionError):
@@ -7914,13 +7915,12 @@ def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tm
 
 
 def test_upload_row_queues_ia_derive_with_the_file_it_sends(tmp_path, monkeypatch):
-    """Derive builds the item's thumbnail and tile. Pinned here rather than
-    left to the library's queue_derive=None default, which it marks unsettled."""
+    """Derive builds the item's thumbnail and tile, so the PUT must ask for it."""
     s3 = upload_row_against_s3_fault((200, b""), tmp_path, monkeypatch)
 
     run_upload_row(tmp_path)
 
-    assert [headers["x-archive-queue-derive"] for headers in s3.headers] == ["1"]
+    assert [headers.get("x-archive-queue-derive") for headers in s3.headers] == ["1"]
 
 
 def test_upload_row_counts_a_file_already_on_the_item_as_uploaded(tmp_path, monkeypatch, capsys):
