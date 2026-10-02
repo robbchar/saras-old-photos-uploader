@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import IO, Any, Protocol, TextIO, TypeVar
@@ -50,8 +50,9 @@ from ia_bulk import (
     CollectionConfirmed,
     CollectionMissing,
     build_sheets_service,
+    TaskState,
     check_ia_collection,
-    pending_task_count,
+    item_task_state,
 )
 from log_tab import LOG_TAB_HEADER
 from project_config import DEFAULT_WITHDRAWN_DESCRIPTION, DEFAULT_WITHDRAWN_TITLE
@@ -329,8 +330,13 @@ def real_ia_session() -> internetarchive.ArchiveSession:
     return internetarchive.get_session(config=config, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
 
 
-def queued_task_count(identifier: str) -> int:
-    return pending_task_count(identifier, archive_session=real_ia_session())
+def ia_task_state(identifier: str) -> TaskState:
+    return item_task_state(identifier, archive_session=real_ia_session())
+
+
+def busy_items(identifiers: Sequence[str]) -> list[str]:
+    """The items IA is running or holding a paused task on; sync-metadata refuses to withdraw those."""
+    return [identifier for identifier in identifiers if ia_task_state(identifier).busy_reason(identifier)]
 
 
 def item_metadata(identifier: str) -> dict[str, Any] | None:
@@ -614,6 +620,19 @@ def test_rehearsal(tmp_path, request):
     # The restore's proof: the original reappears with a newer mtime, since 9a's deletes may still be queued.
     original_mtime = item_file_mtime(first_identifier, "e2e-01.jpg")
     expect(STEP_9A, bool(original_mtime), f"{first_identifier} lists no mtime for e2e-01.jpg before the withdraw")
+    # A withdraw is refused while IA runs or holds a task on the item (the upload's derive, here).
+    withdrawing = (first_identifier, second_identifier)
+    wait_for_ia(
+        STEP_9A,
+        "no running or paused task on the items to withdraw",
+        lambda: True if not busy_items(withdrawing) else None,
+        lock=lock,
+        on_timeout=(
+            f"Internet Archive is still running or holding a task on {' or '.join(withdrawing)}, so the "
+            "withdraw would be refused; re-run later (a paused task needs IA staff - see "
+            "docs/OPERATIONS.md, 'Withdrawing an item')"
+        ),
+    )
     check_in(lock, STEP_9A)
     sheet.edit(FIRST_UPLOADED, "Withdrawn", "yes")
     sheet.edit(SECOND_UPLOADED, "Withdrawn", "yes")
@@ -656,7 +675,7 @@ def test_rehearsal(tmp_path, request):
     wait_for_ia(
         STEP_9B,
         f"{first_identifier}'s task queue empty",
-        lambda: True if queued_task_count(first_identifier) == 0 else None,
+        lambda: True if ia_task_state(first_identifier).total == 0 else None,
         lock=lock,
         on_timeout=f"Internet Archive's queue for {first_identifier} is still busy; re-run later",
     )
@@ -1048,21 +1067,38 @@ def test_real_ia_session_prefers_the_cli_runs_key_environment(monkeypatch):
     assert "IA_ACCESS_KEY_ID" not in os.environ
 
 
-def test_queued_task_count_asks_ia_for_the_catalog_with_the_credentialed_session(monkeypatch):
+class CatalogTask:
+    def __init__(self, status: str) -> None:
+        self.task_dict = {"status": status, "cmd": "derive.php"}
+
+
+def test_ia_task_state_asks_ia_for_the_catalog_with_the_credentialed_session(monkeypatch):
     session = object()
     monkeypatch.setattr("test_e2e_rehearsal.real_ia_session", lambda: session)
     calls: list[dict[str, Any]] = []
 
-    def fake_get_tasks(**kwargs: Any) -> set[str]:
+    def fake_get_tasks(**kwargs: Any) -> set[CatalogTask]:
         calls.append(kwargs)
-        return {"task-1", "task-2"}
+        return {CatalogTask("queued"), CatalogTask("running")}
 
     monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
 
-    assert queued_task_count("lcps-x-00001") == 2
+    assert ia_task_state("lcps-x-00001") == TaskState(queued=("derive.php",), running=("derive.php",))
     assert calls[0]["archive_session"] is session
     assert calls[0]["identifier"] == "lcps-x-00001"
     assert calls[0]["params"] == {"catalog": 1, "history": 0}
+
+
+def test_busy_items_names_items_with_a_running_or_paused_task_but_not_a_queued_one(monkeypatch):
+    states = {
+        "idle": TaskState(),
+        "queued": TaskState(queued=("derive.php",)),
+        "running": TaskState(running=("derive.php",)),
+        "paused": TaskState(paused=("archive.php",)),
+    }
+    monkeypatch.setattr("test_e2e_rehearsal.ia_task_state", states.__getitem__)
+
+    assert busy_items(list(states)) == ["running", "paused"]
 
 
 def test_run_summary_timestamp_is_none_without_a_run_summary(tmp_path):
