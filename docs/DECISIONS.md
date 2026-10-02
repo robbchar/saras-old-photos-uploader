@@ -95,6 +95,7 @@ Archive metadata.
 - [Blank cell means "leave alone", not "clear"](decisions/FILES-AND-METADATA.md#blank-cell-means-leave-alone-not-clear)
 - [Blank `date` becomes `[n.d.]` rather than being omitted](decisions/FILES-AND-METADATA.md#blank-date-becomes-nd-rather-than-being-omitted)
 - [`checksum=True` and `verbose=True` on upload](decisions/FILES-AND-METADATA.md#checksumtrue-and-verbosetrue-on-upload)
+- [Every upload queues IA's derive](decisions/FILES-AND-METADATA.md#every-upload-queues-ias-derive)
 
 ## [Reconciliation](decisions/RECONCILIATION.md)
 

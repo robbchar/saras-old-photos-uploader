@@ -1558,6 +1558,8 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
                 metadata=metadata,
                 verbose=True,
                 checksum=True,
+                # Derive builds the thumbnail and item tile; explicit, since the library's None default is unsettled.
+                queue_derive=True,
                 http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS,
             )
         except Exception:

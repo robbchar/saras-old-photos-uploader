@@ -319,7 +319,9 @@ and has no pending tasks, the file is not re-sent. That row prints an
 `already on Internet Archive` note and logs `"already_on_ia": true`; its
 Sheet metadata was not re-sent either, so `sync-metadata` is what pushes it.
 A retry seconds after a landed upload usually re-sends the file, because the
-item has not settled yet.
+item has not settled yet. Every file it does send queues IA's derive
+(`queue_derive=True`), which builds the item's thumbnail and tile; see
+[Every upload queues IA's derive](decisions/FILES-AND-METADATA.md#every-upload-queues-ias-derive).
 
 ## Correcting an uploaded item
 
