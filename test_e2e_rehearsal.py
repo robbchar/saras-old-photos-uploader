@@ -596,7 +596,7 @@ def test_rehearsal(tmp_path, request):
     request.addfinalizer(lambda: restore_broken_filename(sheet, lock, restored_filename))
     sheet.edit(BROKEN_ROW, "File Name", BROKEN_FILENAME)
     result = run_cli(STEP_4, "upload", "--write-identifier", "--limit", "1", lock=lock, log_dir=log_dir)
-    expect_run(STEP_4, result, 1, "1 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation)")
+    expect_run(STEP_4, result, 1, "1 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation, or moved in the Sheet mid-run)")
     upload_log = sheet.log_rows(target.upload_log_tab)
     expect(STEP_4, [row[2] for row in upload_log[3:]] == ["summary", "skipped"], f"Upload Log rows: {upload_log[3:]}")
     expect(STEP_4, BROKEN_FILENAME in upload_log[4][4], f"skipped detail is {upload_log[4][4]!r}")
@@ -606,7 +606,7 @@ def test_rehearsal(tmp_path, request):
 
     result = run_cli(STEP_4B, "upload", "--write-identifier", "--limit", "2", lock=lock, log_dir=log_dir)
     # Row 4 is still broken, so it is skipped again.
-    expect_run(STEP_4B, result, 1, "2 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation)")
+    expect_run(STEP_4B, result, 1, "2 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation, or moved in the Sheet mid-run)")
     bars = re.findall(r"uploading (e2e-\d+\.jpg)", result.stderr)
     expect(STEP_4B, list(dict.fromkeys(bars)) == ["e2e-06.jpg", "e2e-07.jpg"], f"progress bars were for {bars}")
     upload_log = sheet.log_rows(target.upload_log_tab)

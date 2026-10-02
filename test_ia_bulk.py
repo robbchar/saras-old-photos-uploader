@@ -8200,9 +8200,9 @@ def test_cmd_upload_confirms_successes_that_happened_before_a_rate_limit_stopped
 ):
     """A rate-limit stop must not leave the rows that DID upload stuck
     RESERVED-but-unconfirmed - see SheetUploadRun.execute's own reserve ->
-    upload -> confirm protocol. Skipping this would make tomorrow's run
-    re-upload photo1.jpg and photo2.jpg under a second identifier, because
-    their ia_uploaded cell would still read blank."""
+    upload -> confirm protocol. Skipping this would leave photo1.jpg and
+    photo2.jpg on Internet Archive with a blank ia_uploaded cell, invisible to
+    the daily cap and to sync-metadata until a later run confirmed them."""
     from ia_bulk import cmd_upload
 
     grid = [SHEET_HEADER] + [
@@ -16215,6 +16215,18 @@ def test_a_row_held_back_by_validation_is_skipped_not_failed(tmp_path, monkeypat
     assert "photo1.jpg" in summary["skipped"][0]["error"]
     assert summary["succeeded"] == 1
     assert exit_code == 1
+
+
+def test_the_closing_skipped_line_names_a_mid_run_move_as_well_as_validation():
+    """`skipped` also holds rows moved in the Sheet mid-run; a label naming
+    only validation sends the operator to check row content instead."""
+    from ia_bulk import RowFailure, UploadSummary, upload_summary_lines
+
+    moved = RowFailure(identifier="lcps-astoriaphotos-00001", error="row 2 is no longer the row")
+
+    lines = upload_summary_lines(UploadSummary(succeeded=1, skipped=(moved,)))
+
+    assert "1 row skipped (failed validation, or moved in the Sheet mid-run)" in lines
 
 
 def test_a_rate_limited_run_says_so_in_its_summary(tmp_path, monkeypatch, capsys):
