@@ -716,14 +716,24 @@ not the second. A Sheet without `withdrawn` never withdraws anything.
    The dry run lists, for each item, the files it would delete (content
    first, `__ia_thumb.jpg` last), the fields it would change or remove, and
    what it leaves alone (`identifier`, `collection`, `mediatype`, and IA's
-   own `_meta.xml`-style files). With a withdraw or restore pending, both
+   own `_meta.xml`-style files), and notes that a real run first checks IA
+   isn't running or holding a paused task on the item. With a withdraw or
+   restore pending, both
    commands first confirm the project's collection on archive.org, as
    `upload --live` does, and refuse if they cannot.
 
    The real run re-reads the Sheet just before each item's deletes and goes
    ahead only if the row is still where it was and still says `yes`; a row
    changed mid-run is refused by name, nothing is deleted from it, and the
-   run exits 1 — the next run does what the Sheet says then. It fills
+   run exits 1 — the next run does what the Sheet says then. It then asks
+   Internet Archive about the item's tasks: while IA is running one (usually
+   the derive that follows an upload, for its first few minutes) or holds a
+   paused one, the row is refused by name — `Internet Archive is running a
+   task on <item> (derive.php); nothing was deleted - run sync-metadata
+   again later` — nothing is deleted, written or stamped, and the run exits
+   1; the next run tries again. Deletes sent while IA was running a task on
+   the item were paused for IA staff, so the tool no longer sends them then.
+   Tasks merely queued don't hold it up. Otherwise it fills
    `ia_withdrawn` with the time the withdrawal started, prints
    `N items withdrawn (files deleted, text replaced)`, and ends by printing
    the identifiers and archive.org URLs to send to Internet Archive.
@@ -736,8 +746,10 @@ not the second. A Sheet without `withdrawn` never withdraws anything.
    until every withdrawn item reports `clear`. IA processes deletes in its
    own queue and can rebuild the item's thumbnail from a file it has not
    removed yet, so every run re-checks every withdrawn item: it deletes
-   whatever is left, and while anything remains, or IA still has a task
-   queued for the item, it reports
+   whatever is left (unless IA is running or holding a paused task on the
+   item — then it deletes nothing that run and prints why under the item),
+   and while anything remains, or IA still has a task open for the item, it
+   reports
    `N withdrawn items still clearing: <identifiers>`. **Accepted
    trade-off:** until a run reports the item clear, its thumbnail can still
    show the photograph — for hours if IA's queue is busy. The tool never waits
@@ -754,9 +766,11 @@ console, so its darkening hand-off for step 3 is only in
 naming the item it went to, which is enough to write the darkening request
 (a withdraw that started but did not finish is a `failure` row reading
 "withdrawal started on …" — ask for that item too), and a `clearing` row per item still clearing, whose detail says what was
-deleted again or how many tasks IA still has queued. The console's
-"still clearing" line names the items only; that detail is in the tab (and
-the run's JSONL), whoever ran it.
+deleted again, how many tasks IA still has queued, that IA is running or
+holding a task on it, or which paused or failed tasks IA staff must release.
+The console's "still clearing" line names the items only; that detail is in
+the tab (and the run's JSONL), whoever ran it — the console prints it under
+an item only when IA's tasks stopped that run's deletes.
 
 **If a withdraw fails.** The run names the row and exits 1, and the
 `sync_log_tab`, if the project has one, gets a `failure` row. A withdraw of an item Internet Archive does not have deletes
@@ -771,11 +785,23 @@ failed). Keep `withdrawn` at `yes` and run `sync-metadata` again: that run
 finishes the withdraw and records it. Setting `withdrawn` to `no` before then
 leaves the files deleted with nothing to put them back.
 
+**If the run says `Internet Archive has paused N task(s) on <item>; IA staff
+must release them`.** IA has put the item's task on hold for its staff (it
+shows as `paused` on the item's task list). A paused task never resumes on
+its own, so until IA staff release or cancel it, every run refuses that
+item's withdraw (nothing is deleted, so it is not in the darkening hand-off
+either), its re-check deletes nothing and reports it still clearing, and a
+restore is refused. Email Internet Archive staff the identifier and ask them
+to release the item's paused tasks — in the same email as the darkening
+request, which you are sending them anyway; for a withdraw that was refused,
+ask for both. Then run `sync-metadata` again. See
+[`KNOWN-ISSUES.md` #8](KNOWN-ISSUES.md#8-an-errored-or-paused-internet-archive-task-blocks-clear-and-restore).
+
 **If an item stays "still clearing" for a day or more** and its `clearing`
 rows in the Sync Log tab say "no files left to delete; Internet Archive has
-N tasks queued", an IA task has probably
-errored and is stuck in IA's queue. Ask Internet Archive staff to clear it —
-see [`KNOWN-ISSUES.md` #8](KNOWN-ISSUES.md#8-an-errored-internet-archive-task-blocks-clear-and-restore).
+N tasks queued", an IA task is probably stuck in IA's queue (a paused or
+failed one is named as IA staff's to release instead, as above). Ask
+Internet Archive staff to clear it — see [`KNOWN-ISSUES.md` #8](KNOWN-ISSUES.md#8-an-errored-or-paused-internet-archive-task-blocks-clear-and-restore).
 
 **Checking an item really is clear, by hand.** After a run reports it clear,
 run this from the tool's folder on the Mac. The first line waits: paste the
@@ -812,7 +838,9 @@ row by name, leave it withdrawn and exit 1:
   processing this item's withdrawal"), or the tool could not ask. A file
   uploaded while the withdrawal's deletes are still queued would be deleted
   again. Nothing was uploaded; run `sync-metadata` again later — the hourly
-  agent retries on its own.
+  agent retries on its own. If it says instead that IA has paused or failed
+  tasks on the item and "IA staff must release them", waiting won't help:
+  ask IA staff, as above.
 - **The original is not on the drive** ("restore refused: the original file
   was not found"), matches more than one file, or the row's file cells are
   blank. Put the file back (or fix the cells) first, or set the cell back to

@@ -147,26 +147,39 @@ restore more than 10 items unless `--allow-bulk-withdraw` is passed, so
 restores stay small unless someone overrides that on purpose. On a day with a
 bulk restore, size that day's uploads with `upload --limit`.
 
-## 8. An errored Internet Archive task blocks clear and restore
+## 8. An errored or paused Internet Archive task blocks clear and restore
 
 **Severity: low — visible, never silent, but needs IA staff to resolve.**
 
-*Found 2026-10-01, in review of the withdrawal work; inferred from how the
-task query works, not yet seen on a real item.* A re-check reports an
-item *clear* only when IA's task catalog has nothing queued for it, and a
-restore is refused while anything is (see
+*Found 2026-10-01, in review of the withdrawal work, as an inference;
+observed 2026-10-02 on `test_collection`.* A re-check reports an item
+*clear* only when IA's task catalog has nothing open for it, and a restore
+is refused while anything is (see
 [`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-restore-waits-until-internet-archive-has-finished-the-withdrawal)).
-A task that errors stays in that catalog until IA staff clear it, so one
-errored delete or derive keeps the item *still clearing* — "Internet Archive
-has N tasks queued" — and any restore of it refused as "still processing
-this item's withdrawal", run after run. The tool cannot tell an errored task
-from a slow one.
+A task that errors, or that IA pauses for its staff, stays in that catalog
+until IA staff act. The e2e rehearsal saw the second: delete tasks submitted
+while the item's first derive was running were set to `paused` with
+`wait_admin`, no task log, and were unchanged nine hours later. One such task
+keeps the item *still clearing* and any restore of it refused, run after run.
 
-**Mitigation today:** an item that still reports a queued task after a day
-or so, with no files left to delete, is the sign. Ask Internet Archive staff
-to clear the item's stuck task — the same contact as the darkening request.
-Nothing on the tool's side needs undoing: the next run after they do reports
-it clear, or restores it.
+The tool now tells these apart from a slow queue and stops sending deletes
+into one: a withdraw, and a re-check's deletes, wait while IA is running or
+holding a paused task on the item (see
+[`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-delete-waits-while-ia-runs-or-holds-a-task-on-the-item)),
+which avoids the case observed. A paused task already there is named —
+"Internet Archive has paused N task(s) on <item>; IA staff must release
+them" — in the withdraw's refusal, the re-check's still-clearing reason and
+the restore's refusal; an errored one ("N failed task(s)") does not hold up a
+withdraw's deletes, but is named the same way once it keeps an item from
+clearing or a restore from going ahead.
+
+**Mitigation today:** that message is the sign. Ask Internet Archive staff to
+release or clear the item's held tasks — the same contact as the darkening
+request. Nothing on the tool's side needs undoing: the next run after they do
+withdraws it, reports it clear, or restores it. A task whose state the tool
+cannot read (no status or color it knows) is treated as running: the item is
+never deleted past or reported clear, but the message says "running" rather
+than naming IA staff.
 
 ## Fixed
 

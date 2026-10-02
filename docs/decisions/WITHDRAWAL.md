@@ -131,12 +131,17 @@ The withdraw run deletes content before the tile and marks `ia_withdrawn`
 when the deletes are accepted. Every later `sync-metadata` run re-checks each
 withdrawn, stamped item:
 
+- It first asks IA's task catalog about the item; while IA is running or
+  holding a paused task on it, it deletes nothing and the item is *still
+  clearing* (see "A delete waits while IA runs or holds a task on the
+  item", below).
 - It lists the item's files. Any file that is not IA's own is deleted again,
   in the same order and with the same header, and the item is reported
   *still clearing*.
-- Once only IA's own files are left, it asks IA's task catalog whether
-  anything is still queued for the item; anything queued is *still clearing*.
-- With nothing queued, it lists the files once more — a derive can finish
+- Once only IA's own files are left, it asks IA's task catalog again
+  whether anything is still open for the item; anything queued, running,
+  paused or errored is *still clearing*.
+- With no task open, it lists the files once more — a derive can finish
   between the first listing and the task query and add a photo file — and
   reports the item *clear* only if that listing is still IA's own files
   alone. A false *clear* is the costly mistake: operators stop re-running
@@ -153,9 +158,9 @@ the hourly agent hostage to IA's load. The accepted trade-off is that the
 item tile can stay visible until a later run clears it — hours if IA's queue
 is backed up. The operator runs `sync-metadata` again (or lets the hourly
 agent) until every item reports clear; the darkening request can go at once.
-An IA task that errors and stays in the catalog keeps an item *still
-clearing* until IA staff clear it — see
-[`KNOWN-ISSUES.md` #8](../KNOWN-ISSUES.md#8-an-errored-internet-archive-task-blocks-clear-and-restore).
+An IA task that errors, or that IA pauses for its staff, stays in the
+catalog and keeps an item *still clearing* until IA staff act — see
+[`KNOWN-ISSUES.md` #8](../KNOWN-ISSUES.md#8-an-errored-or-paused-internet-archive-task-blocks-clear-and-restore).
 
 ## A restore waits until Internet Archive has finished the withdrawal
 
@@ -166,11 +171,13 @@ If IA still has the withdrawal's deletes queued, a delete processed after the
 re-upload removes the file again, and the Sheet says "restored" over an empty
 item. The spike saw IA hold a queue for hours.
 
-So a restore first asks IA's task catalog whether anything is still queued
-for the item. While anything is — or when that question cannot be answered —
-the restore is refused by name, nothing is uploaded, `ia_withdrawn` keeps its
-value, the run exits 1, and the next run tries again. Like a re-check, it
-never waits.
+So a restore first asks IA's task catalog whether anything is still open
+(queued, running, paused or errored) for the item. While anything is — or
+when that question cannot be answered — the restore is refused by name,
+nothing is uploaded, `ia_withdrawn` keeps its value, the run exits 1, and the
+next run tries again. A paused or errored task is named as IA staff's to
+release, not as IA "still processing": waiting will not clear it. Like a
+re-check, it never waits.
 
 The original is found the same way `upload` finds it, from `files_dir` and
 `file_template` — the only time `sync-metadata` reads the drive. One that is
@@ -185,6 +192,39 @@ repeats next run. A restore that landed but whose clear could not be written
 (the row moved, or the Sheet write failed) is named in a warning: a `yes`
 typed before the next run finishes it would find `ia_withdrawn` still set,
 skip the withdraw, and leave the restored text up.
+
+## A delete waits while IA runs or holds a task on the item
+
+*Decided 2026-10-02, after the e2e rehearsal on `test_collection`.*
+
+The rehearsal withdrew two items about a minute after uploading them, while
+each item's first `derive.php` was running. IA accepted every delete, then
+put the delete tasks on hold for its staff: status `paused`, `wait_admin` set,
+no task log, unchanged nine hours later. Deletes sent while an item was idle,
+or had a derive merely queued, processed normally — with the same
+`x-archive-keep-old-version: 0` header, so the header is not the cause. A
+paused task never resumes by itself, so the restore guard refused forever and
+the re-check never reported clear, while their messages said IA was "still
+processing".
+
+So before a withdraw's deletes — after its fresh Sheet read — the tool asks
+IA's task catalog about the item. While a task is running or paused, the row
+is refused by name: nothing is deleted, written or stamped, it is not
+"withdrawal started" and not in the darkening hand-off, the run exits 1, and
+the next run tries again. A query that cannot be answered refuses the same
+way; a withdraw never deletes blind. Queued tasks don't block: deletes sent
+then processed normally. The re-check asks the same question before its
+deletes and, while IA is running or holding a task, deletes nothing and
+reports the item still clearing with the reason. A paused task is named as
+IA staff's to release in the withdraw, the re-check and the restore, and an
+errored one wherever it keeps an item from clearing or a restore from going
+ahead, because waiting cannot clear them; the operator is emailing IA staff
+for the darkening anyway. A task whose state cannot be read counts as
+running: never deleted past, never clear.
+
+The tool still never waits on IA: a refused withdraw is retried by the next
+run, as the hourly agent would. Waiting out a running derive costs a few
+minutes after an upload, and a withdraw is rarely that close to one.
 
 ## One run may move at most ten items, and the limit is per run
 

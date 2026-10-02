@@ -376,7 +376,12 @@ row.
 
 In `SheetSyncRun.execute()`, each withdraw first re-reads the Sheet — the
 same fresh read `_verified()` makes before stamping — and is refused unless
-the row is unmoved and its `withdrawn` cell still parses as yes. Then
+the row is unmoved and its `withdrawn` cell still parses as yes. It is then
+refused (`withdraw_refusal()`) while IA's task catalog shows a task running
+or paused on the item, or cannot be asked — deletes sent while a task ran
+were paused for IA staff. `item_task_state()` sorts the item's open tasks
+into a `TaskState` (queued, running, paused, error; by status, else color,
+else running). Then
 `delete_item_files()` refuses an item IA does not have, or deletes every file
 but IA's system files, content first and `__ia_thumb.jpg` last (skipped in a
 pass where a content delete was refused), each with cascade and
@@ -389,20 +394,23 @@ delete was accepted and the text landed. `_mark_started()` writes both at
 once, after its own `_verified()` re-read and before the next row is sent,
 not in the chunk's end-of-chunk `_stamp()`; a mark it cannot write is named
 by `_warn_unmarked()`. A restore is refused while IA's
-task catalog has anything queued for the item, or cannot be asked
-(`require_withdrawal_processed()`); otherwise `upload_row()` re-sends the
+task catalog has anything open for the item, or cannot be asked
+(`require_withdrawal_processed()`; paused or errored tasks are named as IA
+staff's to release); otherwise `upload_row()` re-sends the
 original with what `upload` sends, and `restore_metadata()` goes through
 `update_metadata_row()`, since an upload into an existing item does not set
 its metadata. Success stamps the hash and clears `ia_withdrawn`; a failed
 restore stays unstamped and repeats.
 
 After the push loop, `recheck_withdrawals()` re-checks every row with
-`SyncTarget.recheck`: `recheck_withdrawn_item()` lists the item, deletes
-anything that is not IA's own in the same order, and — only once nothing is
-left — asks IA's task catalog (`pending_task_count()`) whether anything is
-still queued, then lists the item once more before calling it clear. The
-item is *clear* with no files left and nothing queued, *still clearing*
-otherwise; an item IA does not have, or a re-check that cannot reach IA, is
+`SyncTarget.recheck`: `recheck_withdrawn_item()` first asks IA's task
+catalog (`item_task_state()`) and, while a task is running or paused on the
+item, deletes nothing (the reason is printed and is the log tab's detail);
+otherwise it lists the item, deletes anything that is not IA's own in the
+same order, and — only once nothing is left — asks the catalog again whether
+anything is still open, then lists the item once more before calling it
+clear. The item is *clear* with no files left and no task open, *still
+clearing* otherwise; an item IA does not have, or a re-check that cannot reach IA, is
 that item's failure only. Re-checks write nothing to the Sheet or the item's
 text, need no pre-delete re-read (the item is already this row's withdrawn
 item), and never count toward the bulk limit.
@@ -592,13 +600,13 @@ The counts mean:
 | field | meaning |
 | --- | --- |
 | `checked` | rows the run evaluated — every row it read. `checked − pushed − len(skipped) − already_synced` is the rows not marked uploaded. Each row counts once: a withdrawal that started but did not finish is in `failures` only, and a re-checked row is already in `pushed` or `already_synced` (its re-check result is in `clearing`/`clear`/`recheck_failures`, which this sum ignores). |
-| `pushed` | rows this run sent to Internet Archive, or refused just before sending (a withdraw whose row moved, a restore IA is still processing). Always `changed + unchanged + len(failures) + len(withdrawn) + len(restored)`. |
+| `pushed` | rows this run sent to Internet Archive, or refused just before sending (a withdraw whose row moved or whose item IA is running or holding a task on, a restore IA is still processing). Always `changed + unchanged + len(failures) + len(withdrawn) + len(restored)`. |
 | `changed` | sends IA accepted as a change. |
 | `unchanged` | IA's *no changes to `_meta.xml`* — the idempotence signal a full re-sync is run to see, kept as its own count rather than folded into `changed`. |
 | `already_synced` | rows the hash gate found already matching their last push and never sent at all. On the steady state this is nearly the whole Sheet; see `DECISIONS.md`, "A row pushes only when its content changed". |
 | `withdrawn` | `{identifier, detail}` per item whose files this run deleted and whose text it replaced. Not counted in `changed`. |
 | `restored` | `{identifier, detail}` per item this run re-uploaded and whose text it put back. Not counted in `changed`. |
-| `clearing` | `{identifier, detail}` per already-withdrawn item this run's re-check found not yet clear: what it deleted again, or how many IA tasks are still queued. |
+| `clearing` | `{identifier, detail}` per already-withdrawn item this run's re-check found not yet clear: what it deleted again, why it deleted nothing (IA running or holding a task on the item), the paused or failed tasks IA staff must release, or how many IA tasks are still queued. |
 | `clear` | `{identifier, detail}` per already-withdrawn item this run's re-check found clear. Not mirrored to the log tab. |
 | `recheck_failures` | `{identifier, error}` per already-withdrawn item whose re-check failed. Counted in the headline's errors, not in `pushed`. |
 | `failures` | `{identifier, error}` per row IA refused — including a withdrawal that started but did not finish ("withdrawal started on …"), counted here only, and a withdraw or restore refused just before sending. |

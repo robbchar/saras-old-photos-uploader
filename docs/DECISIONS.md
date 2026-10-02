@@ -153,6 +153,7 @@ Pulling an item back off Internet Archive after upload, and putting it back.
 - [Withdrawal is a Sheet column, and `sync-metadata` makes IA match it](decisions/WITHDRAWAL.md#withdrawal-is-a-sheet-column-and-sync-metadata-makes-ia-match-it)
 - [A withdraw converges across runs, and the tool never waits on IA](decisions/WITHDRAWAL.md#a-withdraw-converges-across-runs-and-the-tool-never-waits-on-ia)
 - [A restore waits until Internet Archive has finished the withdrawal](decisions/WITHDRAWAL.md#a-restore-waits-until-internet-archive-has-finished-the-withdrawal)
+- [A delete waits while IA runs or holds a task on the item](decisions/WITHDRAWAL.md#a-delete-waits-while-ia-runs-or-holds-a-task-on-the-item)
 - [One run may move at most ten items, and the limit is per run](decisions/WITHDRAWAL.md#one-run-may-move-at-most-ten-items-and-the-limit-is-per-run)
 
 ## Still open
