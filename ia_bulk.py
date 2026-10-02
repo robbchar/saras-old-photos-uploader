@@ -3650,8 +3650,9 @@ class SheetUploadRun:
         reserve write, so the item in flight always finishes. Every row this
         run already uploaded successfully, in this chunk or an earlier one,
         is still confirmed before returning: an early stop must not leave a
-        row RESERVED-but-unconfirmed, which the next run would upload again
-        under the same identifier."""
+        row RESERVED-but-unconfirmed. Until a later run confirms it, its
+        upload is invisible to the daily cap (which counts ia_uploaded) and
+        to sync-metadata (which only reads DONE rows)."""
         # Counted and collected in the same step: every site that bumps a
         # number here already holds the target it belongs to, so the summary's
         # lists cost nothing beyond remembering what was in hand.
@@ -4783,11 +4784,16 @@ class UploadSummary:
     The ways a row can miss are kept apart, because months later they are
     three different phone calls:
 
-    - `failures` - the send was attempted and Internet Archive refused it.
-      Nothing was created, and the identifier is still unused.
+    - `failures` - the send was attempted and failed. Usually nothing was
+      created, though a timeout on the last attempt can hide a send that
+      landed; either way a rerun retries the row under its reserved identifier.
     - `unconfirmed` - the file IS on Internet Archive but the Sheet was never
       marked. The dangerous one: the row reads as un-uploaded until a rerun
-      confirms it, and clearing its ia_identifier first mints a second one.
+      confirms it. Clearing its ia_identifier first (or deleting the row)
+      takes the number out of the Sheet, so a later run mints a second
+      identifier - or, if it was the Sheet's highest, re-mints this one for
+      the next unassigned row, which may append a different photograph to
+      this item.
     - `skipped` - nothing was sent. Either the row failed validation, or the
       Sheet was edited mid-run and the row no longer matched what this run
       planned for it.
@@ -4875,7 +4881,10 @@ def upload_summary_lines(summary: UploadSummary) -> list[str]:
             "see the reason on stderr above"
         )
     if summary.skipped:
-        lines.append(f"{_pluralize(len(summary.skipped), 'row')} skipped (failed validation)")
+        lines.append(
+            f"{_pluralize(len(summary.skipped), 'row')} skipped "
+            "(failed validation, or moved in the Sheet mid-run)"
+        )
     return lines
 
 
