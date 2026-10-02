@@ -7496,7 +7496,7 @@ def test_cmd_upload_confirms_successes_that_happened_before_a_rate_limit_stopped
     """A rate-limit stop must not leave the rows that DID upload stuck
     RESERVED-but-unconfirmed - see SheetUploadRun.execute's own reserve ->
     upload -> confirm protocol. Skipping this would make tomorrow's run
-    re-upload photo1.jpg and photo2.jpg under a second identifier, because
+    re-upload photo1.jpg and photo2.jpg under their reserved identifiers, because
     their ia_uploaded cell would still read blank."""
     from ia_bulk import cmd_upload
 

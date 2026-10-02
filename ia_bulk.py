@@ -3650,8 +3650,8 @@ class SheetUploadRun:
         reserve write, so the item in flight always finishes. Every row this
         run already uploaded successfully, in this chunk or an earlier one,
         is still confirmed before returning: an early stop must not leave a
-        row RESERVED-but-unconfirmed, which would make the next run re-upload
-        it under a second identifier."""
+        row RESERVED-but-unconfirmed, which the next run would upload again
+        under the same identifier."""
         # Counted and collected in the same step: every site that bumps a
         # number here already holds the target it belongs to, so the summary's
         # lists cost nothing beyond remembering what was in hand.
@@ -4786,8 +4786,8 @@ class UploadSummary:
     - `failures` - the send was attempted and Internet Archive refused it.
       Nothing was created, and the identifier is still unused.
     - `unconfirmed` - the file IS on Internet Archive but the Sheet was never
-      marked. The dangerous one: a later run reads the row as un-uploaded and
-      would upload the same photograph again under a second identifier.
+      marked. The dangerous one: the row reads as un-uploaded until a rerun
+      confirms it, and clearing its ia_identifier first mints a second one.
     - `skipped` - nothing was sent. Either the row failed validation, or the
       Sheet was edited mid-run and the row no longer matched what this run
       planned for it.
