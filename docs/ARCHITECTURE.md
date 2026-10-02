@@ -364,7 +364,9 @@ row for a re-check (`SyncTarget.recheck`). A yes row sends
 `withdrawn_metadata()` — the registry's `withdrawn_title`/
 `withdrawn_description` plus `REMOVE_TAG` for every other field it sends and
 for `identifier-bib`/`date` — and that is what its hash covers.
-`split_unchanged()` always sends a withdraw or restore.
+`split_unchanged()` always sends a withdraw or restore. On a Sheet with no
+`withdrawn` column, a row whose `ia_withdrawn` is set or whose stored hash is
+the withdrawn notice's is a problem (`UNTRACKED_WITHDRAWAL`), never a push.
 
 `plan_sync_targets()` refuses a withdraw, re-check or restore whose `ia_url`
 item is not the row's own (`item_is_rows_own()`). A restore's file is

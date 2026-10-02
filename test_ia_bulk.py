@@ -9963,18 +9963,51 @@ def test_a_broken_withdrawn_value_is_a_problem_and_never_a_target():
     assert problems[0].errors == [withdrawn_error("maybe")]
 
 
-def test_without_a_withdrawn_column_a_leftover_stamp_restores_nothing():
+def _plan_without_withdrawn_column(header, row):
     from ia_bulk import plan_sync_targets
 
-    column_map, parsed = grid_to_rows(
-        [SYNC_SHEET_HEADER + ["ia_withdrawn"], _synced_grid()[1] + ["2026-09-30T10:00:00Z"]]
-    )
-    targets, _ = plan_sync_targets(
+    column_map, parsed = grid_to_rows([header, row])
+    return plan_sync_targets(
         parsed, column_map, live=False, project_id="astoriaphotos", file_template="{file}"
     )
 
-    assert targets[0].action is SyncAction.UPDATE
-    assert targets[0].recheck is False
+
+def test_without_a_withdrawn_column_a_leftover_stamp_restores_nothing():
+    """Deleting the column must not republish the item's text: the row is named, nothing sent."""
+    targets, problems = _plan_without_withdrawn_column(
+        SYNC_SHEET_HEADER + ["ia_withdrawn"], _synced_grid()[1] + ["2026-09-30T10:00:00Z"]
+    )
+
+    assert targets == []
+    assert [problem.row_number for problem in problems] == [2]
+    assert "restore the 'withdrawn' column" in problems[0].errors[0]
+    assert problems[0].errors[0].isascii()
+
+
+def test_without_either_withdrawal_column_a_withdrawn_hash_restores_nothing():
+    """Both columns deleted: the stored hash of the withdrawn notice still names the row."""
+    stamped, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes", ia_withdrawn=WITHDRAWN_STAMP)])
+    row = _synced_grid()[1]
+    row[6] = stamped[0].content_hash
+
+    targets, problems = _plan_without_withdrawn_column(SYNC_SHEET_HEADER, row)
+
+    assert targets == []
+    assert [problem.row_number for problem in problems] == [2]
+    assert "restore the 'withdrawn' column" in problems[0].errors[0]
+
+
+def test_without_a_withdrawn_column_an_ordinary_row_plans_as_it_always_has():
+    plain, plain_problems = _plan_without_withdrawn_column(SYNC_SHEET_HEADER, _synced_grid()[1])
+    blank_stamp, problems = _plan_without_withdrawn_column(
+        SYNC_SHEET_HEADER + ["ia_withdrawn"], _synced_grid()[1] + [""]
+    )
+
+    assert plain_problems == problems == []
+    assert blank_stamp[0].action is SyncAction.UPDATE
+    assert blank_stamp[0].recheck is False
+    assert blank_stamp[0].metadata == plain[0].metadata
+    assert blank_stamp[0].content_hash == plain[0].content_hash
 
 
 def test_only_a_withdrawn_stamped_row_is_rechecked():

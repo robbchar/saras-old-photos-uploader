@@ -5471,6 +5471,16 @@ def withdrawn_metadata(metadata: dict[str, str], title: str, description: str) -
     return cleared | {"title": title, "description": description}
 
 
+# A row withdrawn under a `withdrawn` column that is now gone; sending its Sheet text would republish it.
+UNTRACKED_WITHDRAWAL = (
+    f"this item was withdrawn (its '{IA_WITHDRAWN_COLUMN}' cell is set, or its last push was the "
+    f"withdrawn notice), but the Sheet has no '{WITHDRAWN_COLUMN}' column - refusing to send "
+    "its text, which would put the withdrawn item's metadata back on Internet Archive. Nothing "
+    f"was sent; restore the '{WITHDRAWN_COLUMN}' column (with '{IA_WITHDRAWN_COLUMN}' beside "
+    "it) and run again"
+)
+
+
 def plan_sync_targets(
     rows: list[dict[str, str]],
     column_map: ColumnMap,
@@ -5513,7 +5523,8 @@ def plan_sync_targets(
     edit to reach the site.
 
     A row whose `withdrawn` cell says yes sends withdrawn_metadata() instead, and that is
-    what its hash covers. Without a `withdrawn` column nothing withdraws or restores."""
+    what its hash covers. Without a `withdrawn` column nothing withdraws or restores, and a row
+    still marked or hashed as withdrawn is a problem (UNTRACKED_WITHDRAWAL), never a push."""
     fields = sheet_metadata_fields(column_map, file_template)
     # Part of every push, and so of the hash: rows synced while these still shipped push once more.
     location_removals = dict.fromkeys(sorted(file_location_fields(file_template)), REMOVE_TAG_SENTINEL)
@@ -5626,8 +5637,18 @@ def plan_sync_targets(
             continue
 
         metadata = {key: value for key, value in row.items() if key in fields} | location_removals
+        notice = withdrawn_metadata(metadata, withdrawn_title, withdrawn_description)
+        stored_hash = (row.get(IA_SYNC_HASH_COLUMN) or "").strip()
+        if not withdrawal_tracked and (
+            (row.get(IA_WITHDRAWN_COLUMN) or "").strip()
+            or (stored_hash and stored_hash == sync_hash(metadata_to_send(notice)))
+        ):
+            problems.append(
+                RowValidation(row_number=row_number, identifier=identifier, errors=[UNTRACKED_WITHDRAWAL])
+            )
+            continue
         if withdrawn is WithdrawnValue.YES:
-            metadata = withdrawn_metadata(metadata, withdrawn_title, withdrawn_description)
+            metadata = notice
         targets.append(
             SyncTarget(
                 row_number=row_number,
@@ -5635,7 +5656,7 @@ def plan_sync_targets(
                 uploaded_as=uploaded_as,
                 metadata=metadata,
                 content_hash=sync_hash(metadata_to_send(metadata)),
-                stored_hash=(row.get(IA_SYNC_HASH_COLUMN) or "").strip(),
+                stored_hash=stored_hash,
                 source_fingerprint=fingerprints.get(row_number, ""),
                 action=action,
                 recheck=recheck,

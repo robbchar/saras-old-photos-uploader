@@ -72,7 +72,14 @@ its other cells wait for a restore, and flipping the column always pushes
 Clearing `ia_withdrawn` by hand forces the tool to treat the item as present,
 the same override role clearing `ia_sync_hash` has. A Sheet without the
 `withdrawn` column never withdraws or restores anything, whatever
-`ia_withdrawn` holds, so deleting the column cannot mass-restore.
+`ia_withdrawn` holds, so deleting the column cannot mass-restore. Nor can it
+republish the text: without the column, a row whose `ia_withdrawn` is set,
+or whose `ia_sync_hash` is the hash of the withdrawn notice (both columns
+deleted), would otherwise push its Sheet text over the notice. Each one is
+skipped by name instead — nothing is sent for it, and the run exits 1 —
+until the `withdrawn` column is put back beside `ia_withdrawn`. The hash
+check is best effort: a withdrawn row whose notice wording or Sheet columns
+changed since it was stamped no longer matches it.
 
 Files move only in the row's own item. Before planning a withdraw, a re-check
 or a restore, the run checks that the item its `ia_url` names is this row's
