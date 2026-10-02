@@ -5484,10 +5484,11 @@ def plan_sync_targets(
     """Decides which rows this run will correct, and what it will send.
 
     project_id is the run's own --project, required here for the same reason
-    check_identifier requires it (issue #2). This path targets whatever item
-    `ia_url` names, so a cell pointing at another project's item does not
+    check_identifier requires it (issue #2). A metadata update targets whatever
+    item `ia_url` names, so a cell pointing at another project's item does not
     merely misfile this project's row - it overwrites that project's
-    metadata, so the check is made here.
+    metadata, so the check is made here. A withdraw, re-check or restore is
+    held to the row's own item (item_is_rows_own) and refused otherwise.
 
     Scope is RowState.DONE and nothing else. An UNASSIGNED row has no item to
     correct, and a RESERVED row's upload never confirmed - correcting metadata

@@ -366,7 +366,7 @@ def drive_check(files_dir: Path) -> Check:
             return CheckOutcome(Status.FAIL, f"{files_dir} is not a readable directory")
         return CheckOutcome(Status.PASS, str(files_dir))
 
-    # sync-metadata never reads the drive, so this does not gate the agent.
+    # sync-metadata reads the drive only to restore, refusing that row when it is unplugged; never gates the agent.
     return Check(
         name=DRIVE_CHECK,
         probe=probe,
