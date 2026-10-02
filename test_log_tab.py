@@ -174,3 +174,28 @@ def test_a_failed_mirror_is_reported_and_never_raised(failing_call, capsys):
     err = capsys.readouterr().err
     assert "Sheets API returned 503" in err
     assert "The run itself completed" in err
+
+
+def test_a_sync_names_each_withdrawn_restored_and_clearing_item_but_not_clear_ones():
+    """The tab is where someone checks, months later, what was pulled; a clear re-check is the steady state."""
+    record = {
+        "record": "run_summary",
+        "timestamp": "2026-10-01T19:00:04Z",
+        "live": True,
+        "withdrawn": [{"identifier": "lcps-sarasoldphotos-00012", "detail": "files deleted and text replaced on lcps-sarasoldphotos-00012"}],
+        "restored": [{"identifier": "lcps-sarasoldphotos-00013", "detail": "SOP/x.jpg re-uploaded to lcps-sarasoldphotos-00013"}],
+        "clearing": [{"identifier": "lcps-sarasoldphotos-00009", "detail": "deleted again: __ia_thumb.jpg"}],
+        "clear": [{"identifier": "lcps-sarasoldphotos-00008", "detail": "only Internet Archive's own files left, nothing queued"}],
+        "recheck_failures": [{"identifier": "lcps-sarasoldphotos-00007", "error": "could not re-check: down"}],
+        "failures": [],
+        "skipped": [],
+    }
+
+    rows = log_tab_rows(record, run="sync-metadata-20261001T190004Z.jsonl", headline="h")
+
+    assert [row[2:] for row in rows[1:]] == [
+        ["withdrawn", "lcps-sarasoldphotos-00012", "files deleted and text replaced on lcps-sarasoldphotos-00012"],
+        ["restored", "lcps-sarasoldphotos-00013", "SOP/x.jpg re-uploaded to lcps-sarasoldphotos-00013"],
+        ["clearing", "lcps-sarasoldphotos-00009", "deleted again: __ia_thumb.jpg"],
+        ["failure", "lcps-sarasoldphotos-00007", "could not re-check: down"],
+    ]

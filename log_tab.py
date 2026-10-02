@@ -28,14 +28,21 @@ LOG_TAB_HEADER = ["when", "run", "outcome", "identifier", "detail"]
 # which one wrote the record.
 PROBLEM_KINDS = (
     ("failures", "failure"),
+    ("recheck_failures", "failure"),
     ("unconfirmed", "unconfirmed"),
     ("skipped", "skipped"),
+)
+# Items a sync moved or is still clearing, one row each, ahead of the problems; "clear" is not mirrored.
+ACTION_KINDS = (
+    ("withdrawn", "withdrawn"),
+    ("restored", "restored"),
+    ("clearing", "clearing"),
 )
 
 
 def log_tab_rows(record: dict, run: str, headline: str) -> list[list[str]]:
     """The rows one run contributes to its log tab: its summary, then one row
-    per problem it named.
+    per item it withdrew, restored or is still clearing, then one per problem it named.
 
     A clean run is a single row. That is deliberate - 10,000 successful
     uploads would otherwise put 10,000 rows in a tab whose whole value is that
@@ -48,9 +55,10 @@ def log_tab_rows(record: dict, run: str, headline: str) -> list[list[str]]:
     record came from. For an upload that stopped early, that line also names why."""
     when = record.get("timestamp", "")
     rows = [[when, run, "summary", "", headline]]
-    for key, outcome in PROBLEM_KINDS:
+    for key, outcome in ACTION_KINDS + PROBLEM_KINDS:
         for entry in record.get(key, ()):
-            rows.append([when, run, outcome, entry.get("identifier", ""), entry.get("error", "")])
+            detail = entry.get("error", entry.get("detail", ""))
+            rows.append([when, run, outcome, entry.get("identifier", ""), detail])
     return rows
 
 

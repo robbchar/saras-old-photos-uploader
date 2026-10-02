@@ -4110,6 +4110,15 @@ def fetch_current_metadata(identifier: str) -> dict | None:
         return None
 
 
+def fetch_item_files(identifier: str) -> list[str] | None:
+    """The names of an item's files, or None if they could not be read. Never raises, like fetch_current_metadata."""
+    try:
+        item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+        return [file.name for file in item.get_files()]
+    except Exception:
+        return None
+
+
 def _display_text(value: object) -> str:
     """IA returns a list for a field that occurs more than once. Line breaks are
     escaped so a value keeps to its line; accents are composed and invisible
@@ -4206,10 +4215,85 @@ def metadata_changes(sheet_metadata: dict[str, str], remote: dict) -> list[Field
     return changes
 
 
+# What a withdraw or restore never changes, named in every preview.
+WITHDRAWAL_UNTOUCHED = (
+    "left untouched: identifier, collection, mediatype, and Internet Archive's own files ("
+    + ", ".join(IA_SYSTEM_FILE_SUFFIXES)
+    + ")"
+)
+
+
+def _print_changes(changes: list[FieldChange]) -> None:
+    """Each changed field as a dry run prints it: name, now, new, and any note under them."""
+    for change in changes:
+        print(f"      {change.field_name}")
+        print(f"          now: {change.now}")
+        print(f"          new: {change.new}")
+        if change.note:
+            print(f"          {change.note}")
+
+
+def print_withdrawal_preview(target: SyncTarget) -> None:
+    """One withdraw or restore as IA would see it: files, field changes, and what stays."""
+    remote = fetch_current_metadata(target.uploaded_as)
+    if target.action is SyncAction.WITHDRAW:
+        print(f"  row {target.row_number}: {target.uploaded_as} - would WITHDRAW")
+        names = fetch_item_files(target.uploaded_as)
+        if names is None:
+            print("      could not list its files, so which would be deleted is unknown")
+        else:
+            doomed = deletable_files(target.uploaded_as, names)
+            listed = ", ".join(doomed) if doomed else "(none left)"
+            print(f"      would delete {_pluralize(len(doomed), 'file')}, with their derivatives: {listed}")
+            if doomed:
+                print(
+                    f"      in that order: content files first, {IA_ITEM_TILE} last (kept while a "
+                    "content delete is refused)"
+                )
+        # SheetSyncRun._refused_delete(); the dry run does not perform it.
+        print(
+            "      a real run re-reads the Sheet just before deleting, and deletes only if this "
+            f"row still says {WITHDRAWN_COLUMN} = yes"
+        )
+        payload = target.metadata
+    else:
+        print(f"  row {target.row_number}: {target.uploaded_as} - would RESTORE")
+        print(f"      would re-upload {target.restore_file} (found on disk)")
+        payload = restore_metadata(target)
+    if remote is None:
+        print("      could not read its current metadata, so which fields would change is unknown")
+    else:
+        _print_changes(metadata_changes(payload, remote))
+    print(f"      {WITHDRAWAL_UNTOUCHED}")
+    print()
+
+
+def print_recheck_preview(target: SyncTarget) -> None:
+    """A withdrawn item's re-check as a real run would make it, without deleting anything."""
+    names = fetch_item_files(target.uploaded_as)
+    if names is None:
+        print(f"  row {target.row_number}: {target.uploaded_as} - could not list its files")
+        return
+    doomed = deletable_files(target.uploaded_as, names)
+    if doomed:
+        print(
+            f"  row {target.row_number}: {target.uploaded_as} - still holds files; would delete "
+            f"again, in this order: {', '.join(doomed)}"
+        )
+    else:
+        print(
+            f"  row {target.row_number}: {target.uploaded_as} - holds only Internet Archive's own "
+            "files; a real run asks Internet Archive whether anything is still queued before "
+            "reporting it clear"
+        )
+
+
 def print_sync_dry_run(
     to_push: list[SyncTarget],
     already_synced: list[SyncTarget],
     problems: list[RowValidation],
+    *,
+    rechecking: Sequence[SyncTarget] = (),
 ) -> int:
     """Shows what a sync would CHANGE, not merely which fields it would send.
 
@@ -4222,10 +4306,12 @@ def print_sync_dry_run(
     Nothing is stamped here. A dry run sends nothing, so there is nothing to
     record having sent; stamping would make the next real run skip rows this
     one only previewed."""
+    updates = [target for target in to_push if target.action is SyncAction.UPDATE]
+    moving = [target for target in to_push if target.action is not SyncAction.UPDATE]
     total = len(to_push) + len(already_synced)
     # A blank hash means never stamped or deliberately cleared, not edited.
-    never_stamped = sum(1 for target in to_push if not target.stored_hash)
-    edited = len(to_push) - never_stamped
+    never_stamped = sum(1 for target in updates if not target.stored_hash)
+    edited = len(updates) - never_stamped
     # {:,} on the raw counts, not just on the _pluralize call - see that
     # function's docstring: adjacent numbers on one line must agree about how
     # a number looks.
@@ -4234,15 +4320,31 @@ def print_sync_dry_run(
         f"{edited:,} changed since their last push, {len(already_synced):,} already in sync "
         "and would not be sent"
     )
+    if moving:
+        withdrawing = sum(1 for target in moving if target.action is SyncAction.WITHDRAW)
+        print(
+            f"{withdrawing:,} to withdraw and {len(moving) - withdrawing:,} to restore - sent "
+            f"whatever their last push, since '{WITHDRAWN_COLUMN}' changed"
+        )
+    if rechecking:
+        print(
+            f"re-checking {_pluralize(len(rechecking), 'withdrawn item')} (deletes only; the text "
+            "is not touched):"
+        )
+        for target in rechecking:
+            print_recheck_preview(target)
+        print()
     if not to_push:
         return 1 if problems else 0
 
     print(f"reading current metadata for {_pluralize(len(to_push), 'item')}...")
     print()
+    for target in moving:
+        print_withdrawal_preview(target)
 
     changed = 0
     unreadable = 0
-    for target in to_push:
+    for target in updates:
         remote = fetch_current_metadata(target.uploaded_as)
         if remote is None:
             unreadable += 1
@@ -4258,23 +4360,19 @@ def print_sync_dry_run(
 
         changed += 1
         print(f"  row {target.row_number}: {target.uploaded_as}")
-        for change in changes:
-            print(f"      {change.field_name}")
-            print(f"          now: {change.now}")
-            print(f"          new: {change.new}")
-            if change.note:
-                print(f"          {change.note}")
+        _print_changes(changes)
 
     if changed or unreadable:
         print()
-    unchanged = len(to_push) - changed - unreadable
-    # {:,} on both raw counts, not just on the _pluralize call - see that
-    # function's docstring: adjacent numbers on one line must agree about how
-    # a number looks.
-    print(
-        f"{changed:,} of {_pluralize(len(to_push), 'item')} would change; "
-        f"{unchanged:,} already match and would be reported as unchanged"
-    )
+    if updates:
+        unchanged = len(updates) - changed - unreadable
+        # {:,} on both raw counts, not just on the _pluralize call - see that
+        # function's docstring: adjacent numbers on one line must agree about how
+        # a number looks.
+        print(
+            f"{changed:,} of {_pluralize(len(updates), 'item')} would change; "
+            f"{unchanged:,} already match and would be reported as unchanged"
+        )
     if unreadable:
         print(f"{_pluralize(unreadable, 'item')} could not be read")
     return 1 if problems else 0
@@ -5004,6 +5102,8 @@ class SyncSummary:
             "changed": self.changed,
             "unchanged": self.unchanged,
             "already_synced": self.already_synced,
+            "withdrawn": [action.as_record() for action in self.outcome.withdrawn],
+            "restored": [action.as_record() for action in self.outcome.restored],
             "clearing": [action.as_record() for action in self.clearance.clearing],
             "clear": [action.as_record() for action in self.clearance.clear],
             "recheck_failures": [failure.as_record() for failure in self.clearance.failures],
@@ -5023,6 +5123,16 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
         f"{summary.changed} item(s) updated successfully, {summary.unchanged} unchanged, "
         f"{summary.failed} error(s)"
     ]
+    if summary.outcome.withdrawn:
+        lines.append(
+            f"{_pluralize(len(summary.outcome.withdrawn), 'item')} withdrawn "
+            "(files deleted, text replaced)"
+        )
+    if summary.outcome.restored:
+        lines.append(
+            f"{_pluralize(len(summary.outcome.restored), 'item')} restored "
+            "(file re-uploaded, text put back)"
+        )
     if summary.clearance.clear:
         lines.append(
             f"{_pluralize(len(summary.clearance.clear), 'withdrawn item')} clear (only Internet "
@@ -5045,6 +5155,19 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
             f"{_pluralize(len(summary.skipped), 'row')} skipped (not safely targetable)"
         )
     return lines
+
+
+def darkening_handoff_lines(withdrawn: tuple[RowAction, ...]) -> list[str]:
+    """What a person sends IA to darken this run's live withdrawals; the tool never sends it."""
+    if not withdrawn:
+        return []
+    return [
+        "Withdrawn this run - only Internet Archive staff can darken an item (take it fully "
+        "offline). Ask them to darken:",
+        *(f"  {action.identifier}  {item_url(action.uploaded_as)}" for action in withdrawn),
+        "Sending that request is the operator's to do; this tool never contacts Internet "
+        "Archive staff. See docs/OPERATIONS.md, \"Withdrawing an item\".",
+    ]
 
 
 @dataclass(frozen=True)
@@ -6034,11 +6157,18 @@ def sync_from_sheet(args) -> int:
     rechecking = [target for target in targets if target.recheck]
 
     if not targets:
+        if problems:
+            # Uploaded rows exist; each was refused above, so "none uploaded" would be untrue.
+            print(
+                "nothing to sync - every row marked uploaded was skipped "
+                f"({_pluralize(len(problems), 'row')}, listed above)"
+            )
+            return 1
         print("nothing to sync - no row is marked uploaded yet")
-        return 1 if problems else 0
+        return 0
 
     if dry_run:
-        return print_sync_dry_run(to_push, already_synced, problems)
+        return print_sync_dry_run(to_push, already_synced, problems, rechecking=rechecking)
 
     # From here every path is a real run - even the one that sends nothing -
     # so every path gets a log. A dry run above never reaches this line and
@@ -6108,6 +6238,10 @@ def sync_from_sheet(args) -> int:
     lines = sync_summary_lines(summary)
     for line in lines:
         print(line)
+    if live:
+        # Started-but-incomplete withdraws are failures, but IA can be asked to darken them now.
+        for line in darkening_handoff_lines(summary.outcome.withdrawn + summary.outcome.withdraw_started):
+            print(line)
     if sync_run_is_worth_mirroring(summary):
         mirror_run_to_log_tab(sheet.client, config.sync_log_tab, log_path, record, lines[0])
     print(f"log written to {log_path}")
