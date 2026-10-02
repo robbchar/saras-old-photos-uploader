@@ -10984,6 +10984,93 @@ def test_fetch_item_files_returns_none_instead_of_raising(monkeypatch):
     assert fetch_item_files("item") is None
 
 
+class _MissingItem:
+    """What internetarchive.get_item returns for an identifier IA does not have: no raise."""
+
+    exists = False
+    metadata: dict = {}
+
+    def get_files(self):
+        return iter(())
+
+
+def test_sync_dry_run_previews_a_withdraw_of_an_item_ia_does_not_have(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _MissingItem())
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    preview = lines.index(f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW")
+    assert lines[preview + 1:preview + 3] == [
+        f"      Internet Archive has no item {WITHDRAWN_ITEM}; a real run fails on it",
+        "",
+    ]
+    assert not any("would delete" in line or "(not set)" in line for line in lines)
+
+
+def test_sync_dry_run_previews_a_recheck_of_an_item_ia_does_not_have(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], []
+    )
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _MissingItem())
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert (
+        f"  row 2: {WITHDRAWN_ITEM} - Internet Archive has no item {WITHDRAWN_ITEM}; a real run "
+        "fails on it"
+    ) in lines
+    assert not any("holds only Internet Archive's own files" in line for line in lines)
+
+
+def test_sync_dry_run_previews_a_withdraw_it_cannot_read(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: None)
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    lines = capsys.readouterr().out.splitlines()
+
+    preview = lines.index(f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW")
+    assert lines[preview + 1] == "      could not list its files, so which would be deleted is unknown"
+    assert (
+        "      could not read its current metadata, so which fields would change is unknown"
+    ) in lines[preview:]
+
+
+def test_sync_dry_run_previews_a_recheck_it_cannot_list(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], []
+    )
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: None)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+
+    assert (
+        f"  row 2: {WITHDRAWN_ITEM} - could not list its files"
+        in capsys.readouterr().out.splitlines()
+    )
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_a_run_whose_every_row_was_refused_does_not_claim_none_is_uploaded(
     tmp_path, monkeypatch, capsys, dry_run

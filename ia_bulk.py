@@ -4110,13 +4110,26 @@ def fetch_current_metadata(identifier: str) -> dict | None:
         return None
 
 
-def fetch_item_files(identifier: str) -> list[str] | None:
-    """The names of an item's files, or None if they could not be read. Never raises, like fetch_current_metadata."""
+class NoSuchItem(Enum):
+    """fetch_item_files' answer for an identifier IA does not have; get_item does not raise for one."""
+
+    NO_SUCH_ITEM = "no such item"
+
+
+def fetch_item_files(identifier: str) -> list[str] | NoSuchItem | None:
+    """The names of an item's files, NO_SUCH_ITEM, or None if they could not be read. Never raises, like fetch_current_metadata."""
     try:
         item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+        if not item.exists:
+            return NoSuchItem.NO_SUCH_ITEM
         return [file.name for file in item.get_files()]
     except Exception:
         return None
+
+
+def _no_such_item_line(identifier: str) -> str:
+    """A dry run's word for an item a real withdraw or re-check would fail on."""
+    return f"Internet Archive has no item {identifier}; a real run fails on it"
 
 
 def _display_text(value: object) -> str:
@@ -4235,10 +4248,14 @@ def _print_changes(changes: list[FieldChange]) -> None:
 
 def print_withdrawal_preview(target: SyncTarget) -> None:
     """One withdraw or restore as IA would see it: files, field changes, and what stays."""
-    remote = fetch_current_metadata(target.uploaded_as)
     if target.action is SyncAction.WITHDRAW:
         print(f"  row {target.row_number}: {target.uploaded_as} - would WITHDRAW")
         names = fetch_item_files(target.uploaded_as)
+        if names is NoSuchItem.NO_SUCH_ITEM:
+            # Its empty metadata would read as every field "(not set)".
+            print(f"      {_no_such_item_line(target.uploaded_as)}")
+            print()
+            return
         if names is None:
             print("      could not list its files, so which would be deleted is unknown")
         else:
@@ -4260,6 +4277,7 @@ def print_withdrawal_preview(target: SyncTarget) -> None:
         print(f"  row {target.row_number}: {target.uploaded_as} - would RESTORE")
         print(f"      would re-upload {target.restore_file} (found on disk)")
         payload = restore_metadata(target)
+    remote = fetch_current_metadata(target.uploaded_as)
     if remote is None:
         print("      could not read its current metadata, so which fields would change is unknown")
     else:
@@ -4273,6 +4291,9 @@ def print_recheck_preview(target: SyncTarget) -> None:
     names = fetch_item_files(target.uploaded_as)
     if names is None:
         print(f"  row {target.row_number}: {target.uploaded_as} - could not list its files")
+        return
+    if names is NoSuchItem.NO_SUCH_ITEM:
+        print(f"  row {target.row_number}: {target.uploaded_as} - {_no_such_item_line(target.uploaded_as)}")
         return
     doomed = deletable_files(target.uploaded_as, names)
     if doomed:
