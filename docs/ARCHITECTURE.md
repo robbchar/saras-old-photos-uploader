@@ -644,12 +644,14 @@ rate_limited, stopped_by_request, rate_limit_status, skipped}`. The counts mean:
 | `rate_limit_status` | the parsed status (`429` or `503`) the run stopped on, else `null`. It does not say which of IA's limits fired. |
 | `skipped` | `{identifier, error}` per row nothing was sent for — held back by validation, or moved in the Sheet mid-run. |
 
-`unconfirmed` is the one to read first. A refused send is recoverable by
-rerunning; an unconfirmed row is a photograph that exists on Internet
-Archive under a permanent identifier the Sheet does not know about, so the
-next run reads the row as un-uploaded and would upload it *again* under a
-second identifier. Keeping it out of `failures` is the whole reason the
-list is separate.
+`unconfirmed` is the one to read first. A refused row and an unconfirmed one
+both keep their reserved `ia_identifier`, so the next run that includes
+either retries it under that identifier. What differs is a hand edit: a
+refused send created nothing, but an unconfirmed row is a photograph already
+on Internet Archive, so clearing its `ia_identifier` mints again for it — a
+second identifier, or the same number onto another photograph (see
+[`DECISIONS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet)).
+Keeping it out of `failures` is the whole reason the list is separate.
 
 `not_attempted` is the only number here that **overlaps** the lists rather
 than partitioning against them: it is the console's own "the run stopped
@@ -735,9 +737,12 @@ commands. It reuses the run's own connection one tab over
 it hands the writer is an `AppendOnlyTab` — a type carrying `ensure_tab` and
 `append_rows` and no `write_cells` at all, so the mirror cannot reach the
 metadata columns even by mistake. `mirror_run()` catches everything and reports on
-stderr — by the time it runs, items exist on Internet Archive under
-permanent identifiers, and a telemetry failure reported as a failed run
-would invite the rerun that mints a second identifier.
+stderr — by the time it runs, the run's work is already on Internet Archive.
+Raising would put a traceback in place of the command's `log written to`
+line and exit status, and a run that looks failed invites a hand repair of
+rows that are already done: a rerun skips them, but clearing a row's
+`ia_identifier` mints again for a photograph that has an item (see
+[`DECISIONS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet)).
 
 A sync run that pushed nothing, found nothing wrong and found no withdrawn
 item still clearing is not mirrored (`sync_run_is_worth_mirroring()`); see `DECISIONS.md`, "The Sheet's log tabs

@@ -79,11 +79,13 @@ def mirror_run(client: LogTabWriter, record: dict, run: str, headline: str) -> N
     rather than raising it.
 
     Never raising is the point, not a convenience. By the time this is
-    called the run is over: files are on Internet Archive under permanent
-    identifiers and the Sheet has already been written. A Sheets hiccup while
-    writing telemetry that turned a successful upload into a failed one would
-    invite a rerun - and a rerun is exactly what mints a second identifier
-    for a photograph that already has one.
+    called the run is over: its upload or sync has landed on Internet Archive
+    and the Sheet has already been written. Raising would put a traceback in
+    place of the command's "log written to" line and exit status, and a run
+    that looks failed invites a hand repair of done rows - clearing a row's
+    ia_identifier mints again for a photograph that already has an item (see
+    docs/decisions/IDENTIFIERS.md, "Identifiers are minted by `upload` and
+    written back to the Sheet").
 
     The tab is ensured on every run rather than once at setup. It is one
     cheap read against a spreadsheet the run is already talking to, and it
