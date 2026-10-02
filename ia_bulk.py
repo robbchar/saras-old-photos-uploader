@@ -1519,6 +1519,10 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
                     f"upload of '{target_identifier}' returned an unprepared Request instead of "
                     "a Response - this should be unreachable since debug is never passed"
                 )
+            # checksum=True skips a file IA already holds at this MD5 and answers
+            # a bare Response() with no status, whose .ok raises TypeError.
+            if response.status_code is None:
+                continue
             if not response.ok:
                 raise UploadFailed(
                     f"upload of '{target_identifier}' failed with status {response.status_code}: {response.text}",

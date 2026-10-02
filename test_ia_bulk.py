@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import copy
 import dataclasses
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -7230,8 +7231,12 @@ class CannedMetadataAdapter(HTTPAdapter):
     """archive.org answers a real, minimal item-metadata document, so the
     upload reaches S3 instead of failing before it."""
 
+    def __init__(self, document=ITEM_METADATA_DOCUMENT):
+        super().__init__()
+        self.document = document
+
     def send(self, request, *args, **kwargs):
-        return _canned(request, 200, json.dumps(ITEM_METADATA_DOCUMENT).encode(), "application/json")
+        return _canned(request, 200, json.dumps(self.document).encode(), "application/json")
 
 
 def _read_whole_body(body):
@@ -7264,10 +7269,11 @@ class FaultInjectingS3Adapter(HTTPAdapter):
         return _canned(request, status_code, body, "text/xml")
 
 
-def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
+def upload_row_against_s3_fault(fault, tmp_path, monkeypatch, item_metadata=ITEM_METADATA_DOCUMENT):
     """Runs the real upload_row() against the real internetarchive library,
     with S3 replaced by a fault-injecting adapter. Returns that adapter so the
-    caller can count attempts.
+    caller can count attempts. `item_metadata` is what archive.org answers for
+    the item.
 
     internetarchive.upload() is wrapped rather than replaced: the wrapper adds
     the prepared session and then calls the real function, so upload_row's own
@@ -7279,7 +7285,7 @@ def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
     session.access_key = "fake-access-key"
     session.secret_key = "fake-secret-key"
     s3_adapter = FaultInjectingS3Adapter(fault)
-    session.mount("https://archive.org", CannedMetadataAdapter())
+    session.mount("https://archive.org", CannedMetadataAdapter(item_metadata))
     session.mount("https://s3.us.archive.org", s3_adapter)
 
     real_upload = internetarchive.upload
@@ -7320,6 +7326,22 @@ def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tm
     assert len(s3.calls) == 1
     assert any("s3.us.archive.org" in url for url in s3.calls)
     assert s3.bodies == [b"pretend-jpeg-bytes"]
+
+
+def test_upload_row_counts_a_file_already_on_the_item_as_uploaded(tmp_path, monkeypatch, capsys):
+    """checksum=True skips a file the item already holds at the same MD5 and
+    answers a bare Response() with no status. That skip is how a retry after a
+    timeout that had in fact landed re-sends nothing, so it must succeed."""
+    already_there = {
+        **ITEM_METADATA_DOCUMENT,
+        "files": [{"name": "photo1.jpg", "md5": hashlib.md5(b"pretend-jpeg-bytes").hexdigest()}],
+    }
+    s3 = upload_row_against_s3_fault((200, b""), tmp_path, monkeypatch, item_metadata=already_there)
+
+    run_upload_row(tmp_path)
+
+    assert "photo1.jpg already exists, skipping." in capsys.readouterr().err
+    assert s3.calls == []
 
 
 def test_upload_row_reads_a_real_s3_slowdown_as_a_rate_limit(tmp_path, monkeypatch):
