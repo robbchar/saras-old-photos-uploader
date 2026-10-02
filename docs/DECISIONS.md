@@ -35,6 +35,7 @@ becomes a numbered release.
 
 - [CI has no secrets and never runs the e2e rehearsal](decisions/CI-AND-RELEASES.md#ci-has-no-secrets-and-never-runs-the-e2e-rehearsal)
 - [The version lives in `version.txt` and changes only in the release PR](decisions/CI-AND-RELEASES.md#the-version-lives-in-versiontxt-and-changes-only-in-the-release-pr)
+- [Releases are authored by a GitHub App, not a person](decisions/CI-AND-RELEASES.md#releases-are-authored-by-a-github-app-not-a-person)
 
 ## [Identifiers](decisions/IDENTIFIERS.md)
 

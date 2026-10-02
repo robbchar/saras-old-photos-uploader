@@ -9,12 +9,13 @@ public repository's Actions secrets would expose the Sheet and the org's IA
 account to any workflow change. The network guard makes "offline" a checked
 property, not a convention.
 
-The one secret in the repository, `RELEASE_PLEASE_TOKEN`, is used only by
+The one secret in the repository, `RELEASE_APP_PRIVATE_KEY`, is used only by
 `release.yml`. It can't reach the Sheet or Internet Archive, but it is not
-narrow. Contents write lets it push to any branch, and it acts as its owner,
-an admin whom `main checks` lets bypass the required checks, so a leaked
-token could push straight to `main`. A `pull_request` run from a branch in
-this repository (not a fork's or Dependabot's) can read it too. Revoking it:
+narrow. It mints tokens for the App `lcps-uploader-release`, whose Contents
+write lets it push to any branch the rulesets don't guard. The App is not a
+bypass actor in `main checks`, so a leaked key can't push straight to `main`.
+A `pull_request` run from a branch in this repository (not a fork's or
+Dependabot's) can read it too. Replacing it:
 [`CI.md`, "The release token"](../CI.md#the-release-token).
 
 ## The version lives in `version.txt` and changes only in the release PR
@@ -41,3 +42,26 @@ Considered and rejected:
   release-please, and the PR titles were already Conventional Commits.
 - **A bot committing the bump straight to `main`.** It needs a bypass of the
   required checks, and the numbers depend on merge order again.
+
+## Releases are authored by a GitHub App, not a person
+
+*Decided 2026-10-02.* release-please first ran with a fine-grained personal
+access token, so the release PR, its commit and the 1.1.1 GitHub Release
+were all attributed to the token's owner as if he had written them. GitHub
+sends no notification about your own actions, so the first release PR also
+appeared unannounced. Now each run mints a token from the GitHub App
+`lcps-uploader-release`, and `lcps-uploader-release[bot]` is the author. The
+tag itself records no author either way.
+
+The switch also narrows a leak. The personal token acted as an admin whom
+`main checks` lets bypass the required checks; the App is no bypass actor, and
+each token it mints expires within an hour. The App's private key, like the
+personal token, never expires.
+
+A bot author alone doesn't announce the release PR to the owner: GitHub
+notifies watchers, so the owner watches the repository's pull requests.
+
+Considered and rejected:
+
+- **Keeping the personal token and documenting where the release PR
+  appears.** It fixed finding the PR, but not who it claims wrote it.
