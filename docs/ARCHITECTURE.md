@@ -41,9 +41,9 @@ case-insensitively, is recorded in `ColumnMap.held_back` and excluded by
 `uploadable_fields()` — it is normalized and reported on (so its transform is
 still visible), but never uploaded.
 
-**Tool-owned columns.** `RESERVED_FIELDS` (`column_map.py`) is six `ia_`-prefixed
-columns plus `file`, all excluded by `uploadable_fields()` so the tool's own
-bookkeeping never ships as IA metadata. `upload` writes four of them:
+**Tool-owned columns.** `RESERVED_FIELDS` (`column_map.py`) is seven `ia_`-prefixed
+columns plus `file` and the person-edited `withdrawn`, all excluded by
+`uploadable_fields()` so the tool's own bookkeeping never ships as IA metadata. `upload` writes four of them:
 `ia_identifier`, `ia_uploaded`, `ia_url`, `ia_identifier_bib`. `sync-metadata`
 owns the other two, `ia_sync_hash` and `ia_last_synced`, which record what a
 row last successfully pushed so an unchanged row is not resent — see
@@ -59,10 +59,12 @@ The Sheet's own `identifier` column, if it has one, is ordinary donor metadata
 [`DECISIONS.md`](decisions/IDENTIFIERS.md#the-four-ia_-columns-are-required-in-every-mode-including-the-safe-one).
 `sync-metadata`'s two are required the same way, by that command alone — see
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
+`sync-metadata` also owns `ia_withdrawn`, required only when the Sheet has a
+`withdrawn` column — see "Withdrawing an item" below.
 
 `format_field_receipt()` prints, before anything permanent happens, exactly
-which normalized fields will upload and which are held back. `file` and the
-six `ia_` columns never reach this list at all — `uploadable_fields()`
+which normalized fields will upload and which are held back. `file`,
+`withdrawn` and the seven `ia_` columns never reach this list at all — `uploadable_fields()`
 already excludes them via `RESERVED_FIELDS` (see "Tool-owned columns" above).
 The receipt separates two different reasons a column does not ship. "NOT
 uploaded — Internet Archive reserves these names" is `identifier` alone
@@ -184,16 +186,17 @@ actually in scope (ready, but failing validation) affects `upload`'s exit
 code.
 
 **One verdict, three readers.** `RowValidation.verdict` (`UploadVerdict.READY`/
-`INVALID`/`NOT_READY`) combines the two questions into one answer to "is
-this row uploadable": not-ready takes precedence over invalid. It does not
-say whether the row is already uploaded — `classify_row` still does.
-`validate`'s lifecycle summary buckets by it within each lifecycle state,
-`plan_upload_targets` targets `READY` rows that are not `DONE`, and
-`upload_from_sheet` itemizes `INVALID` and counts `NOT_READY` from it — none
-of them recompute the rule, so `upload` targets exactly the rows `validate`
-reports as "ready to upload" plus those "reserved but unconfirmed".
-Filtering on `is_valid` alone
-once uploaded an uncatalogued row under a permanent identifier with no title;
+`INVALID`/`NOT_READY`/`HELD`) combines the questions into one answer to "is
+this row uploadable": held (its `withdrawn` cell says yes — see "Withdrawing
+an item") takes precedence over not-ready, which takes precedence over
+invalid. It does not say whether the row is already uploaded —
+`classify_row` still does. `validate`'s lifecycle summary buckets by it
+within each lifecycle state, `plan_upload_targets` targets `READY` rows that
+are not `DONE`, and `upload_from_sheet` itemizes `INVALID` and counts
+`NOT_READY` and `HELD` from it — none of them recompute the rule, so
+`upload` targets exactly the rows `validate` reports as "ready to upload"
+plus those "reserved but unconfirmed". Filtering on `is_valid` alone once
+uploaded an uncatalogued row under a permanent identifier with no title;
 that is the drift this closes.
 
 ## The reserve → upload → confirm protocol
@@ -345,6 +348,71 @@ failure — it stamps `ia_sync_hash`/`ia_last_synced` just like a real change
 would, since the item now provably matches the Sheet. `sync-metadata` refuses
 to run at all without both columns present as Sheet headers, in every mode —
 see "Tool-owned columns" above.
+
+### Withdrawing an item
+
+A person-edited `withdrawn` column and a tool-written `ia_withdrawn` column
+(both in `RESERVED_FIELDS`) steer it; `withdrawal.parse_withdrawn()` reads the
+first as yes, no or broken. In `validate`/`upload`, a yes makes the row's
+verdict `HELD` (see "Readiness"), so `upload` skips it. In `sync-metadata`,
+`plan_sync_targets()` compares the cell with `ia_withdrawn`
+(`withdrawal.sync_action()`): yes-and-blank is a `WITHDRAW`, no-and-stamped a
+`RESTORE`, anything else an ordinary update; yes-and-stamped also marks the
+row for a re-check (`SyncTarget.recheck`). A yes row sends
+`withdrawn_metadata()` — the registry's `withdrawn_title`/
+`withdrawn_description` plus `REMOVE_TAG` for every other field it sends and
+for `identifier-bib`/`date` — and that is what its hash covers.
+`split_unchanged()` always sends a withdraw or restore.
+
+`plan_sync_targets()` refuses a withdraw, re-check or restore whose `ia_url`
+item is not the row's own (`item_is_rows_own()`). A restore's file is
+resolved up front by `attach_restore_files()` — the only sync step that reads
+the drive — and a missing, ambiguous or blank-template original refuses the
+row.
+
+In `SheetSyncRun.execute()`, each withdraw first calls `_refused_delete()`: a
+fresh read (`_reread()`, shared with `_verified()`) that refuses the withdraw
+unless the row is unmoved (`split_moved_targets()`) and its `withdrawn` cell
+still parses as yes (`_still_withdrawn()`). Then `_withdraw()` calls
+`delete_item_files()` — refusing an item IA does not have, else deleting
+every file but IA's system files, content first and `__ia_thumb.jpg` last
+(skipped in a pass where a content delete was refused), each with cascade and
+`x-archive-keep-old-version: 0`; any 2xx is accepted, a 404 counts as gone,
+any other refusal is named in the returned `DeletePass` — and
+`update_metadata_row()`. `ia_withdrawn` (`withdrawn_updates()`) is written
+once the pass started (`DeletePass.started`: a delete accepted, or nothing
+left to delete); `ia_sync_hash`/`ia_last_synced` only when every
+delete was accepted and the text landed. A restore goes through `_send()`:
+`require_withdrawal_processed()` refuses it while IA's task catalog has
+anything queued for the item (or cannot be asked), then `upload_row()`
+re-sends the original with what `upload` sends, then `restore_metadata()`
+goes through `update_metadata_row()`, since an upload into an existing item
+does not set its metadata. Success stamps the hash and clears
+`ia_withdrawn`; a failed restore stays unstamped and repeats.
+
+After the push loop, `recheck_withdrawals()` re-checks every row with
+`SyncTarget.recheck`: `recheck_withdrawn_item()` lists the item, deletes
+anything that is not IA's own in the same order, and — only once nothing is
+left — asks IA's task catalog (`pending_task_count()`) whether anything is
+still queued, then lists the item once more before calling it clear. The
+item is *clear* with no files left and nothing queued, *still clearing*
+otherwise; an item IA does not have, or a re-check that cannot reach IA, is
+that item's failure only. Re-checks write nothing to the Sheet or the item's
+text, need no pre-delete re-read (the item is already this row's withdrawn
+item), and never count toward the bulk limit.
+
+Before sending, `withdrawal_refusal()` refuses a run moving more than
+`BULK_WITHDRAW_LIMIT` (10) items unless `--allow-bulk-withdraw` (a dry run
+previews, then prints the refusal and exits 1), and a live run with any
+withdraw or restore first confirms `ia_collection` on archive.org
+(`confirm_collection_on_archive_org()` with `SYNC_COLLECTION_WORDING`).
+Withdraws, restores and still-clearing items are named in the run summary
+(`withdrawn`/`restored`/`clearing`; clear ones under `clear`, failed
+re-checks under `recheck_failures`), as their own rows in the log tab (a
+clear re-check gets none: it is the steady state), and — after a live run —
+in a darkening hand-off (`darkening_handoff_lines()`) listing each identifier
+and URL, started-but-incomplete withdraws included. See
+[`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md).
 
 ## Reconciling filenames
 
@@ -509,17 +577,23 @@ Sheet that could fail to land.
 
 #### `sync-metadata`
 
-`{… checked, pushed, changed, unchanged, already_synced, failures,
-skipped}`. The counts mean:
+`{… checked, pushed, changed, unchanged, already_synced, withdrawn,
+restored, clearing, clear, recheck_failures, failures, skipped}`. The counts
+mean:
 
 | field | meaning |
 | --- | --- |
-| `checked` | rows the run evaluated — every row it read. `checked − pushed − len(skipped) − already_synced` is the rows not marked uploaded. |
-| `pushed` | rows actually sent to Internet Archive. Always `changed + unchanged + len(failures)`. |
+| `checked` | rows the run evaluated — every row it read. `checked − pushed − len(skipped) − already_synced` is the rows not marked uploaded. Each row counts once: a withdrawal that started but did not finish is in `failures` only, and a re-checked row is already in `pushed` or `already_synced` (its re-check result is in `clearing`/`clear`/`recheck_failures`, which this sum ignores). |
+| `pushed` | rows this run sent to Internet Archive, or refused just before sending (a withdraw whose row moved, a restore IA is still processing). Always `changed + unchanged + len(failures) + len(withdrawn) + len(restored)`. |
 | `changed` | sends IA accepted as a change. |
 | `unchanged` | IA's *no changes to `_meta.xml`* — the idempotence signal a full re-sync is run to see, kept as its own count rather than folded into `changed`. |
 | `already_synced` | rows the hash gate found already matching their last push and never sent at all. On the steady state this is nearly the whole Sheet; see `DECISIONS.md`, "A row pushes only when its content changed". |
-| `failures` | `{identifier, error}` per row IA refused. |
+| `withdrawn` | `{identifier, detail}` per item whose files this run deleted and whose text it replaced. Not counted in `changed`. |
+| `restored` | `{identifier, detail}` per item this run re-uploaded and whose text it put back. Not counted in `changed`. |
+| `clearing` | `{identifier, detail}` per already-withdrawn item this run's re-check found not yet clear: what it deleted again, or how many IA tasks are still queued. |
+| `clear` | `{identifier, detail}` per already-withdrawn item this run's re-check found clear. Not mirrored to the log tab. |
+| `recheck_failures` | `{identifier, error}` per already-withdrawn item whose re-check failed. Counted in the headline's errors, not in `pushed`. |
+| `failures` | `{identifier, error}` per row IA refused — including a withdrawal that started but did not finish ("withdrawal started on …"), counted here only, and a withdraw or restore refused just before sending. |
 | `skipped` | `{identifier, error}` per row the run declined to send at all. |
 
 #### `upload`
@@ -611,7 +685,9 @@ JSONL lives on whichever machine ran the job. `upload` writes
 registry keys, and a command whose key is absent writes no tab at all.
 
 `log_tab.py` renders a record as rows — one `summary` row, then one row per
-entry in the record's `failures`, `unconfirmed` and `skipped` lists — and
+entry in a sync record's `withdrawn`, `restored` and `clearing` lists
+(`ACTION_KINDS`), then one per entry in the record's `failures`,
+`recheck_failures` (as `failure`), `unconfirmed` and `skipped` lists — and
 appends them through `mirror_run()`. It is fed the record rather than the
 summary object, which keeps it free of any import from `ia_bulk` (which
 imports it) and, more usefully, makes the tab and the JSONL the same data
@@ -629,8 +705,8 @@ stderr — by the time it runs, items exist on Internet Archive under
 permanent identifiers, and a telemetry failure reported as a failed run
 would invite the rerun that mints a second identifier.
 
-A sync run that pushed nothing and found nothing wrong is not mirrored
-(`sync_run_is_worth_mirroring()`); see `DECISIONS.md`, "The Sheet's log tabs
+A sync run that pushed nothing, found nothing wrong and found no withdrawn
+item still clearing is not mirrored (`sync_run_is_worth_mirroring()`); see `DECISIONS.md`, "The Sheet's log tabs
 are telemetry, never an input", for that and the rest of the reasoning.
 
 ## `sync-metadata`'s "unchanged" status
@@ -729,7 +805,8 @@ Archive collection; it was removed with the CSV paths on 2026-09-23.)
 `upload --live`, and `upload --live --dry-run`, refuse before reading the
 Sheet unless archive.org confirms that `ia_collection` exists with mediatype
 `collection`. See `DECISIONS.md`, "A live upload goes only into a collection
-archive.org confirms". The gap is what that check cannot see. A real
+archive.org confirms". `sync-metadata --live` runs the same check before a
+withdraw or restore. The gap is what that check cannot see. A real
 collection that is the wrong one passes, such as the parent
 `lcpsdigitalcollection` in place of `sarasoldphotos`. So does a collection
 the org account may not add items to. So confirm the value by hand once, in

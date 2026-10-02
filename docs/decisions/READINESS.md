@@ -198,6 +198,27 @@ applies one fixed rule and never corrects a typo; `check_column_map()` rejects
 two headers that normalize to one name, or to nothing; `check_grid_shape()`
 rejects a data row longer than its header.
 
+## A withdrawn row is held, not not-ready or broken
+
+*Decided 2026-10-01.*
+
+A `withdrawn` cell that says yes is neither a blank nor a mistake: someone
+decided this row must not go out. So it gets its own verdict, `held`, rather
+than borrowing `not_ready` (which would put it in the cataloguing backlog) or
+`invalid` (which would make `upload` itemize it as a failure and exit
+non-zero). `held` beats both: a withdrawn row that is also uncatalogued or
+broken is counted once, as held — its errors are still listed and still make
+`validate` exit 1. A value that reads as neither yes nor no (`maybe`, `2`) is
+an ordinary present-but-wrong value: a row error, and nothing is done with
+that row until it is fixed.
+
+`upload` skips held rows, keeps any identifier already reserved, and prints
+how many it held back; `validate`'s lifecycle summary gives held rows their
+own line in each state. An uploaded row marked withdrawn is `sync-metadata`'s
+to act on (see [`WITHDRAWAL.md`](WITHDRAWAL.md)). `validate --json` counts
+held rows under `held`, and the upload page lists the ones not yet uploaded
+under **Withdrawn** and marks uploaded ones `(withdrawn)`.
+
 ## `validate --json` is a contract, not a second report
 
 *Decided 2026-09-25 (#74).*
@@ -226,7 +247,8 @@ one JSON document instead.
   `rows_with_errors` is non-empty.
 - **The code's own vocabulary.** Counts are keyed by the row states
   (`unassigned`, `done`, `reserved`) and verdicts (`ready`, `invalid`,
-  `not_ready`), all nine always present. `ready_to_upload` (overall, and
+  `not_ready`, `held`), all twelve always present (`held` added 2026-10-01
+  without a `format` bump: the page ships in the same commit as the server). `ready_to_upload` (overall, and
   per batch) is what `upload` would send: ready rows not yet uploaded,
   reserved ones included, by the same rule `upload` uses
   (`is_upload_target`).

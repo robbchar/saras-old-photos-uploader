@@ -1,0 +1,193 @@
+# Withdrawal
+
+Pulling an item back off Internet Archive after upload, and putting it back.
+Indexed in [`../DECISIONS.md`](../DECISIONS.md).
+
+## Withdrawing deletes the files, replaces the text, and leaves darkening to a person
+
+*Decided 2026-10-01.*
+
+Internet Archive gives an uploader no way to delete an item: identifiers are
+never released, and only an item's *files* can be deleted. `noindex` is
+read-only after upload
+([`KNOWN-ISSUES.md` #1](../KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata)).
+Darkening — taking an item fully offline — is done only by IA staff, on
+request, and only they can undo it.
+
+So a withdraw does the two parts the tool can do.
+
+It deletes every file in the item that is not IA's own, each with IA's
+cascade, so derivatives go too, and with `x-archive-keep-old-version: 0`, so
+IA keeps no `history/` copy. Content files go first and IA's item tile
+(`__ia_thumb.jpg`) last; in a pass where IA refused a content delete, the
+tile is kept, because IA would rebuild it from the file still there. Any 2xx
+answer is an accepted delete, and a 404 counts as already gone. IA's own
+system files (`_meta.xml`, `_files.xml`, `_meta.sqlite`, `_archive.torrent`,
+`_reviews.xml`) cannot be deleted and stay.
+
+And it replaces the item's text: `title` and `description` become the
+project's `withdrawn_title` and `withdrawn_description` (registry keys,
+defaulting to `Withdrawn` and *This item has been withdrawn by the Lower
+Columbia Preservation Society.*), and every other field the row sends — plus
+the `identifier-bib` and `date` that `upload` generates — is removed with
+`REMOVE_TAG`. `identifier`, `collection` and `mediatype` are never sent.
+
+The third part, asking IA to darken the item, stays with a person: it is a
+request to people, not an API call. After a live withdraw the run prints the
+identifiers and archive.org URLs to send, including any withdraw that started
+but did not finish.
+
+A field IA holds that the Sheet never had (one added by hand on archive.org)
+is not removed: the tool clears only what it sends.
+
+## Withdrawal is a Sheet column, and `sync-metadata` makes IA match it
+
+*Decided 2026-10-01.*
+
+One person-edited column, `withdrawn`, says which side an item should be on;
+one tool-written column, `ia_withdrawn`, records which side it is on — the UTC
+time the withdrawal started (IA accepted the deletes), blank while the files
+are present. `sync-metadata` acts only where the two disagree: yes and blank
+withdraws, no and stamped restores. A value that reads as neither yes nor no
+is a row error, and that row is left alone.
+
+Living in `sync-metadata` rather than a new command puts the reverse
+direction in the same place — set the cell back to no and the original is
+re-uploaded and the Sheet's text written back (see "A restore waits until
+Internet Archive has finished the withdrawal", below) — and gives both
+directions the hourly schedule, the per-row log and the identity checks for
+free. A row withdrawn before it was ever uploaded is simply held: `upload`
+skips it and keeps any identifier already reserved (see
+[`READINESS.md`](READINESS.md#a-withdrawn-row-is-held-not-not-ready-or-broken)).
+A reserved row whose upload landed without being confirmed is held too;
+`sync-metadata` only acts on uploaded rows, so confirm it first.
+
+What a withdrawn row hashes is the withdrawn notice, not its cells: edits to
+its other cells wait for a restore, and flipping the column always pushes
+(see [`SHEET-PROTOCOL.md`, "A row pushes only when its content changed"](SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed)).
+Clearing `ia_withdrawn` by hand forces the tool to treat the item as present,
+the same override role clearing `ia_sync_hash` has. A Sheet without the
+`withdrawn` column never withdraws or restores anything, whatever
+`ia_withdrawn` holds, so deleting the column cannot mass-restore.
+
+Files move only in the row's own item. Before planning a withdraw, a re-check
+or a restore, the run checks that the item its `ia_url` names is this row's
+`ia_identifier` (live) or `zztest-<stamp>-<ia_identifier>` for some stamp
+(test mode); anything else — a URL pasted from another row, say — is refused
+by name, and nothing is deleted or uploaded.
+
+Each withdraw re-reads the Sheet just before its deletes and goes ahead only
+if the row is still where the run read it (its `file_template` fingerprint and
+`ia_identifier`) **and** its `withdrawn` cell still reads yes. The re-read is
+before the delete rather than after, and per withdraw rather than per chunk,
+because a delete cannot be sent again; it costs one Sheet read per withdraw,
+at most ten a run unless the limit below is overridden. A row that fails it
+is refused by name, nothing is deleted, and the run exits 1 — a row un-ticked
+mid-run included, so a destructive step never changes course unseen; the next
+run follows what the Sheet says then. A row whose `file_template` cells are
+blank cannot be confirmed, so it is not withdrawn until they are filled in. A
+withdraw of an item Internet Archive does not have fails by name: nothing is
+deleted or stamped, and the darkening hand-off does not list it.
+
+`ia_withdrawn` is written as soon as IA accepts a delete, even if a later
+delete or the text write fails; the hash is written only once the text landed
+and every delete was accepted. A withdraw that never started repeats whole on
+the next run; one that started is finished by the next run's metadata push
+and re-check (below). If even the `ia_withdrawn` write is lost — the row
+moved, or the Sheet write failed — the run names the items and says to keep
+`withdrawn` at yes: setting it to no before the next run would leave the
+files deleted with nothing to restore them.
+
+## A withdraw converges across runs, and the tool never waits on IA
+
+*Decided 2026-10-01, after a hand spike on `test_collection`.*
+
+One pass of cascade deletes does not reliably remove the photograph. The spike
+saw it fail two ways. Deleting the tile first let IA rebuild `__ia_thumb.jpg`
+from an original whose delete it had not processed yet. And a derive that ran
+ahead of queued deletes created a `_thumb.jpg` after the original's cascade
+had been submitted, so the cascade missed it and IA built a new tile from it.
+Both times the item page showed the photograph after every delete had been
+accepted. A second pass, with nothing left queued, cleared the item.
+
+So a withdraw is not one action but a state the tool keeps converging on.
+The withdraw run deletes content before the tile and marks `ia_withdrawn`
+when the deletes are accepted. Every later `sync-metadata` run re-checks each
+withdrawn, stamped item:
+
+- It lists the item's files. Any file that is not IA's own is deleted again,
+  in the same order and with the same header, and the item is reported
+  *still clearing*.
+- Once only IA's own files are left, it asks IA's task catalog whether
+  anything is still queued for the item; anything queued is *still clearing*.
+- With nothing queued, it lists the files once more — a derive can finish
+  between the first listing and the task query and add a photo file — and
+  reports the item *clear* only if that listing is still IA's own files
+  alone. A false *clear* is the costly mistake: operators stop re-running
+  there, and a photo left behind stays public.
+
+An item Internet Archive does not have, or one the re-check cannot reach, is
+that item's re-check failure — named, counted as an error, never *clear*.
+Re-checks never touch the text, never write to the Sheet (no restamp), and
+never count toward the per-run limit.
+
+The tool never waits on IA's queue: on `test_collection` the spike watched a
+derive sit queued for over an hour and a half. Blocking a run on it would hold
+the hourly agent hostage to IA's load. The accepted trade-off is that the
+item tile can stay visible until a later run clears it — hours if IA's queue
+is backed up. The operator runs `sync-metadata` again (or lets the hourly
+agent) until every item reports clear; the darkening request can go at once.
+An IA task that errors and stays in the catalog keeps an item *still
+clearing* until IA staff clear it — see
+[`KNOWN-ISSUES.md` #8](../KNOWN-ISSUES.md#8-an-errored-internet-archive-task-blocks-clear-and-restore).
+
+## A restore waits until Internet Archive has finished the withdrawal
+
+*Decided 2026-10-01, during the e2e rehearsal's review.*
+
+A restore re-uploads the item's original and writes the Sheet's text back.
+If IA still has the withdrawal's deletes queued, a delete processed after the
+re-upload removes the file again, and the Sheet says "restored" over an empty
+item. The spike saw IA hold a queue for hours.
+
+So a restore first asks IA's task catalog whether anything is still queued
+for the item. While anything is — or when that question cannot be answered —
+the restore is refused by name, nothing is uploaded, `ia_withdrawn` keeps its
+value, the run exits 1, and the next run tries again. Like a re-check, it
+never waits.
+
+The original is found the same way `upload` finds it, from `files_dir` and
+`file_template` — the only time `sync-metadata` reads the drive. One that is
+missing, matches more than one file, or whose `file_template` cells are blank
+refuses the row by name, nothing is sent, and the item stays withdrawn. An
+upload into an existing item does not set its metadata, so after re-uploading
+the restore writes the text with its own metadata call: the Sheet's fields,
+plus the `identifier-bib` and `date` `upload` would generate, and the notice
+removed where the Sheet's title or description cell is blank. Success stamps
+the hash and clears `ia_withdrawn`; a failure leaves both, and the restore
+repeats next run.
+
+## One run may move at most ten items, and the limit is per run
+
+*Decided 2026-10-01.*
+
+A fill-down or a paste over the `withdrawn` column looks, to the tool,
+exactly like a decision to withdraw a whole batch — and the hourly agent
+would carry it out unattended. So a run whose withdraws plus restores exceed
+10 refuses entirely before anything is sent, and names the rows, unless
+`--allow-bulk-withdraw` is passed; the dry run previews the run, shows the
+same refusal and exits 1. Already-withdrawn, stamped rows (re-checks) don't
+count; a row retried after a partial failure does.
+
+Per run rather than a rolling window: the danger is one bad edit, which a
+per-run cap stops on the first run after it, and a window would need state
+the Sheet does not keep. Restores re-upload a file but are not counted in the
+rolling 5,000/day total, which reads `ia_uploaded` — see
+[`KNOWN-ISSUES.md` #7](../KNOWN-ISSUES.md#7-restores-are-not-counted-in-the-daily-upload-total).
+
+A live run with any withdraw or restore to send also runs the archive.org
+collection check `upload --live` uses
+([`FOUNDATIONS.md`, "A live upload goes only into a collection archive.org confirms"](FOUNDATIONS.md#a-live-upload-goes-only-into-a-collection-archiveorg-confirms))
+and refuses the run when archive.org cannot confirm the collection or cannot
+be reached. Re-checks and test-mode runs skip it: a re-check only deletes
+from an item already withdrawn, and test mode targets `test_collection`.

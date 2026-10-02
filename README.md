@@ -94,6 +94,12 @@ marks the row not-ready rather than invalid, and a typo in this list is a
 hard startup error rather than a silent no-op. See
 [`docs/DECISIONS.md`](docs/DECISIONS.md), "A blank cell is not an error".
 
+`withdrawn_title` and `withdrawn_description` are optional: the title and
+description a withdrawn item gets on Internet Archive. They default to
+`Withdrawn` and *This item has been withdrawn by the Lower Columbia
+Preservation Society.*; a blank value is refused at startup. See
+[`docs/OPERATIONS.md`, "Withdrawing an item"](docs/OPERATIONS.md#withdrawing-an-item).
+
 ## Setup
 
 On the Mac that runs the pipeline, one command creates `.venv`, installs
@@ -156,7 +162,8 @@ the same ignoring a trailing extension — two matching candidates is a failure
 naming both, never a silent pick; `files_dir` is a hard boundary, so a cell that
 resolves outside it is refused, as is a blank folder cell), then prints a
 pass/fail report per row, a receipt of which fields will upload, a lifecycle
-summary (rows ready to upload / already uploaded / reserved but unconfirmed),
+summary (rows ready to upload / already uploaded / reserved but unconfirmed,
+and any held back because their `withdrawn` cell says yes),
 and advisory suggestions for renaming a column to a standard IA field name.
 Every column the tool itself writes is `ia_`-prefixed (`ia_identifier`,
 `ia_identifier_bib`, `ia_uploaded`, `ia_url`); a blank `ia_identifier` is
@@ -403,6 +410,16 @@ for the two recovery levers (clear one row's `ia_sync_hash`, or clear the
 whole column) — never type a value into that column by hand. See
 [`docs/decisions/SHEET-PROTOCOL.md`](docs/decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed)
 for why.
+
+**Withdrawing an item.** Put `yes` in a row's `withdrawn` column and
+`sync-metadata` deletes that item's files on Internet Archive and replaces its
+text with the project's withdrawn notice; later runs re-check it until it
+reports clear. Set it back to `no` and the original is re-uploaded and its
+text written back. A Sheet with a `withdrawn` column needs an `ia_withdrawn`
+column too (the tool's record of which items it withdrew). A run that would
+withdraw or restore more than 10 items refuses, before sending anything,
+without `--allow-bulk-withdraw`. See
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md#withdrawing-an-item).
 
 Pushing and stamping happen in batches of 500 rows at a time, overridable
 with `--chunk-size` — the same flag `upload` has, but for a different reason:
@@ -688,15 +705,23 @@ The test, lint and type-check commands are in
 ### E2E rehearsal (opt-in)
 
 ```bash
-python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s
 ```
 
 Drives the real CLI against the Test Sheet and IA's `test_collection` — the
-automated form of `docs/OPERATIONS.md`, "Rehearsing the log tabs". Takes a few
-minutes and is skipped without `--run-e2e`. Needs the service-account key at
+automated form of `docs/OPERATIONS.md`, "Rehearsing the log tabs" and
+"Withdrawing an item". Takes a few minutes and is skipped without
+`--run-e2e`. Needs the service-account key at
 `.ignored/google-service-account.json` in the checkout being run (a fresh
 worktree has none) and `ia configure` done on the machine. It rewrites the
 Test Sheet every run; test data is ephemeral.
+
+Name `::test_rehearsal` on its own. The file's other e2e tests (the upload
+page, and archive.org's answers to the collection check) run too without it,
+and the upload-page one resets the Test Sheet afterward — wiping the
+withdrawn row the rehearsal leaves for the hand clear check in
+[`docs/OPERATIONS.md`, "Withdrawing an item"](docs/OPERATIONS.md#withdrawing-an-item).
+Run the whole file when you want those tests and not that check.
 
 **One rehearsal at a time.** Step 0 takes an `E2E Lock` tab on the Test
 Sheet, and teardown deletes it. A rehearsal started while another holds it
@@ -710,8 +735,9 @@ hand, and what "this run lost the Test Sheet lock" means are in
 use `--registry e2e_fixtures/registry.json --project e2e`; `--project
 sarasoldphotos` without `--live` now reads those same rows, so save it for
 `--live` against the real Sheet, and for `doctor`/`setup`, which check its
-files drive. After a passing run, rows 2, 3, 5, 7 and 8 are
-uploaded and synced, row 2's `Title` is edited, and row 6 is still not ready
+files drive. After a passing `test_rehearsal`, rows 2, 3, 5, 7 and 8 are
+uploaded and synced, row 2's `Title` is edited, row 2 has been withdrawn and
+restored, row 3 is left withdrawn, and row 6 is still not ready
 (no theme) — reset rows per
 [`docs/OPERATIONS.md`, "Re-rehearsing a row that is already done"](docs/OPERATIONS.md#re-rehearsing-a-row-that-is-already-done)
 before a hand upload.

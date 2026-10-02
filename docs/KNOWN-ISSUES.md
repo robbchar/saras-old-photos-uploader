@@ -132,6 +132,41 @@ which are naturally multi-valued.
 `ia metadata <identifier> --modify 'subject[1]:...'` — or the item's
 archive.org edit page. Neither is recorded in the Sheet.
 
+## 7. Restores are not counted in the daily upload total
+
+**Severity: low — bounded by the per-run withdraw limit.**
+
+*Found 2026-10-01, by design (withdrawal).* A restore re-uploads an item's
+original file, but the 5,000/day cap `upload` enforces counts only the Sheet's
+`ia_uploaded` cells, which a restore never writes. A day of restores spends
+Internet Archive's daily quota without `upload` seeing it.
+
+**Mitigation today:** `sync-metadata` refuses a run that would withdraw or
+restore more than 10 items unless `--allow-bulk-withdraw` is passed, so
+restores stay small unless someone overrides that on purpose. On a day with a
+bulk restore, size that day's uploads with `upload --limit`.
+
+## 8. An errored Internet Archive task blocks clear and restore
+
+**Severity: low — visible, never silent, but needs IA staff to resolve.**
+
+*Found 2026-10-01, in review of the withdrawal work; inferred from how the
+task query works, not yet seen on a real item.* A re-check reports an
+item *clear* only when IA's task catalog has nothing queued for it, and a
+restore is refused while anything is (see
+[`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-restore-waits-until-internet-archive-has-finished-the-withdrawal)).
+A task that errors stays in that catalog until IA staff clear it, so one
+errored delete or derive keeps the item *still clearing* — "Internet Archive
+has N tasks queued" — and any restore of it refused as "still processing
+this item's withdrawal", run after run. The tool cannot tell an errored task
+from a slow one.
+
+**Mitigation today:** an item that still reports a queued task after a day
+or so, with no files left to delete, is the sign. Ask Internet Archive staff
+to clear the item's stuck task — the same contact as the darkening request.
+Nothing on the tool's side needs undoing: the next run after they do reports
+it clear, or restores it.
+
 ## Fixed
 
 ### `--collection` was unvalidated on `--live` (was #3)

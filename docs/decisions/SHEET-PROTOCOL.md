@@ -187,7 +187,7 @@ Four choices went into the shape:
   definition shared by the sender and the hasher, so they cannot disagree
   about what a row means. A hash over anything else either re-pushes a row
   forever or silently swallows an edit. Being derived from
-  `sheet_metadata_fields()`, it excludes the six `ia_` columns and the
+  `sheet_metadata_fields()`, it excludes the tool-owned columns and the
   `(LCPS Internal)` ones automatically. It does include the `REMOVE_TAG`
   entries for the file-location columns, so a row synced before those were
   excluded pushes once more (see [FILES-AND-METADATA.md](FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them)).
@@ -220,6 +220,16 @@ Two levers follow, both phone-instruction sized: clear one row's
 live. The alternative — falling back to pushing everything — makes the failure
 this feature exists to remove into its own silent fallback state, and under an
 unattended schedule nothing would ever fail to say so.
+
+**A withdrawn row hashes its withdrawn notice, not its cells** (2026-10-01).
+While a row's `withdrawn` cell says yes, what it sends is the project's
+withdrawn title and description plus a `REMOVE_TAG` for every other field,
+and that is what is hashed and stamped. Edits to its other cells send nothing
+until it is restored. Flipping the column always pushes: a withdraw or restore
+goes whatever the stored hash says, because the `withdrawn` cell compared
+with `ia_withdrawn` decides it, not the content. A Sheet with a `withdrawn`
+column must also have `ia_withdrawn`, or `sync-metadata` refuses to run. See
+[`WITHDRAWAL.md`](WITHDRAWAL.md#withdrawal-is-a-sheet-column-and-sync-metadata-makes-ia-match-it).
 
 ## `sync-metadata --csv` reads its targets from the upload log
 
@@ -400,9 +410,16 @@ column names the JSONL to go and read for it. The columns are:
 | --- | --- |
 | `when` | the summary record's UTC timestamp |
 | `run` | the run's own log file name, e.g. `upload-20260917T180211Z.jsonl` |
-| `outcome` | `summary`, `failure`, `unconfirmed` or `skipped` |
+| `outcome` | `summary`, `withdrawn`, `restored`, `clearing`, `failure`, `unconfirmed` or `skipped` |
 | `identifier` | the row's permanent identifier — blank on the `summary` row |
-| `detail` | the run's closing console line, or that problem's own error |
+| `detail` | the run's closing console line, or that row's own error or detail |
+
+A sync that withdrew or restored an item, or found a withdrawn item still
+clearing, also gets one row per such item, after the summary and before the
+problems: a person deciding whether a withdrawal is done reads it here. A
+failed re-check is a `failure` row. An item a re-check found clear gets no
+row; it is the withdrawn item's steady state, so a run whose only news is
+"still clear" is a quiet run (below).
 
 The rows are rendered from `summary.as_record(live)` — the very object
 written to the JSONL a line earlier — so the tab and the file cannot
@@ -418,7 +435,7 @@ that report an actual problem. Such a run is still whole in its own JSONL,
 and per-row *did my edit land* is already answered by `ia_last_synced` in
 the Sheet itself. A run that pushed nothing **because everything failed**
 still lands in the tab — that is precisely what someone opens the Sheet to
-find. `upload` needs no equivalent rule: a run with nothing to upload
+find — and so does one that found a withdrawn item still clearing. `upload` needs no equivalent rule: a run with nothing to upload
 returns before a log is opened at all.
 
 **A failed mirror can never fail the run.** By the time it is written, files

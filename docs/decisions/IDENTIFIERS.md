@@ -166,6 +166,12 @@ silently stop uploading any Sheet-author column that normalizes into the
 namespace — an "IA Notes" header becomes `ia_notes` and disappears — and a
 silently withheld metadata field is a worse failure than the one it prevents.
 
+`withdrawn` (2026-10-01) is in `RESERVED_FIELDS` without the prefix, and is
+no exception to the rule: a person writes it, not the tool, so it carries a
+person's name for it. It is reserved because it steers the tool and must
+never ship as metadata. Its tool-written partner is `ia_withdrawn` — see
+[`WITHDRAWAL.md`](WITHDRAWAL.md#withdrawal-is-a-sheet-column-and-sync-metadata-makes-ia-match-it).
+
 ## The four `ia_` columns are required in every mode, including the safe one
 
 *Decided 2026-08-16, when `upload` first wrote to a Sheet.*
@@ -189,7 +195,9 @@ mode as well as live, for the identical reason — see
 [`SHEET-PROTOCOL.md`, "A row pushes only when its content
 changed"](SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 `upload` and `validate` neither read nor write them, so none of the reasoning
-above about `upload`'s four is affected.
+above about `upload`'s four is affected. A third, `ia_withdrawn`, is
+required only beside the person-edited `withdrawn` column — see
+[`WITHDRAWAL.md`](WITHDRAWAL.md#withdrawal-is-a-sheet-column-and-sync-metadata-makes-ia-match-it).
 
 ## `identifier-bib` is written back to the Sheet, not just generated
 

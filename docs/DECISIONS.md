@@ -79,6 +79,7 @@ The difference between a row nobody has filled in yet and a row that is broken
 - [On the Sheet path, `upload` uploads the valid rows and reports the rest](decisions/READINESS.md#on-the-sheet-path-upload-uploads-the-valid-rows-and-reports-the-rest)
 - [A bad row is skipped; a bad header stops the whole run](decisions/READINESS.md#a-bad-row-is-skipped-a-bad-header-stops-the-whole-run)
 - [A malformed header is rejected, never auto-corrected](decisions/READINESS.md#a-malformed-header-is-rejected-never-auto-corrected)
+- [A withdrawn row is held, not not-ready or broken](decisions/READINESS.md#a-withdrawn-row-is-held-not-not-ready-or-broken)
 - [`validate --json` is a contract, not a second report](decisions/READINESS.md#validate---json-is-a-contract-not-a-second-report)
 
 ## [Files and metadata](decisions/FILES-AND-METADATA.md)
@@ -143,6 +144,16 @@ decision gets made.
 - [The run-state model](decisions/UPLOAD-PAGE.md#the-run-state-model)
 - [The page agent is always-on, and one of two mutually exclusive models](decisions/UPLOAD-PAGE.md#the-page-agent-is-always-on-and-one-of-two-mutually-exclusive-models)
 - [The color scheme follows the computer until someone picks one](decisions/UPLOAD-PAGE.md#the-color-scheme-follows-the-computer-until-someone-picks-one)
+
+## [Withdrawal](decisions/WITHDRAWAL.md)
+
+Pulling an item back off Internet Archive after upload, and putting it back.
+
+- [Withdrawing deletes the files, replaces the text, and leaves darkening to a person](decisions/WITHDRAWAL.md#withdrawing-deletes-the-files-replaces-the-text-and-leaves-darkening-to-a-person)
+- [Withdrawal is a Sheet column, and `sync-metadata` makes IA match it](decisions/WITHDRAWAL.md#withdrawal-is-a-sheet-column-and-sync-metadata-makes-ia-match-it)
+- [A withdraw converges across runs, and the tool never waits on IA](decisions/WITHDRAWAL.md#a-withdraw-converges-across-runs-and-the-tool-never-waits-on-ia)
+- [A restore waits until Internet Archive has finished the withdrawal](decisions/WITHDRAWAL.md#a-restore-waits-until-internet-archive-has-finished-the-withdrawal)
+- [One run may move at most ten items, and the limit is per run](decisions/WITHDRAWAL.md#one-run-may-move-at-most-ten-items-and-the-limit-is-per-run)
 
 ## Still open
 

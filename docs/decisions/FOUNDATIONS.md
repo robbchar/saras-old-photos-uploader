@@ -93,7 +93,7 @@ will send. The check and every upload take that string from one place,
   no status at all says to run it again later. A 4xx other than 429, or an
   answer that is not the item, will come back the same, so it points at
   `ia_collection` and the account's `ia configure` credentials instead.
-- **It runs after the local flag checks and before the Sheet read.** A bad
+- **`upload` runs it after the local flag checks and before the Sheet read.** A bad
   `--limit` or `--chunk-size`, or a blank `--batch`, still fails without a
   network call. A bad collection fails before the Sheet is read and before
   the run's log opens.
@@ -109,7 +109,15 @@ will send. The check and every upload take that string from one place,
   archive.org` when the check passes. The upload page never runs a dry run.
 - **Test mode skips it.** A test run uploads into `test_collection`, IA's
   sandbox, which no registry value controls.
-- **Only `upload` runs it.** `validate` does not: it checks rows, and the
+- **A live withdraw or restore runs it too** (2026-10-01). A restore
+  uploads a file and a withdraw deletes them, so `sync-metadata --live`
+  (and its `--dry-run`) asks archive.org whenever the run has a withdraw or
+  restore to send, and refuses the whole run on the same terms, saying
+  "Nothing was sent". It asks after reading the Sheet, since only the Sheet
+  says whether anything is moving. A sync that only updates metadata or
+  re-checks already-withdrawn items does not ask. See
+  [`WITHDRAWAL.md`](WITHDRAWAL.md#one-run-may-move-at-most-ten-items-and-the-limit-is-per-run).
+- **Nothing else runs it.** `validate` does not: it checks rows, and the
   upload page runs `validate` on every load. `doctor` could report the
   collection, but does not yet.
 - **Some mistakes still pass.** A real collection that is the wrong one
