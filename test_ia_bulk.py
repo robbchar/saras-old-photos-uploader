@@ -7232,17 +7232,34 @@ class CannedMetadataAdapter(HTTPAdapter):
         return _canned(request, 200, json.dumps(ITEM_METADATA_DOCUMENT).encode(), "application/json")
 
 
+def _read_whole_body(body):
+    """Reads a streamed request body to the end, a chunk per read(), as
+    http.client sends it."""
+    if not hasattr(body, "read"):
+        return body
+    chunks = []
+    while chunk := body.read():
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class FaultInjectingS3Adapter(HTTPAdapter):
     """s3.us.archive.org answers whatever failure the test asks for, and
-    counts the attempts so a test can prove a retry did or did not happen."""
+    counts the attempts so a test can prove a retry did or did not happen.
+
+    It reads each upload body through before answering, as the real S3 does:
+    that runs the library's progress bar to the end so it closes inside the
+    test, rather than printing at garbage collection after pytest's capture."""
 
     def __init__(self, fault):
         super().__init__()
         self.fault = fault
         self.calls = []
+        self.bodies = []
 
     def send(self, request, *args, **kwargs):
         self.calls.append(request.url)
+        self.bodies.append(_read_whole_body(request.body))
         if isinstance(self.fault, Exception):
             raise self.fault
         status_code, body = self.fault
@@ -7304,6 +7321,7 @@ def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tm
 
     assert len(s3.calls) == 1
     assert any("s3.us.archive.org" in url for url in s3.calls)
+    assert s3.bodies == [b"pretend-jpeg-bytes"]
 
 
 def test_upload_row_reads_a_real_s3_slowdown_as_a_rate_limit(tmp_path, monkeypatch):
