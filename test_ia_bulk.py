@@ -3066,6 +3066,84 @@ def test_deletable_files_keeps_ias_system_files_and_puts_the_tile_last():
     ) == ["a.jpg", "y_meta.xml", "__ia_thumb.jpg"]
 
 
+def test_recheck_deletes_what_is_left_in_order_and_does_not_ask_about_tasks(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    deletes = []
+    files = [
+        _FakeIAFile(name, deletes) for name in ("__ia_thumb.jpg", "photo1_thumb.jpg", "item_meta.xml")
+    ]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: pytest.fail("asked about tasks while files remain")
+    )
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.deletes.deleted == ("photo1_thumb.jpg", "__ia_thumb.jpg")
+    assert check.clear is False
+    assert deletes == [("photo1_thumb.jpg", True, NO_BACKUP), ("__ia_thumb.jpg", True, NO_BACKUP)]
+
+
+def test_recheck_is_clear_with_only_system_files_and_nothing_queued(monkeypatch):
+    from ia_bulk import IA_HTTP_ADAPTER_KWARGS, recheck_withdrawn_item
+
+    asked = []
+    files = [_FakeIAFile(name, []) for name in ("item_meta.xml", "item_files.xml")]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    def fake_get_tasks(**kwargs):
+        asked.append(kwargs)
+        return set()
+
+    monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.clear is True
+    assert asked == [{
+        "identifier": "item",
+        "params": {"catalog": 1, "history": 0},
+        "http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS,
+    }]
+
+
+def test_recheck_is_not_clear_while_ia_has_tasks_queued(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    files = [_FakeIAFile("item_meta.xml", [])]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: {"derive", "delete"})
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.pending_tasks == 2
+    assert check.clear is False
+
+
+def test_recheck_raises_when_the_item_cannot_be_read(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    def unreachable(identifier, **kwargs):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(internetarchive, "get_item", unreachable)
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        recheck_withdrawn_item("item")
+
+
+def test_clearing_detail_says_what_was_deleted_again_or_what_is_queued():
+    from ia_bulk import ClearCheck, DeletePass, clearing_detail
+
+    assert clearing_detail(ClearCheck(deletes=DeletePass(deleted=("a.jpg", "__ia_thumb.jpg")))) == (
+        "deleted again: a.jpg, __ia_thumb.jpg"
+    )
+    assert clearing_detail(ClearCheck(pending_tasks=2)) == (
+        "no files left to delete; Internet Archive has 2 tasks queued"
+    )
+
+
 def test_delete_item_files_counts_any_2xx_as_an_accepted_delete(monkeypatch):
     """File.delete raises on non-2xx itself; a 200 is a delete IA took, never a refusal."""
     from ia_bulk import DeletePass, delete_item_files
@@ -9933,11 +10011,11 @@ def test_an_ordinary_update_is_not_held_to_the_delete_identity_rule():
 
 def _setup_withdraw_sync(
     tmp_path, monkeypatch, rows, calls, *, files=("photo1.jpg",), fail=None,
-    before_read=None, registry=None, collection_check=None,
+    before_read=None, registry=None, collection_check=None, recheck_result=None,
 ):
     """The sync world plus every IA call a withdraw or restore makes, in one ordered list.
     `fail` is a set of call kinds to refuse ("refuse" = IA refuses every delete); clear it to let a rerun through."""
-    from ia_bulk import DeletePass
+    from ia_bulk import ClearCheck, DeletePass
 
     failing = fail if fail is not None else set()
     for name in files:
@@ -9977,10 +10055,18 @@ def _setup_withdraw_sync(
     monkeypatch.setattr("ia_bulk.update_metadata_row", fake_metadata)
     monkeypatch.setattr("ia_bulk.upload_row", fake_upload)
     monkeypatch.setattr("ia_bulk.check_ia_collection", fake_check)
+
+    def fake_recheck(identifier):
+        calls.append(("recheck", identifier))
+        if "recheck" in failing:
+            raise RuntimeError("archive.org unreachable")
+        return recheck_result or ClearCheck()
+
+    monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", fake_recheck)
     return registry_path, client
 
 
-WITHDRAWN_ITEM = f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
+WITHDRAWN_ITEM =f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
 
 
 def test_sync_withdraws_a_row_marked_withdrawn(tmp_path, monkeypatch, capsys):
@@ -10272,6 +10358,153 @@ def test_a_started_withdraw_whose_text_failed_and_stamp_reread_failed_is_not_cal
     assert "could not be re-read" in err
     assert "IS on Internet Archive" not in err
     assert f"deletes were started on {WITHDRAWN_ITEM} but ia_withdrawn was not written" in err
+
+
+WITHDRAWN_STAMP = "2026-09-30T10:00:00Z"
+RERUN_LINE = (
+    "run sync-metadata again later (an hour or so) until every withdrawn item reports clear - "
+    "Internet Archive can rebuild a thumbnail from a file it has not removed yet"
+)
+
+
+def _stamped_withdrawn_row(number=1):
+    """Withdrawn, stamped, its hash matching what it sends: nothing to push, only a re-check."""
+    row = _withdraw_row(number, withdrawn="yes", ia_withdrawn=WITHDRAWN_STAMP)
+    targets, _ = _plan_withdraw_rows([row])
+    row[6] = targets[0].content_hash
+    return row
+
+
+def test_every_run_rechecks_a_withdrawn_item_and_reports_it_clear(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert calls == [("recheck", WITHDRAWN_ITEM)]
+    assert client.write_count == 0
+    assert (
+        "1 withdrawn item clear (only Internet Archive's own files left, nothing queued)" in lines
+    )
+    assert RERUN_LINE not in lines
+
+
+def test_an_item_still_holding_files_is_reported_still_clearing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import ClearCheck, DeletePass, cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], calls,
+        recheck_result=ClearCheck(deletes=DeletePass(deleted=("__ia_thumb.jpg",))),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert client.write_count == 0
+    assert "1 withdrawn item still clearing: lcps-astoriaphotos-00001" in lines
+    assert RERUN_LINE in lines
+
+
+def test_the_run_after_a_withdraw_only_rechecks(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    calls.clear()
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert calls == [("recheck", WITHDRAWN_ITEM)]
+
+
+def test_a_withdraw_run_asks_for_a_later_run(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert RERUN_LINE in capsys.readouterr().out.splitlines()
+
+
+def test_one_failed_recheck_is_reported_and_the_others_still_run(tmp_path, monkeypatch, capsys):
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row(1), _stamped_withdrawn_row(2)], calls
+    )
+
+    def flaky(identifier):
+        calls.append(("recheck", identifier))
+        if identifier.endswith("00001"):
+            raise requests.exceptions.ConnectionError("down")
+        return ClearCheck()
+
+    monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", flaky)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert [call[1][-5:] for call in calls] == ["00001", "00002"]
+    assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in lines
+    assert "1 withdrawn item clear (only Internet Archive's own files left, nothing queued)" in lines
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["failures"] == []
+    assert summary["recheck_failures"][0]["identifier"] == "lcps-astoriaphotos-00001"
+
+
+def test_rechecks_are_logged_clear_or_clearing(tmp_path, monkeypatch):
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
+        recheck_result=ClearCheck(pending_tasks=1),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [entry["status"] for entry in rows] == ["clearing"]
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["clearing"] == [{
+        "identifier": "lcps-astoriaphotos-00001",
+        "detail": "no files left to delete; Internet Archive has 1 task queued",
+    }]
+    assert summary["clear"] == []
+    assert summary["recheck_failures"] == []
+
+
+@pytest.mark.parametrize(("pending", "mirrored"), [(0, False), (1, True)])
+def test_only_a_still_clearing_recheck_is_mirrored_to_the_log_tab(
+    tmp_path, monkeypatch, pending, mirrored
+):
+    """A clear re-check is a withdrawn item's steady state: hourly rows would bury the tab."""
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    registry = make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [], registry=registry,
+        recheck_result=ClearCheck(pending_tasks=pending),
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert ("Sync Log" in client.log_tabs) is mirrored
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):

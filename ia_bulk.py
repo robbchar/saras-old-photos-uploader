@@ -1689,6 +1689,39 @@ def delete_item_files(identifier: str) -> DeletePass:
     return _delete_in_order(identifier, list(item.get_files()))
 
 
+@dataclass(frozen=True)
+class ClearCheck:
+    """One re-check of a withdrawn item: what was deleted again, and what IA still has queued."""
+
+    deletes: DeletePass = field(default_factory=DeletePass)
+    pending_tasks: int = 0
+
+    @property
+    def clear(self) -> bool:
+        """Only IA's own files were left and nothing is queued; IA can't rebuild a tile from nothing."""
+        return not self.deletes.deleted and not self.deletes.refused and self.pending_tasks == 0
+
+
+def pending_task_count(identifier: str) -> int:
+    """Tasks IA has queued or running for the item (the catalog, not history). Raises on failure."""
+    tasks = internetarchive.get_tasks(
+        identifier=identifier,
+        params={"catalog": 1, "history": 0},
+        http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS,
+    )
+    return len(tasks)
+
+
+def recheck_withdrawn_item(identifier: str) -> ClearCheck:
+    """Deletes whatever IA rebuilt or has not removed yet, in a withdraw's order; asks about
+    queued tasks only once no file is left. Raises when the item cannot be read."""
+    item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    files = list(item.get_files())
+    if deletable_files(identifier, [file.name for file in files]):
+        return ClearCheck(deletes=_delete_in_order(identifier, files))
+    return ClearCheck(pending_tasks=pending_task_count(identifier))
+
+
 def build_sheets_service(key_path: Path):
     """The only place credentials are loaded and `googleapiclient.discovery.build` is called."""
     credentials = google_auth.load_service_account_credentials(key_path)
@@ -4785,6 +4818,71 @@ class RowAction:
         return {"identifier": self.identifier, "detail": self.detail}
 
 
+@dataclass(frozen=True)
+class Clearance:
+    """What one run's re-checks of already-withdrawn items found."""
+
+    clear: tuple[RowAction, ...] = ()
+    clearing: tuple[RowAction, ...] = ()
+    failures: tuple[RowFailure, ...] = ()
+
+
+# Printed after any run that withdrew or found an item still clearing; the tool never waits on IA.
+RERUN_UNTIL_CLEAR = (
+    "run sync-metadata again later (an hour or so) until every withdrawn item reports clear - "
+    "Internet Archive can rebuild a thumbnail from a file it has not removed yet"
+)
+
+
+def clearing_detail(check: ClearCheck) -> str:
+    """Why a re-checked item is not clear yet, for the log tab."""
+    if check.deletes.deleted:
+        return f"deleted again: {', '.join(check.deletes.deleted)}"
+    if check.deletes.refused:
+        return "Internet Archive refused a delete; see the failure"
+    return f"no files left to delete; Internet Archive has {_pluralize(check.pending_tasks, 'task')} queued"
+
+
+def recheck_withdrawals(targets: list[SyncTarget], log_path: Path, live: bool) -> Clearance:
+    """Re-checks every withdrawn, stamped item; one item's failure never stops the rest.
+    Never touches metadata or the Sheet, and never counts toward the bulk limit."""
+    clear: list[RowAction] = []
+    clearing: list[RowAction] = []
+    failures: list[RowFailure] = []
+    for position, target in enumerate(targets, start=1):
+        print(f"[{position}/{len(targets)}] re-checking withdrawn {target.uploaded_as}")
+        try:
+            check = recheck_withdrawn_item(target.uploaded_as)
+        except Exception as exc:
+            error = f"could not re-check {target.uploaded_as}: {exc}"
+            failures.append(RowFailure(identifier=target.identifier, error=error))
+            print(f"    - {format_row_error(exc)}")
+            log_result(
+                log_path, target.identifier, "", "failure", live,
+                error=error, uploaded_as=target.uploaded_as, http_status=parsed_status_code(exc),
+            )
+            continue
+        if check.deletes.refused:
+            error = f"Internet Archive refused to delete {', '.join(check.deletes.refused)}"
+            failures.append(RowFailure(identifier=target.identifier, error=error))
+            print(f"    - {error}")
+        if check.clear:
+            detail = "only Internet Archive's own files left, nothing queued"
+            clear.append(RowAction(identifier=target.identifier, uploaded_as=target.uploaded_as, detail=detail))
+            status = "clear"
+        else:
+            clearing.append(
+                RowAction(
+                    identifier=target.identifier,
+                    uploaded_as=target.uploaded_as,
+                    detail=clearing_detail(check),
+                )
+            )
+            status = "clearing"
+        log_result(log_path, target.identifier, "", status, live, uploaded_as=target.uploaded_as)
+    return Clearance(clear=tuple(clear), clearing=tuple(clearing), failures=tuple(failures))
+
+
 def skipped_rows(problems: list[RowValidation]) -> list[RowFailure]:
     """The rows a run declined to send, as summary entries.
 
@@ -4860,6 +4958,8 @@ class SyncSummary:
     # "4,212 already in sync, 1 updated" to read as a working run rather than
     # as a run that did almost nothing.
     already_synced: int = 0
+    # Re-checks of items already withdrawn; their failures count as errors.
+    clearance: Clearance = field(default_factory=Clearance)
 
     @property
     def pushed(self) -> int:
@@ -4877,7 +4977,7 @@ class SyncSummary:
 
     @property
     def failed(self) -> int:
-        return self.outcome.failed
+        return self.outcome.failed + len(self.clearance.failures)
 
     def as_record(self, live: bool) -> dict:
         return {
@@ -4889,6 +4989,9 @@ class SyncSummary:
             "changed": self.changed,
             "unchanged": self.unchanged,
             "already_synced": self.already_synced,
+            "clearing": [action.as_record() for action in self.clearance.clearing],
+            "clear": [action.as_record() for action in self.clearance.clear],
+            "recheck_failures": [failure.as_record() for failure in self.clearance.failures],
             "failures": [failure.as_record() for failure in self.outcome.failures],
             "skipped": [skip.as_record() for skip in self.skipped],
         }
@@ -4905,6 +5008,18 @@ def sync_summary_lines(summary: SyncSummary) -> list[str]:
         f"{summary.changed} item(s) updated successfully, {summary.unchanged} unchanged, "
         f"{summary.failed} error(s)"
     ]
+    if summary.clearance.clear:
+        lines.append(
+            f"{_pluralize(len(summary.clearance.clear), 'withdrawn item')} clear (only Internet "
+            "Archive's own files left, nothing queued)"
+        )
+    if summary.clearance.clearing:
+        names = ", ".join(action.identifier for action in summary.clearance.clearing)
+        lines.append(
+            f"{_pluralize(len(summary.clearance.clearing), 'withdrawn item')} still clearing: {names}"
+        )
+    if summary.outcome.withdrawn or summary.outcome.withdraw_started or summary.clearance.clearing:
+        lines.append(RERUN_UNTIL_CLEAR)
     if summary.already_synced:
         lines.append(
             f"{_pluralize(summary.already_synced, 'row')} already in sync (unchanged since "
@@ -5091,7 +5206,8 @@ def sync_run_is_worth_mirroring(summary: SyncSummary) -> bool:
     Upload has no equivalent rule: a run with nothing to upload returns
     before a log is even opened, so every upload run that gets this far did
     something worth a row."""
-    return bool(summary.pushed or summary.failed or summary.skipped)
+    # A clear re-check is a withdrawn item's steady state, so on its own it is not mirrored.
+    return bool(summary.pushed or summary.failed or summary.skipped or summary.clearance.clearing)
 
 
 def mirror_run_to_log_tab(
@@ -5813,6 +5929,8 @@ def sync_from_sheet(args) -> int:
     print()
 
     to_push, already_synced = split_unchanged(targets)
+    # Withdrawn, stamped items: every real run re-checks them, pushed or not.
+    rechecking = [target for target in targets if target.recheck]
 
     if not targets:
         print("nothing to sync - no row is marked uploaded yet")
@@ -5834,7 +5952,7 @@ def sync_from_sheet(args) -> int:
             file=sys.stderr,
         )
 
-    if not to_push:
+    if not to_push and not rechecking:
         # The steady state on an hourly schedule, and the console line must
         # stay one quiet sentence: a run that says nothing useful is a run
         # whose output stops being read. But this is the MOST common outcome
@@ -5873,11 +5991,13 @@ def sync_from_sheet(args) -> int:
         live=live,
         chunk_size=chunk_size,
     )
+    outcome = sync_run.execute(to_push)
     summary = SyncSummary(
         checked=len(rows),
-        outcome=sync_run.execute(to_push),
+        outcome=outcome,
         skipped=tuple(skipped_rows(problems)),
         already_synced=len(already_synced),
+        clearance=recheck_withdrawals(rechecking, log_path, live),
     )
     record = try_log_run_summary(log_path, summary, live)
 
