@@ -165,15 +165,15 @@ while the item's first derive was running were set to `paused` with
 keeps the item *still clearing* and any restore of it refused, run after run.
 
 The tool now tells these apart from a slow queue and stops sending deletes
-into one: a withdraw, and a re-check's deletes, wait while IA is running or
-holding a paused task on the item (see
+into one: a withdraw waits while IA is running a task on the item or holding
+a paused or failed one, and a re-check's deletes wait while any task is open
+(see
 [`decisions/WITHDRAWAL.md`](decisions/WITHDRAWAL.md#a-delete-waits-while-ia-runs-or-holds-a-task-on-the-item)),
 which avoids the case observed. A paused task already there is named —
 "Internet Archive has paused N task(s) on <item>; IA staff must release
 them" — in the withdraw's refusal, the re-check's still-clearing reason and
-the restore's refusal; an errored one ("N failed task(s)") does not hold up a
-withdraw's deletes, but is named the same way once it keeps an item from
-clearing or a restore from going ahead.
+the restore's refusal, and an errored one ("N failed task(s)") the same way:
+deletes sent behind it might never run, so it holds up a withdraw too.
 
 **Mitigation today:** that message is the sign. Ask Internet Archive staff to
 release or clear the item's held tasks — the same contact as the darkening

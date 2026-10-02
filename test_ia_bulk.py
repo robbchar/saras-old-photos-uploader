@@ -2956,8 +2956,9 @@ def test_update_metadata_row_raises_metadata_unchanged_when_ia_reports_no_change
 
 
 class _FakeIAFile:
-    def __init__(self, name, deletes, status_code=204, raises=None):
+    def __init__(self, name, deletes, status_code=204, raises=None, source=None):
         self.name = name
+        self.source = source
         self._deletes = deletes
         self._status_code = status_code
         self._raises = raises
@@ -2979,6 +2980,11 @@ class _FakeIAItem:
 
 
 NO_BACKUP = {"x-archive-keep-old-version": "0"}
+
+
+def _originals(*names):
+    """fetch_item_files()'s (name, source) pairs for files IA lists as originals."""
+    return [(name, "original") for name in names]
 
 
 class _FakeCatalogTask:
@@ -3064,7 +3070,13 @@ def test_item_task_state_asks_with_a_given_session(monkeypatch):
 def test_task_state_says_what_blocks_deletes():
     from ia_bulk import TaskState
 
-    assert TaskState(queued=("archive.php",), error=("derive.php",)).busy_reason("x") is None
+    assert TaskState(queued=("archive.php",)).busy_reason("x") is None
+    assert TaskState(queued=("archive.php",), error=("derive.php",)).busy_reason("x") == (
+        "Internet Archive has 1 failed task(s) on x; IA staff must release them"
+    )
+    assert TaskState(error=("derive.php",)).refusal("x") == (
+        "Internet Archive has 1 failed task(s) on x; IA staff must release them - nothing was deleted"
+    )
     assert TaskState(running=("derive.php", "derive.php")).busy_reason("x") == (
         "Internet Archive is running a task on x (derive.php)"
     )
@@ -3103,6 +3115,21 @@ def test_delete_item_files_deletes_content_first_and_the_tile_last(monkeypatch):
         ("__ia_thumb.jpg", True, NO_BACKUP),
     ]
     assert asked == [("item", {"http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS})]
+
+
+def test_delete_item_files_sends_no_delete_for_a_derivative_its_original_cascades(monkeypatch):
+    from ia_bulk import DeletePass, delete_item_files
+
+    deletes = []
+    files = [
+        _FakeIAFile("photo1.jpg", deletes, source="original"),
+        _FakeIAFile("photo1_thumb.jpg", deletes, source="derivative"),
+        _FakeIAFile("__ia_thumb.jpg", deletes, source="original"),
+    ]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+
+    assert delete_item_files("item") == DeletePass(deleted=("photo1.jpg", "__ia_thumb.jpg"))
+    assert [name for name, _cascade, _headers in deletes] == ["photo1.jpg", "__ia_thumb.jpg"]
 
 
 def test_delete_item_files_counts_an_already_deleted_file_as_gone(monkeypatch):
@@ -3159,9 +3186,22 @@ def test_a_delete_pass_has_started_once_ia_accepted_a_delete_or_nothing_was_left
 def test_deletable_files_keeps_ias_system_files_and_puts_the_tile_last():
     from ia_bulk import deletable_files
 
-    assert deletable_files(
-        "x", ["__ia_thumb.jpg", "a.jpg", "x_meta.xml", "x_files.xml", "y_meta.xml"]
-    ) == ["a.jpg", "y_meta.xml", "__ia_thumb.jpg"]
+    listed = ["__ia_thumb.jpg", "a.jpg", "x_meta.xml", "x_files.xml", "y_meta.xml"]
+    assert deletable_files("x", [(name, "original") for name in listed]) == [
+        "a.jpg", "y_meta.xml", "__ia_thumb.jpg"
+    ]
+
+
+def test_deletable_files_leaves_derivatives_to_their_originals_cascade():
+    """A derivative is deleted by name only once no original is left to cascade it."""
+    from ia_bulk import deletable_files
+
+    assert deletable_files("x", [
+        ("a_thumb.jpg", "derivative"), ("a.jpg", "original"), ("__ia_thumb.jpg", "original"),
+    ]) == ["a.jpg", "__ia_thumb.jpg"]
+    assert deletable_files("x", [
+        ("a_thumb.jpg", "derivative"), ("__ia_thumb.jpg", "original"), ("x_meta.xml", "metadata"),
+    ]) == ["a_thumb.jpg", "__ia_thumb.jpg"]
 
 
 def test_recheck_deletes_what_is_left_in_order_and_asks_about_tasks_once(monkeypatch):
@@ -3173,7 +3213,7 @@ def test_recheck_deletes_what_is_left_in_order_and_asks_about_tasks_once(monkeyp
         _FakeIAFile(name, deletes) for name in ("__ia_thumb.jpg", "photo1_thumb.jpg", "item_meta.xml")
     ]
     monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
-    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: asked.append(1) or _tasks("queued"))
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: asked.append(1) or set())
 
     check = recheck_withdrawn_item("item")
 
@@ -3183,12 +3223,12 @@ def test_recheck_deletes_what_is_left_in_order_and_asks_about_tasks_once(monkeyp
     assert deletes == [("photo1_thumb.jpg", True, NO_BACKUP), ("__ia_thumb.jpg", True, NO_BACKUP)]
 
 
-@pytest.mark.parametrize("state", ["running", "paused"])
-def test_recheck_deletes_nothing_while_ia_runs_or_holds_a_task(monkeypatch, state):
-    """A delete sent while IA runs a task on the item was paused for IA staff, on the live service."""
+@pytest.mark.parametrize("state", ["queued", "running", "paused", "error"])
+def test_recheck_deletes_nothing_while_ia_has_any_task_open(monkeypatch, state):
+    """A queued delete would be sent twice; a delete sent while IA runs a task was paused for IA staff."""
     from ia_bulk import recheck_withdrawn_item
 
-    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: _tasks(state, "queued"))
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: _tasks(state))
     monkeypatch.setattr(
         internetarchive, "get_item", lambda identifier, **kwargs: pytest.fail("listed a busy item")
     )
@@ -3322,7 +3362,7 @@ def test_clearing_detail_says_what_was_deleted_again_or_what_ia_is_doing():
         "deleted again: a.jpg, __ia_thumb.jpg"
     )
     assert clearing_detail(ClearCheck(tasks=TaskState(queued=("a", "b"))), "x") == (
-        "no files left to delete; Internet Archive has 2 tasks queued"
+        "Internet Archive has 2 tasks queued on x; nothing was deleted - run sync-metadata again later"
     )
     assert clearing_detail(ClearCheck(tasks=TaskState(running=("derive.php",))), "x") == (
         "Internet Archive is running a task on x (derive.php); nothing was deleted - run "
@@ -3332,7 +3372,7 @@ def test_clearing_detail_says_what_was_deleted_again_or_what_ia_is_doing():
         "Internet Archive has paused 1 task(s) on x; IA staff must release them - nothing was deleted"
     )
     assert clearing_detail(ClearCheck(tasks=TaskState(error=("derive.php",))), "x") == (
-        "no files left to delete; Internet Archive has 1 failed task(s) on x; IA staff must release them"
+        "Internet Archive has 1 failed task(s) on x; IA staff must release them - nothing was deleted"
     )
 
 
@@ -10350,6 +10390,11 @@ WITHDRAWN_ITEM = f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
             "Internet Archive has paused 2 task(s) on lcps-astoriaphotos-00001; IA staff must "
             "release them - nothing was deleted",
         ),
+        (
+            TaskState(queued=("derive.php",), error=("book_op.php",)),
+            "Internet Archive has 1 failed task(s) on lcps-astoriaphotos-00001; IA staff must "
+            "release them - nothing was deleted",
+        ),
     ],
 )
 def test_a_withdraw_while_ia_runs_or_holds_a_task_deletes_nothing(
@@ -10383,7 +10428,7 @@ def test_a_withdraw_with_only_queued_tasks_goes_ahead(tmp_path, monkeypatch):
     calls = []
     registry_path, client = _setup_withdraw_sync(
         tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls,
-        tasks=TaskState(queued=("derive.php",), error=("book_op.php",)),
+        tasks=TaskState(queued=("derive.php",)),
     )
 
     assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
@@ -10518,8 +10563,9 @@ def test_a_withdraw_whose_text_write_fails_is_still_marked_started(tmp_path, mon
     assert client.grid[1][6] != ""
 
 
-def test_a_withdraw_ia_refused_entirely_is_not_marked(tmp_path, monkeypatch):
-    from ia_bulk import cmd_sync_metadata
+def test_a_withdraw_ia_refused_entirely_is_not_marked_but_its_notice_is_hashed(tmp_path, monkeypatch):
+    """The notice landed, so un-withdrawing must push the Sheet's text back rather than read as in sync."""
+    from ia_bulk import cmd_sync_metadata, split_unchanged
 
     calls = []
     registry_path, client = _setup_withdraw_sync(
@@ -10528,10 +10574,35 @@ def test_a_withdraw_ia_refused_entirely_is_not_marked(tmp_path, monkeypatch):
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
+    planned, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
     assert exit_code == 1
     assert [call[0] for call in calls] == ["delete", "metadata"]
     assert client.grid[1][9] == ""
-    assert client.grid[1][6] == ""
+    assert client.grid[1][6] == planned[0].content_hash
+    unwithdrawn, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="no", stored_hash=client.grid[1][6])])
+    to_push, _already = split_unchanged(unwithdrawn)
+    assert [target.row_number for target in to_push] == [2]
+
+
+def test_a_withdraw_ia_refused_entirely_warns_when_its_notice_hash_is_not_written(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row_after_the_text(grid, read_count):
+        if read_count == 3:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], [], fail={"refuse"},
+        before_read=insert_a_row_after_the_text,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert f"WARNING: the withdrawn notice replaced the text of {WITHDRAWN_ITEM}" in err
+    assert client.write_count == 0
 
 
 def test_a_withdraw_deletes_nothing_when_the_row_moved_since_the_read(tmp_path, monkeypatch):
@@ -10572,10 +10643,30 @@ def test_a_withdraw_is_marked_before_the_next_row_is_sent(tmp_path, monkeypatch)
     with pytest.raises(KeyboardInterrupt):
         cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
-    planned, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
     assert client.grid[1][9] != ""
-    assert client.grid[1][6] == planned[0].content_hash
+    # The notice's hash waits for the chunk's batch; losing it costs one re-push of the notice.
+    assert client.grid[1][6] == ""
     assert client.grid[2][6] == ""
+
+
+def test_a_withdraw_interrupted_during_its_text_write_keeps_its_mark(tmp_path, monkeypatch):
+    """Deletes IA accepted are recorded before the text write, so Ctrl-C there cannot lose them."""
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], []
+    )
+
+    def interrupted(metadata, target):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ia_bulk.update_metadata_row", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][9] != ""
+    assert client.grid[1][6] == ""
 
 
 def test_a_withdraw_whose_row_moved_after_its_deletes_warns_by_name(
@@ -10603,7 +10694,7 @@ def test_a_withdraw_whose_row_moved_after_its_deletes_warns_by_name(
 
 
 def test_a_withdraw_writes_its_mark_once(tmp_path, monkeypatch):
-    """The withdraw's cells go in their own write; the chunk's stamp carries only the update."""
+    """The withdraw's mark goes in its own write before its text; its hash rides with the chunk's stamp."""
     from ia_bulk import cmd_sync_metadata
 
     registry_path, client = _setup_withdraw_sync(
@@ -10614,8 +10705,8 @@ def test_a_withdraw_writes_its_mark_once(tmp_path, monkeypatch):
     assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
     writes = client._recorder.writes
     assert [sorted(a1 for a1, _value in write) for write in writes] == [
-        ["G2", "H2", "J2"],
-        ["G3", "H3"],
+        ["J2"],
+        ["G2", "G3", "H2", "H3"],
     ]
 
 
@@ -10929,7 +11020,8 @@ def test_rechecks_are_logged_clear_or_clearing(tmp_path, monkeypatch):
     summary = _all_sync_log_lines(tmp_path)[-1]
     assert summary["clearing"] == [{
         "identifier": "lcps-astoriaphotos-00001",
-        "detail": "no files left to delete; Internet Archive has 1 task queued",
+        "detail": f"Internet Archive has 1 task queued on {WITHDRAWN_ITEM}; nothing was deleted - "
+        "run sync-metadata again later",
     }]
     assert summary["clear"] == []
     assert summary["recheck_failures"] == []
@@ -11120,6 +11212,29 @@ def test_a_restore_whose_original_is_missing_is_refused_by_name_and_sends_nothin
     assert calls == []
     assert "[FAIL] row 2 lcps-astoriaphotos-00001" in out
     assert "restore refused: the original file was not found" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_restore_that_now_finds_a_different_file_is_refused_by_name_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """A restore never puts a different photograph into the permanent item."""
+    from ia_bulk import cmd_sync_metadata
+
+    row = _withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)
+    row[5] = "photo0.jpg"
+    calls = []
+    registry_path, client = _setup_withdraw_sync(tmp_path, monkeypatch, [row], calls)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert (
+        "restore refused: the row's file_template cells now find 'photo1.jpg', but "
+        "'ia_identifier_bib' says 'photo0.jpg' was uploaded"
+    ) in out
     assert client.grid[1][9] == RESTORED_STAMP
 
 
@@ -11342,9 +11457,9 @@ def test_sync_dry_run_previews_a_withdraw_in_ias_terms_and_sends_nothing(
     )
     monkeypatch.setattr(
         "ia_bulk.fetch_item_files",
-        lambda identifier: [
+        lambda identifier: _originals(
             "photo1.jpg", "__ia_thumb.jpg", f"{identifier}_meta.xml", f"{identifier}_files.xml",
-        ],
+        ),
     )
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
@@ -11375,7 +11490,7 @@ def test_sync_dry_run_says_how_a_real_withdraw_deletes(tmp_path, monkeypatch, ca
     )
     monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {"title": "Photo 1"})
     monkeypatch.setattr(
-        "ia_bulk.fetch_item_files", lambda identifier: ["__ia_thumb.jpg", "photo1.jpg"]
+        "ia_bulk.fetch_item_files", lambda identifier: _originals("__ia_thumb.jpg", "photo1.jpg")
     )
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
@@ -11388,8 +11503,8 @@ def test_sync_dry_run_says_how_a_real_withdraw_deletes(tmp_path, monkeypatch, ca
         "delete is refused)",
         "      a real run re-reads the Sheet just before deleting, and deletes only if this row "
         "still says withdrawn = yes",
-        "      it then checks Internet Archive is not running or holding a paused task on the "
-        "item, and deletes nothing while it is",
+        "      it then checks Internet Archive is not running a task on the item or holding a "
+        "paused or failed one, and deletes nothing while it is",
     ]
 
 
@@ -11519,9 +11634,9 @@ def test_sync_dry_run_previews_a_recheck_and_deletes_nothing(tmp_path, monkeypat
     monkeypatch.setattr(
         "ia_bulk.fetch_item_files",
         lambda identifier: (
-            ["photo1.jpg", "__ia_thumb.jpg", f"{identifier}_meta.xml"]
+            _originals("photo1.jpg", "__ia_thumb.jpg", f"{identifier}_meta.xml")
             if identifier.endswith("00001")
-            else [f"{identifier}_meta.xml", f"{identifier}_files.xml"]
+            else _originals(f"{identifier}_meta.xml", f"{identifier}_files.xml")
         ),
     )
 
@@ -11538,8 +11653,8 @@ def test_sync_dry_run_previews_a_recheck_and_deletes_nothing(tmp_path, monkeypat
         "photo1.jpg, __ia_thumb.jpg"
     )
     assert lines[held + 1] == (
-        "      a real run first checks Internet Archive is not running or holding a paused task "
-        "on the item, and deletes nothing while it is"
+        "      a real run first checks Internet Archive has no task open on the item (queued, "
+        "running, paused or failed), and deletes nothing while it has"
     )
     assert (
         f"  row 3: {second} - holds only Internet Archive's own files; a real run asks "

@@ -16,9 +16,11 @@ request, and only they can undo it.
 
 So a withdraw does the two parts the tool can do.
 
-It deletes every file in the item that is not IA's own, each with IA's
-cascade, so derivatives go too, and with `x-archive-keep-old-version: 0`, so
-IA keeps no `history/` copy. Content files go first and IA's item tile
+It deletes every original in the item that is not IA's own, each with IA's
+cascade, so its derivatives go too, and with `x-archive-keep-old-version: 0`,
+so IA keeps no `history/` copy. A derivative is deleted by name only once no
+original is left to cascade it (a leftover a re-check finds), so no delete
+is sent for a file another delete already covers. Content files go first and IA's item tile
 (`__ia_thumb.jpg`) last; in a pass where IA refused a content delete, the
 tile is kept, because IA would rebuild it from the file still there. Any 2xx
 answer is an accepted delete, and a 404 counts as already gone. IA's own
@@ -102,17 +104,26 @@ withdraw of an item Internet Archive does not have fails by name: nothing is
 deleted or stamped, and the darkening hand-off does not list it.
 
 `ia_withdrawn` is written as soon as IA accepts a delete, even if a later
-delete or the text write fails; the hash is written only once the text landed
-and every delete was accepted. Both are written right after that withdraw,
-after one more re-read confirms the row has not moved, and before the run
-sends the next row — not with the chunk's batch at its end — so a run
-interrupted later in the chunk (Ctrl-C, a shutdown, a crash) has already
-recorded every withdrawal it started. A withdraw that never started repeats whole on
-the next run; one that started is finished by the next run's metadata push
-and re-check (below). If even the `ia_withdrawn` write is lost — the row
-moved, or the Sheet write failed — the run names the items and says to keep
-`withdrawn` at yes: setting it to no before the next run would leave the
-files deleted with nothing to restore them.
+delete or the text write fails: right after the deletes, after one more
+re-read confirms the row has not moved, and before the text write — not with
+the chunk's batch at its end — so a run interrupted from then on (Ctrl-C
+during the text write, a shutdown, a crash) has already recorded every
+withdrawal it started. Once the text landed, the notice's hash goes with the
+chunk's batch; losing it costs one re-push of the notice. A withdraw that
+never started repeats whole on the next run; one that started is finished by
+the next run's metadata push and re-check (below). If even the
+`ia_withdrawn` write is lost — the row moved, or the Sheet write failed —
+the run names the items and says to keep `withdrawn` at yes: setting it to
+no before the next run would leave the files deleted with nothing to restore
+them.
+
+A withdraw IA refused entirely is not marked, but its notice is still
+written, so when the notice landed its hash is written at once. Without it,
+setting `withdrawn` back to no would read as already in sync — the old
+hash still matches the Sheet — and leave the notice on the item for good;
+with it, that row pushes the Sheet's text back. If that hash cannot be
+written, the run says to clear `ia_sync_hash` before setting `withdrawn` to
+no.
 
 ## A withdraw converges across runs, and the tool never waits on IA
 
@@ -131,13 +142,15 @@ The withdraw run deletes content before the tile and marks `ia_withdrawn`
 when the deletes are accepted. Every later `sync-metadata` run re-checks each
 withdrawn, stamped item:
 
-- It first asks IA's task catalog about the item; while IA is running or
-  holding a paused task on it, it deletes nothing and the item is *still
-  clearing* (see "A delete waits while IA runs or holds a task on the
-  item", below).
-- It lists the item's files. Any file that is not IA's own is deleted again,
-  in the same order and with the same header, and the item is reported
-  *still clearing*.
+- It first asks IA's task catalog about the item; while any task is open on
+  it — queued, running, paused or failed — it deletes nothing and the item is
+  *still clearing*. A queued task is most likely the withdraw's own delete:
+  sending it again every run would only pile up duplicate tasks (see "A
+  delete waits while IA runs or holds a task on the item", below).
+- It lists the item's files. Whatever is not IA's own is deleted again, in
+  the same order and with the same header (originals, or leftover
+  derivatives once no original is left), and the item is reported *still
+  clearing*.
 - Once only IA's own files are left, it asks IA's task catalog again
   whether anything is still open for the item; anything queued, running,
   paused or errored is *still clearing*.
@@ -182,7 +195,10 @@ re-check, it never waits.
 The original is found the same way `upload` finds it, from `files_dir` and
 `file_template` — the only time `sync-metadata` reads the drive. One that is
 missing, matches more than one file, or whose `file_template` cells are blank
-refuses the row by name, nothing is sent, and the item stays withdrawn. An
+refuses the row by name, nothing is sent, and the item stays withdrawn. So
+does one that is not the file `ia_identifier_bib` says was uploaded — a
+filename cell edited while the item was withdrawn, say: a restore never puts
+a different photograph into the permanent item. An
 upload into an existing item does not set its metadata, so after re-uploading
 the restore writes the text with its own metadata call: the Sheet's fields,
 plus the `identifier-bib` and `date` `upload` would generate, and the notice
@@ -208,17 +224,18 @@ the re-check never reported clear, while their messages said IA was "still
 processing".
 
 So before a withdraw's deletes — after its fresh Sheet read — the tool asks
-IA's task catalog about the item. While a task is running or paused, the row
-is refused by name: nothing is deleted, written or stamped, it is not
+IA's task catalog about the item. While a task is running, paused or failed,
+the row is refused by name: nothing is deleted, written or stamped, it is not
 "withdrawal started" and not in the darkening hand-off, the run exits 1, and
-the next run tries again. A query that cannot be answered refuses the same
-way; a withdraw never deletes blind. Queued tasks don't block: deletes sent
-then processed normally. The re-check asks the same question before its
-deletes and, while IA is running or holding a task, deletes nothing and
-reports the item still clearing with the reason. A paused task is named as
-IA staff's to release in the withdraw, the re-check and the restore, and an
-errored one wherever it keeps an item from clearing or a restore from going
-ahead, because waiting cannot clear them; the operator is emailing IA staff
+the next run tries again. A failed task holds the item for IA staff just as a
+paused one does, so deletes sent behind it might never run. A query that
+cannot be answered refuses the same way; a withdraw never deletes blind.
+Queued tasks don't block a withdraw: deletes sent then processed normally.
+The re-check asks the same question before its deletes and waits for more:
+while IA has any task open on the item, queued included, it deletes nothing
+and reports the item still clearing with the reason. A paused or failed task
+is named as IA staff's to release in the withdraw, the re-check and the
+restore, because waiting cannot clear it; the operator is emailing IA staff
 for the darkening anyway. A task whose state cannot be read counts as
 running: never deleted past, never clear.
 
