@@ -5411,18 +5411,22 @@ def plan_sync_targets(
         files_removed = withdrawal_tracked and bool((row.get(IA_WITHDRAWN_COLUMN) or "").strip())
         action = sync_action(withdrawn, files_removed)
         recheck = withdrawn is WithdrawnValue.YES and files_removed
-        # Files are deleted only from this row's own item, never from what a pasted ia_url names.
-        if (action is SyncAction.WITHDRAW or recheck) and not item_is_rows_own(
-            uploaded_as, identifier, live
-        ):
+        # Files are deleted or restored in this row's own item only, never what a pasted ia_url names.
+        moves_files = action is not SyncAction.UPDATE or recheck
+        if moves_files and not item_is_rows_own(uploaded_as, identifier, live):
+            refused = (
+                "restore this row's file into it; nothing was uploaded"
+                if action is SyncAction.RESTORE
+                else "delete files from it; nothing was deleted"
+            )
             problems.append(
                 RowValidation(
                     row_number=row_number,
                     identifier=identifier,
                     errors=[
                         f"'{IA_URL_COLUMN}' names item '{uploaded_as}', which is not this row's "
-                        f"own item '{identifier}' - refusing to delete files from it; nothing was "
-                        f"deleted. Fix '{IA_URL_COLUMN}' or '{IA_IDENTIFIER_COLUMN}' first"
+                        f"own item '{identifier}' - refusing to {refused}. Fix "
+                        f"'{IA_URL_COLUMN}' or '{IA_IDENTIFIER_COLUMN}' first"
                     ],
                 )
             )
@@ -5469,6 +5473,59 @@ def split_unchanged(targets: list[SyncTarget]) -> tuple[list[SyncTarget], list[S
     return to_push, already_synced
 
 
+def attach_restore_files(
+    targets: list[SyncTarget], files_dir: str | Path
+) -> tuple[list[SyncTarget], list[RowValidation]]:
+    """Resolves each restore's original under files_dir; a restore whose file is missing is
+    refused by name. The only sync step that reads the drive."""
+    listing_cache: dict[Path, list[str]] = {}
+    kept: list[SyncTarget] = []
+    problems: list[RowValidation] = []
+    for target in targets:
+        if target.action is not SyncAction.RESTORE:
+            kept.append(target)
+            continue
+        try:
+            if not target.source_fingerprint:
+                raise FileResolutionError("its file_template cells are blank")
+            resolved = resolve_file(files_dir, target.source_fingerprint, listing_cache)
+        except FileResolutionError as exc:
+            problems.append(
+                RowValidation(
+                    row_number=target.row_number,
+                    identifier=target.identifier,
+                    errors=[
+                        f"restore refused: the original file was not found ({exc}). The item "
+                        "stays withdrawn and nothing was sent - put the file back under "
+                        f"files_dir, or set '{WITHDRAWN_COLUMN}' back to yes"
+                    ],
+                )
+            )
+            continue
+        kept.append(replace(target, restore_file=resolved))
+    return kept, problems
+
+
+def restore_upload_row(target: SyncTarget, mediatype: str) -> dict[str, str]:
+    """The row upload_row() re-sends: what `upload` sends, minus REMOVE_TAGs only a metadata write reads."""
+    row = {key: value for key, value in target.metadata.items() if value != REMOVE_TAG_SENTINEL}
+    return row | {"mediatype": mediatype, "identifier-bib": target.restore_file, "file": target.restore_file}
+
+
+def restore_metadata(target: SyncTarget) -> dict[str, str]:
+    """The text a restore writes after its upload, which does not set an existing item's metadata.
+    Puts back what `upload` generates, and removes the notice where the Sheet's cell is blank."""
+    sent = metadata_to_send(target.metadata)
+    restored = dict(target.metadata) | {
+        "identifier-bib": target.restore_file,
+        "date": sent.get("date") or UNDATED_PLACEHOLDER,
+    }
+    for name in WITHDRAWN_REPLACED_FIELDS:
+        if name not in sent:
+            restored[name] = REMOVE_TAG_SENTINEL
+    return restored
+
+
 SYNC_PROGRESS_VERBS = {
     SyncAction.UPDATE: "updating metadata for",
     SyncAction.WITHDRAW: "withdrawing",
@@ -5495,6 +5552,10 @@ class SheetSyncRun:
     file_template: str
     log_path: Path
     live: bool
+    # A restore re-uploads through upload_row(), so it needs what `upload` passes it.
+    files_dir: str
+    collection: str
+    mediatype: str
     chunk_size: int = CHUNK_SIZE
 
     def execute(self, targets: list[SyncTarget]) -> PushOutcome:
@@ -5502,6 +5563,7 @@ class SheetSyncRun:
         unchanged = 0
         failures: list[RowFailure] = []
         withdrawn: list[RowAction] = []
+        restored: list[RowAction] = []
         withdraw_started: list[RowAction] = []
         total = len(targets)
         position = 0
@@ -5580,8 +5642,19 @@ class SheetSyncRun:
                 else:
                     stamped.append((target.row_number, target.content_hash))
                     pushed.append(target)
-                    succeeded += 1
-                    self._log(target, "success")
+                    if target.action is SyncAction.RESTORE:
+                        restored.append(
+                            RowAction(
+                                identifier=target.identifier,
+                                uploaded_as=target.uploaded_as,
+                                detail=f"{target.restore_file} re-uploaded to {target.uploaded_as}",
+                            )
+                        )
+                        marks.append((target.row_number, ""))
+                        self._log(target, "restored")
+                    else:
+                        succeeded += 1
+                        self._log(target, "success")
 
             self._stamp(stamped, pushed, marks)
 
@@ -5590,6 +5663,7 @@ class SheetSyncRun:
             unchanged=unchanged,
             failures=tuple(failures),
             withdrawn=tuple(withdrawn),
+            restored=tuple(restored),
             withdraw_started=tuple(withdraw_started),
         )
 
@@ -5613,7 +5687,17 @@ class SheetSyncRun:
         return deletes, "; ".join(problems) or None
 
     def _send(self, target: SyncTarget) -> None:
-        """One row's metadata push."""
+        """One row's metadata push; a restore re-uploads its original first."""
+        if target.action is SyncAction.RESTORE:
+            upload_row(
+                restore_upload_row(target, self.mediatype),
+                target.uploaded_as,
+                self.collection,
+                self.files_dir,
+            )
+            with contextlib.suppress(MetadataUnchanged):
+                update_metadata_row(restore_metadata(target), target.uploaded_as)
+            return
         update_metadata_row(target.metadata, target.uploaded_as)
 
     def _reread(self) -> SheetSnapshot | str:
@@ -5717,7 +5801,7 @@ class SheetSyncRun:
         landed = {row for row, _digest in stamped}
         safe = self._verified(pushed, landed)
         safe_rows = {target.row_number for target in safe}
-        # A withdraw's mark is a timestamp; a restore's (Task 9) is "" and needs no warning.
+        # A withdraw's mark is a timestamp; a restore's is "" and needs no warning.
         marked_rows = {row for row, value in marks if value}
         started_on = {
             target.row_number: target.uploaded_as
@@ -5930,6 +6014,8 @@ def sync_from_sheet(args) -> int:
         withdrawn_title=config.withdrawn_title,
         withdrawn_description=config.withdrawn_description,
     )
+    targets, restore_problems = attach_restore_files(targets, config.files_dir)
+    problems = problems + restore_problems
 
     if problems:
         print("\n".join(_format_result_lines(problems)))
@@ -6004,6 +6090,9 @@ def sync_from_sheet(args) -> int:
         file_template=config.file_template,
         log_path=log_path,
         live=live,
+        files_dir=config.files_dir,
+        collection=config.ia_collection_for(live),
+        mediatype=config.mediatype,
         chunk_size=chunk_size,
     )
     outcome = sync_run.execute(to_push)

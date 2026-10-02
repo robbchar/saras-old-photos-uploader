@@ -10031,7 +10031,41 @@ def test_a_recheck_of_an_item_that_is_not_the_rows_own_is_refused():
     targets, problems = _plan_withdraw_rows([row])
 
     assert targets == []
-    assert len(problems) == 1
+    assert "refusing to delete files from it" in problems[0].errors[0]
+
+
+def test_a_restore_of_an_item_that_is_not_the_rows_own_is_refused():
+    row = _pointing_at(
+        _withdraw_row(withdrawn="no", ia_withdrawn="2026-09-30T10:00:00Z"),
+        f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+    )
+    targets, problems = _plan_withdraw_rows([row])
+
+    assert targets == []
+    assert "not this row's own item 'lcps-astoriaphotos-00001'" in problems[0].errors[0]
+    assert "refusing to restore this row's file into it" in problems[0].errors[0]
+
+
+ROW_ID = "lcps-astoriaphotos-00001"
+
+
+@pytest.mark.parametrize(
+    ("uploaded_as", "live", "own"),
+    [
+        (ROW_ID, True, True),
+        ("lcps-astoriaphotos-00002", True, False),
+        (f"zztest-{SYNC_STAMP}-{ROW_ID}", False, True),
+        (f"zztest-20990101t000000-{ROW_ID}", False, True),
+        (f"zztest-{SYNC_STAMP}-{ROW_ID}-extra", False, False),
+        (f"zztest-a-b-{ROW_ID}", False, False),
+        (f"zztest--{ROW_ID}", False, False),
+        (f"zztest-{ROW_ID}", False, False),
+    ],
+)
+def test_item_is_rows_own(uploaded_as, live, own):
+    from ia_bulk import item_is_rows_own
+
+    assert item_is_rows_own(uploaded_as, ROW_ID, live) is own
 
 
 def test_an_ordinary_update_is_not_held_to_the_delete_identity_rule():
@@ -10571,6 +10605,162 @@ def test_only_a_still_clearing_recheck_is_mirrored_to_the_log_tab(
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
     assert ("Sync Log" in client.log_tabs) is mirrored
+
+
+RESTORED_STAMP = WITHDRAWN_STAMP
+
+
+def test_sync_restores_a_row_set_back_to_no(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 0
+    assert calls == [
+        ("upload", WITHDRAWN_ITEM, {
+            "title": "Photo 1", "mediatype": "image",
+            "identifier-bib": "photo1.jpg", "file": "photo1.jpg",
+        }, "test_collection"),
+        ("metadata", WITHDRAWN_ITEM, {
+            "title": "Photo 1", "identifier-bib": "photo1.jpg", "date": "[n.d.]",
+            "description": "REMOVE_TAG",
+        }),
+    ]
+    assert client.grid[1][9] == ""
+    assert client.grid[1][6] == sync_hash(metadata_to_send({"title": "Photo 1"}))
+
+
+def test_a_restore_whose_original_is_missing_is_refused_by_name_and_sends_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, files=(),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "[FAIL] row 2 lcps-astoriaphotos-00001" in out
+    assert "restore refused: the original file was not found" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+@pytest.mark.parametrize("failing", ["upload", "metadata"])
+def test_a_restore_that_fails_partway_stays_withdrawn_and_retries(tmp_path, monkeypatch, failing):
+    from ia_bulk import cmd_sync_metadata
+
+    calls, fail = [], {failing}
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, fail=fail,
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert client.grid[1][9] == RESTORED_STAMP
+
+    fail.clear()
+    calls.clear()
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["upload", "metadata"]
+    assert client.grid[1][9] == ""
+
+
+def test_a_restore_is_logged_as_restored(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], []
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [entry["status"] for entry in rows] == ["restored"]
+
+
+def test_a_restore_into_an_item_that_is_not_the_rows_own_uploads_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """An ia_url edited after a withdraw must never send this row's photo into another item."""
+    from ia_bulk import cmd_sync_metadata
+
+    row = _pointing_at(
+        _withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP),
+        f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00002",
+    )
+    calls = []
+    registry_path, client = _setup_withdraw_sync(tmp_path, monkeypatch, [row], calls)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "[FAIL] row 2 lcps-astoriaphotos-00001" in out
+    assert "refusing to restore this row's file into it; nothing was uploaded" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def _restore_target():
+    from ia_bulk import SyncTarget
+
+    return SyncTarget(
+        row_number=2,
+        identifier="lcps-astoriaphotos-00001",
+        uploaded_as=WITHDRAWN_ITEM,
+        metadata={
+            "title": "Pier 39", "description": "", "date": "",
+            "folder_on_lacie_drive": "REMOVE_TAG",
+        },
+        action=SyncAction.RESTORE,
+        restore_file="SOP CD1/pier.jpg",
+    )
+
+
+def test_restore_metadata_puts_back_what_upload_sets_and_clears_the_notice_where_blank():
+    from ia_bulk import restore_metadata
+
+    assert restore_metadata(_restore_target()) == {
+        "title": "Pier 39",
+        "description": "REMOVE_TAG",
+        "date": "[n.d.]",
+        "folder_on_lacie_drive": "REMOVE_TAG",
+        "identifier-bib": "SOP CD1/pier.jpg",
+    }
+
+
+def test_restore_upload_row_is_what_upload_sends_without_the_remove_tags():
+    from ia_bulk import restore_upload_row
+
+    assert restore_upload_row(_restore_target(), "image") == {
+        "title": "Pier 39",
+        "description": "",
+        "date": "",
+        "mediatype": "image",
+        "identifier-bib": "SOP CD1/pier.jpg",
+        "file": "SOP CD1/pier.jpg",
+    }
+
+
+def test_attach_restore_files_leaves_other_targets_alone(tmp_path):
+    from ia_bulk import attach_restore_files
+
+    targets, _ = _plan_withdraw_rows([_withdraw_row(withdrawn="yes")])
+
+    assert attach_restore_files(targets, tmp_path) == (targets, [])
 
 
 def _sync_sheet_args(tmp_path, registry_path, **overrides):
