@@ -4,8 +4,9 @@
     "Subtheme (Optional)", "Subject Terms (Controlled Vocab)", "Names (Last, First M.)",
     "Description", "Genre / Form", "Physical Format", "Photographer / Studio",
     "Source / Collection", "Rights", "Notes (LCPS Internal)", "Architect", "Builder",
-    "Architectura Style", "Construction Date", "Addresses", "ia_identifier",
-    "ia_identifier_bib", "ia_uploaded", "ia_url", "ia_sync_hash", "ia_last_synced."
+    "Architectura Style", "Construction Date", "Addresses", "Withdrawn", "ia_identifier",
+    "ia_identifier_bib", "ia_uploaded", "ia_url", "ia_sync_hash", "ia_last_synced.",
+    "ia_withdrawn"
   ],
   "rows": [
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-01.jpg", "Title": "E2E fixture 1", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},

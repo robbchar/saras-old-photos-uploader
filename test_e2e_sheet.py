@@ -334,3 +334,9 @@ def test_every_checked_in_row_names_a_file_that_exists():
     missing = [row[name] for row in grid[1:] if not (FIXTURES / "files" / row[folder] / row[name]).is_file()]
 
     assert missing == []
+
+
+def test_checked_in_grid_carries_the_withdrawal_columns():
+    header = load_fixture_grid(FIXTURES / "sheet.json")[0]
+
+    assert {"Withdrawn", "ia_withdrawn"} <= set(header)

@@ -49,6 +49,7 @@ from ia_bulk import (
     check_ia_collection,
 )
 from log_tab import LOG_TAB_HEADER
+from project_config import DEFAULT_WITHDRAWN_DESCRIPTION, DEFAULT_WITHDRAWN_TITLE
 from sheet_client import SheetClient
 
 # For test_upload_page_drives_a_real_run_end_to_end: a real upload_server,
@@ -77,6 +78,7 @@ LOCK_LEASE = timedelta(seconds=2 * CLI_TIMEOUT_SECONDS)
 
 UPLOAD_COLUMNS = ("ia_identifier", "ia_uploaded", "ia_url", "ia_identifier_bib")
 SYNC_COLUMNS = ("ia_sync_hash", "ia_last_synced.")
+WITHDRAW_COLUMNS = ("Withdrawn", "ia_withdrawn")
 BROKEN_FILENAME = "does-not-exist.jpg"
 # ia_bulk.py prints this on stderr when IA refuses a request as rate limited and the run stops.
 IA_RATE_LIMIT_NOTICE = "Internet Archive asked us to slow down"
@@ -98,7 +100,10 @@ STEP_6 = "step 6 - sync dry run (DEPLOYMENT §16 step 2)"
 STEP_7 = "step 7 - sync an edit (OPERATIONS 'Rehearsing the log tabs' step 3, first run)"
 STEP_8 = "step 8 - edit reached IA (OPERATIONS pre-live checklist: zztest item eyeballed)"
 STEP_9 = "step 9 - quiet sync (OPERATIONS 'Rehearsing the log tabs' step 3, second run)"
-STEP_10 = "step 10 - tabs match log files (OPERATIONS 'Rehearsing the log tabs' step 4)"
+STEP_9A = "step 9a - withdraw two items (OPERATIONS 'Withdrawing an item' steps 1-2)"
+STEP_9A2 = "step 9a2 - the next run re-checks them (OPERATIONS 'Withdrawing an item' step 4)"
+STEP_9B = "step 9b - restore one (OPERATIONS 'Withdrawing an item', putting it back)"
+STEP_10 = "step 10- tabs match log files (OPERATIONS 'Rehearsing the log tabs' step 4)"
 STEP_11 = "step 11 - only expected cells changed (OPERATIONS 'Rehearsing the log tabs' step 5)"
 STEP_12 = "step 12 - restore the broken filename (OPERATIONS 'Rehearsing the log tabs' step 2: put the cell back)"
 
@@ -308,6 +313,22 @@ def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], 
 def item_metadata(identifier: str) -> dict[str, Any] | None:
     """Not fetch_current_metadata: it returns None on any error, which would wait out the timeout instead of failing."""
     return dict(internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS).metadata) or None
+
+
+def item_file_names(identifier: str) -> list[str]:
+    """The item's file names as IA lists them now; raises on failure, like item_metadata."""
+    item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    return [file.name for file in item.get_files()]
+
+
+def has_withdrawn_text(identifier: str) -> bool:
+    """IA shows the withdrawn notice and no identifier-bib; the files may still be clearing."""
+    metadata = item_metadata(identifier) or {}
+    return (
+        metadata.get("title") == DEFAULT_WITHDRAWN_TITLE
+        and metadata.get("description") == DEFAULT_WITHDRAWN_DESCRIPTION
+        and "identifier-bib" not in metadata
+    )
 
 
 class RehearsalSheet:
@@ -562,6 +583,68 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_9, len(sheet.log_rows(target.sync_log_tab)) == len(sync_log), "the quiet run appended to Sync Log")
     expect(STEP_9, sheet.grid() == grid_after_sync, "the quiet run changed the Sheet")
 
+    # Row 3 stays withdrawn after the rehearsal, for the hand clear check (OPERATIONS).
+    second_identifier = identifiers[SECOND_UPLOADED]
+    check_in(lock, STEP_9A)
+    sheet.edit(FIRST_UPLOADED, "Withdrawn", "yes")
+    sheet.edit(SECOND_UPLOADED, "Withdrawn", "yes")
+    result = run_cli(STEP_9A, "sync-metadata", lock=lock, log_dir=log_dir)
+    expect_run(
+        STEP_9A, result, 0,
+        "2 items withdrawn (files deleted, text replaced)",
+        "until every withdrawn item reports clear",
+    )
+    for original in ("e2e-01.jpg", "e2e-02.jpg"):
+        accepted = [
+            line for line in result.stdout.splitlines()
+            if "Internet Archive accepted deletes: " in line and original in line
+        ]
+        expect(STEP_9A, accepted != [], f"no accepted delete of {original} in the run's output")
+    sync_log = sheet.log_rows(target.sync_log_tab)
+    expect(STEP_9A, [row[2] for row in sync_log[-3:]] == ["summary", "withdrawn", "withdrawn"], f"Sync Log rows: {sync_log[1:]}")
+    grid = sheet.grid()
+    for row in (FIRST_UPLOADED, SECOND_UPLOADED):
+        expect(STEP_9A, sheet.cell(grid, row, "ia_withdrawn") != "", f"row {row + 1} ia_withdrawn was not stamped")
+    for identifier in (first_identifier, second_identifier):
+        wait_for_ia(
+            STEP_9A,
+            f"the withdrawn notice on {identifier}",
+            lambda identifier=identifier: True if has_withdrawn_text(identifier) else None,
+            lock=lock,
+        )
+
+    grid_before_recheck = sheet.grid()
+    result = run_cli(STEP_9A2, "sync-metadata", lock=lock, log_dir=log_dir)
+    expect_run(STEP_9A2, result, 0)
+    expect(
+        STEP_9A2,
+        re.search(r"withdrawn items? (still clearing|clear \()", result.stdout) is not None,
+        f"no re-check report in:\n{result.stdout}",
+    )
+    expect(STEP_9A2, sheet.grid() == grid_before_recheck, "the re-check run changed the Sheet")
+
+    check_in(lock, STEP_9B)
+    sheet.edit(FIRST_UPLOADED, "Withdrawn", "no")
+    result = run_cli(STEP_9B, "sync-metadata", lock=lock, log_dir=log_dir)
+    expect_run(STEP_9B, result, 0, "1 item restored (file re-uploaded, text put back)")
+    sync_log = sheet.log_rows(target.sync_log_tab)
+    expect(STEP_9B, "restored" in [row[2] for row in sync_log[-3:]], f"Sync Log rows: {sync_log[1:]}")
+    grid = sheet.grid()
+    expect(STEP_9B, sheet.cell(grid, FIRST_UPLOADED, "ia_withdrawn") == "", "ia_withdrawn was not cleared")
+    expect(STEP_9B, sheet.cell(grid, SECOND_UPLOADED, "ia_withdrawn") != "", "row 3 lost its ia_withdrawn")
+    wait_for_ia(
+        STEP_9B,
+        f"the restored title on {first_identifier}",
+        lambda: True if (item_metadata(first_identifier) or {}).get("title") == edited_title else None,
+        lock=lock,
+    )
+    wait_for_ia(
+        STEP_9B,
+        f"e2e-01.jpg back in {first_identifier}'s file list",
+        lambda: True if "e2e-01.jpg" in item_file_names(first_identifier) else None,
+        lock=lock,
+    )
+
     # Steps 10 and 11 only read, but check in so a lock lost after step 9 fails as one.
     check_in(lock, STEP_10)
     for tab in target.log_tabs:
@@ -575,6 +658,7 @@ def test_rehearsal(tmp_path, request):
     check_in(lock, STEP_11)
     allowed = {(row, column) for row in UPLOADED_ROWS for column in UPLOAD_COLUMNS + SYNC_COLUMNS}
     allowed |= {(FIRST_UPLOADED, "Title"), (BROKEN_ROW, "File Name")}
+    allowed |= {(row, column) for row in (FIRST_UPLOADED, SECOND_UPLOADED) for column in WITHDRAW_COLUMNS}
     expect_only_allowed_changes(STEP_11, fixture, sheet.grid(), allowed)
     # Step 12 runs as the finalizer registered at step 4.
 
