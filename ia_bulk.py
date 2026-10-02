@@ -1697,44 +1697,124 @@ def delete_item_files(identifier: str) -> DeletePass:
     return _delete_in_order(identifier, list(item.get_files()))
 
 
-@dataclass(frozen=True)
-class ClearCheck:
-    """One re-check of a withdrawn item: what was deleted again, and what IA still has queued."""
+# A catalog task's state; one without a status is read by its color, as IA's task pages show it.
+TASK_STATES = ("queued", "running", "paused", "error")
+TASK_STATE_BY_COLOR = {"green": "queued", "blue": "running", "brown": "paused", "red": "error"}
 
-    deletes: DeletePass = field(default_factory=DeletePass)
-    pending_tasks: int = 0
+
+@dataclass(frozen=True)
+class TaskState:
+    """An item's open IA catalog tasks, each named by its command (e.g. derive.php), by state."""
+
+    queued: tuple[str, ...] = ()
+    running: tuple[str, ...] = ()
+    paused: tuple[str, ...] = ()
+    error: tuple[str, ...] = ()
 
     @property
-    def clear(self) -> bool:
-        """Only IA's own files were left and nothing is queued; IA can't rebuild a tile from nothing."""
-        return not self.deletes.deleted and not self.deletes.refused and self.pending_tasks == 0
+    def total(self) -> int:
+        return len(self.queued) + len(self.running) + len(self.paused) + len(self.error)
+
+    def counts(self) -> str:
+        """e.g. "1 task(s) running, 2 task(s) queued"; paused and failed are held()'s to name."""
+        parts = [(self.running, "running"), (self.queued, "queued")]
+        return ", ".join(f"{len(tasks)} task(s) {state}" for tasks, state in parts if tasks)
+
+    def held(self, identifier: str) -> str | None:
+        """Paused or failed tasks: they never clear by themselves, only IA staff can release them."""
+        parts = [f"paused {len(self.paused)} task(s)"] if self.paused else []
+        parts += [f"{len(self.error)} failed task(s)"] if self.error else []
+        if not parts:
+            return None
+        return f"Internet Archive has {' and '.join(parts)} on {identifier}; IA staff must release them"
+
+    def busy_reason(self, identifier: str) -> str | None:
+        """Why no delete may be sent to the item now, or None. Deletes sent while IA was running a
+        task on an item were paused for IA staff; queued tasks never caused that."""
+        if self.paused:
+            return self.held(identifier)
+        if self.running:
+            return f"Internet Archive is running a task on {identifier} ({', '.join(dict.fromkeys(self.running))})"
+        return None
+
+    def refusal(self, identifier: str) -> str | None:
+        """busy_reason() as a refused delete reads: nothing deleted, and what happens next."""
+        reason = self.busy_reason(identifier)
+        if reason is None:
+            return None
+        if self.paused:
+            return f"{reason} - nothing was deleted"
+        return f"{reason}; nothing was deleted - run sync-metadata again later"
 
 
-def pending_task_count(identifier: str, archive_session: internetarchive.ArchiveSession | None = None) -> int:
-    """Tasks IA has queued or running for the item (the catalog, not history). Raises on failure.
+def _task_state_of(task: object) -> tuple[str, str]:
+    """(state, command) of one catalog task. An unreadable state counts as running: never deleted
+    past, never clear."""
+    fields = getattr(task, "task_dict", None)
+    fields = fields if isinstance(fields, dict) else {}
+    status = fields.get("status")
+    state = status if status in TASK_STATES else TASK_STATE_BY_COLOR.get(str(fields.get("color")), "running")
+    return state, str(fields.get("cmd") or "unknown command")
+
+
+def item_task_state(identifier: str, archive_session: internetarchive.ArchiveSession | None = None) -> TaskState:
+    """The item's open tasks by state (the catalog, not history). Raises on failure.
     `archive_session` is for a caller whose process has no IA credentials of its own."""
     query = {"catalog": 1, "history": 0}
     if archive_session is None:
         tasks = internetarchive.get_tasks(identifier=identifier, params=query, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
     else:
         tasks = internetarchive.get_tasks(identifier=identifier, params=query, archive_session=archive_session)
-    return len(tasks)
+    by_state: dict[str, list[str]] = {state: [] for state in TASK_STATES}
+    for task in tasks:
+        state, command = _task_state_of(task)
+        by_state[state].append(command)
+    return TaskState(**{state: tuple(sorted(commands)) for state, commands in by_state.items()})
+
+
+@dataclass(frozen=True)
+class ClearCheck:
+    """One re-check of a withdrawn item: what was deleted again, and what IA still has open."""
+
+    deletes: DeletePass = field(default_factory=DeletePass)
+    tasks: TaskState = field(default_factory=TaskState)
+
+    @property
+    def clear(self) -> bool:
+        """Only IA's own files were left and no task is open; IA can't rebuild a tile from nothing."""
+        return not self.deletes.deleted and not self.deletes.refused and self.tasks.total == 0
+
+
+def withdraw_refusal(identifier: str) -> str | None:
+    """Why a withdraw must not send its deletes yet, or None. An unanswerable query refuses too:
+    a withdraw never deletes blind."""
+    try:
+        tasks = item_task_state(identifier)
+    except Exception as exc:
+        return (
+            "could not check whether Internet Archive is running or holding a task on "
+            f"{identifier} ({exc}); nothing was deleted - run sync-metadata again later"
+        )
+    return tasks.refusal(identifier)
 
 
 def require_withdrawal_processed(identifier: str) -> None:
-    """Refuses a restore while IA still has tasks queued for the item: a late delete would remove
-    the re-uploaded file. An unanswerable query refuses too."""
+    """Refuses a restore while IA still has any task open for the item: a late delete would remove
+    the re-uploaded file. A paused one is named as IA staff's to release. An unanswerable query refuses too."""
     try:
-        pending = pending_task_count(identifier)
+        tasks = item_task_state(identifier)
     except Exception as exc:
         raise RuntimeError(
             "could not check whether Internet Archive has finished processing this item's "
             f"withdrawal ({exc}); nothing was uploaded - run sync-metadata again later"
         ) from exc
-    if pending:
+    held = tasks.held(identifier)
+    if held:
+        raise RuntimeError(f"{held} - nothing was uploaded")
+    if tasks.total:
         raise RuntimeError(
             "Internet Archive is still processing this item's withdrawal "
-            f"({pending} task(s) queued); nothing was uploaded - run sync-metadata again later"
+            f"({tasks.counts()}); nothing was uploaded - run sync-metadata again later"
         )
 
 
@@ -1751,14 +1831,17 @@ def _delete_what_is_left(identifier: str) -> DeletePass | None:
 
 
 def recheck_withdrawn_item(identifier: str) -> ClearCheck:
-    """Deletes whatever IA rebuilt or has not removed yet, in a withdraw's order; asks about
-    queued tasks only once no file is left. Raises when the item cannot be read."""
+    """Deletes whatever IA rebuilt or has not removed yet, in a withdraw's order - unless IA is
+    running or holding a task on the item. Raises when the item or its tasks cannot be read."""
+    before = item_task_state(identifier)
+    if before.busy_reason(identifier):
+        return ClearCheck(tasks=before)
     deletes = _delete_what_is_left(identifier)
     if deletes is not None:
         return ClearCheck(deletes=deletes)
-    pending = pending_task_count(identifier)
-    if pending:
-        return ClearCheck(pending_tasks=pending)
+    tasks = item_task_state(identifier)
+    if tasks.total:
+        return ClearCheck(tasks=tasks)
     # A derive that finished between the listing and the task query may have added a photo file.
     return ClearCheck(deletes=_delete_what_is_left(identifier) or DeletePass())
 
@@ -4298,6 +4381,10 @@ def print_withdrawal_preview(target: SyncTarget) -> None:
             "      a real run re-reads the Sheet just before deleting, and deletes only if this "
             f"row still says {WITHDRAWN_COLUMN} = yes"
         )
+        print(
+            "      it then checks Internet Archive is not running or holding a paused task on the "
+            "item, and deletes nothing while it is"
+        )
         payload = target.metadata
     else:
         print(f"  row {target.row_number}: {target.uploaded_as} - would RESTORE")
@@ -4328,11 +4415,16 @@ def print_recheck_preview(target: SyncTarget) -> None:
             f"  row {target.row_number}: {target.uploaded_as} - still holds files; would delete "
             f"again, in this order: {', '.join(doomed)}"
         )
+        # recheck_withdrawn_item(); the dry run does not ask.
+        print(
+            "      a real run first checks Internet Archive is not running or holding a paused "
+            "task on the item, and deletes nothing while it is"
+        )
     else:
         print(
             f"  row {target.row_number}: {target.uploaded_as} - holds only Internet Archive's own "
-            "files; a real run asks Internet Archive whether anything is still queued before "
-            "reporting it clear"
+            "files; a real run asks Internet Archive whether anything is still queued, running or "
+            "paused before reporting it clear"
         )
 
 
@@ -5026,13 +5118,19 @@ RERUN_UNTIL_CLEAR = (
 )
 
 
-def clearing_detail(check: ClearCheck) -> str:
+def clearing_detail(check: ClearCheck, identifier: str) -> str:
     """Why a re-checked item is not clear yet, for the log tab."""
     if check.deletes.deleted:
         return f"deleted again: {', '.join(check.deletes.deleted)}"
     if check.deletes.refused:
         return "Internet Archive refused a delete; see the failure"
-    return f"no files left to delete; Internet Archive has {_pluralize(check.pending_tasks, 'task')} queued"
+    refusal = check.tasks.refusal(identifier)
+    if refusal:
+        return refusal
+    held = check.tasks.held(identifier)
+    if held:
+        return f"no files left to delete; {held}"
+    return f"no files left to delete; Internet Archive has {_pluralize(len(check.tasks.queued), 'task')} queued"
 
 
 def recheck_withdrawals(targets: list[SyncTarget], log_path: Path, live: bool) -> Clearance:
@@ -5063,12 +5161,12 @@ def recheck_withdrawals(targets: list[SyncTarget], log_path: Path, live: bool) -
             clear.append(RowAction(identifier=target.identifier, uploaded_as=target.uploaded_as, detail=detail))
             status = "clear"
         else:
+            detail = clearing_detail(check, target.uploaded_as)
+            if check.tasks.busy_reason(target.uploaded_as):
+                # Nothing was deleted; a paused task needs a person, so it is said here, not only in the log.
+                print(f"    - {detail}")
             clearing.append(
-                RowAction(
-                    identifier=target.identifier,
-                    uploaded_as=target.uploaded_as,
-                    detail=clearing_detail(check),
-                )
+                RowAction(identifier=target.identifier, uploaded_as=target.uploaded_as, detail=detail)
             )
             status = "clearing"
         log_result(log_path, target.identifier, "", status, live, uploaded_as=target.uploaded_as)
@@ -6008,7 +6106,8 @@ class SheetSyncRun:
         """Why this withdraw's files are NOT deleted, or None to go ahead.
 
         A fresh read just before each withdraw's deletes, unlike _verified()'s per chunk: a delete
-        cannot be sent again. The row must be unmoved AND its withdrawn cell must still say yes."""
+        cannot be sent again. The row must be unmoved AND its withdrawn cell must still say yes;
+        then IA must not be running or holding a task on the item (withdraw_refusal())."""
         fresh = self._reread()
         if isinstance(fresh, str):
             return f"{fresh} Nothing was deleted - this row is withdrawn on the next run"
@@ -6025,7 +6124,7 @@ class SheetSyncRun:
                 "- it was changed while the run was in progress. Nothing was deleted - the next "
                 "run follows what the Sheet says then"
             )
-        return None
+        return withdraw_refusal(target.uploaded_as)
 
     @staticmethod
     def _still_withdrawn(snapshot: SheetSnapshot, row_number: int) -> bool:

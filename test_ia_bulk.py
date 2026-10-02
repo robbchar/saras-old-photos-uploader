@@ -62,6 +62,7 @@ from ia_bulk import (
     CollectionMissing,
     CollectionUnchecked,
     NotACollection,
+    TaskState,
 )
 from project_config import ProjectConfig, DEFAULT_PHOTO_EXTENSIONS, PlaceholderSheetId
 from utc_time import format_utc
@@ -2980,6 +2981,102 @@ class _FakeIAItem:
 NO_BACKUP = {"x-archive-keep-old-version": "0"}
 
 
+class _FakeCatalogTask:
+    """internetarchive's CatalogTask: the catalog row is task_dict; unset keys are left out."""
+
+    def __init__(self, status=None, color=None, cmd: str | None = "derive.php"):
+        fields = {"status": status, "color": color, "cmd": cmd}
+        self.task_dict = {key: value for key, value in fields.items() if value is not None}
+
+
+def _tasks(*states, cmd="derive.php"):
+    return {_FakeCatalogTask(status=state, cmd=cmd) for state in states}
+
+
+def test_item_task_state_sorts_open_tasks_by_status(monkeypatch):
+    from ia_bulk import IA_HTTP_ADAPTER_KWARGS, TaskState, item_task_state
+
+    asked = []
+
+    def fake_get_tasks(**kwargs):
+        asked.append(kwargs)
+        return {
+            _FakeCatalogTask(status="queued", color="green", cmd="archive.php"),
+            _FakeCatalogTask(status="running", color="blue", cmd="derive.php"),
+            _FakeCatalogTask(status="paused", color="brown", cmd="archive.php"),
+            _FakeCatalogTask(status="error", color="red", cmd="book_op.php"),
+        }
+
+    monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
+
+    assert item_task_state("item") == TaskState(
+        queued=("archive.php",), running=("derive.php",), paused=("archive.php",), error=("book_op.php",)
+    )
+    assert asked == [{
+        "identifier": "item",
+        "params": {"catalog": 1, "history": 0},
+        "http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS,
+    }]
+
+
+@pytest.mark.parametrize(
+    ("color", "state"),
+    [("green", "queued"), ("blue", "running"), ("brown", "paused"), ("red", "error")],
+)
+def test_item_task_state_reads_a_task_without_a_status_by_its_color(monkeypatch, color, state):
+    from ia_bulk import item_task_state
+
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: {_FakeCatalogTask(color=color)}
+    )
+
+    assert getattr(item_task_state("item"), state) == ("derive.php",)
+
+
+def test_item_task_state_counts_a_task_it_cannot_read_as_running(monkeypatch):
+    """Never clear and never deleted past: a task of unknown state is treated as busy."""
+    from ia_bulk import TaskState, item_task_state
+
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: {_FakeCatalogTask(status="mystery", cmd=None)}
+    )
+
+    assert item_task_state("item") == TaskState(running=("unknown command",))
+
+
+def test_item_task_state_asks_with_a_given_session(monkeypatch):
+    from typing import cast
+
+    from ia_bulk import item_task_state
+
+    session = cast(internetarchive.ArchiveSession, object())
+    asked = []
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: asked.append(kwargs) or set()
+    )
+
+    assert item_task_state("item", archive_session=session).total == 0
+    assert asked == [
+        {"identifier": "item", "params": {"catalog": 1, "history": 0}, "archive_session": session}
+    ]
+
+
+def test_task_state_says_what_blocks_deletes():
+    from ia_bulk import TaskState
+
+    assert TaskState(queued=("archive.php",), error=("derive.php",)).busy_reason("x") is None
+    assert TaskState(running=("derive.php", "derive.php")).busy_reason("x") == (
+        "Internet Archive is running a task on x (derive.php)"
+    )
+    assert TaskState(running=("derive.php",), paused=("archive.php", "archive.php")).busy_reason("x") == (
+        "Internet Archive has paused 2 task(s) on x; IA staff must release them"
+    )
+    assert TaskState(paused=("a",), error=("b",)).held("x") == (
+        "Internet Archive has paused 1 task(s) and 1 failed task(s) on x; IA staff must release them"
+    )
+    assert TaskState(queued=("a", "b"), running=("c",)).counts() == "1 task(s) running, 2 task(s) queued"
+
+
 def test_delete_item_files_deletes_content_first_and_the_tile_last(monkeypatch):
     """IA rebuilds the tile from any image still in the item, so the tile goes last."""
     from ia_bulk import IA_HTTP_ADAPTER_KWARGS, DeletePass, delete_item_files
@@ -3067,23 +3164,70 @@ def test_deletable_files_keeps_ias_system_files_and_puts_the_tile_last():
     ) == ["a.jpg", "y_meta.xml", "__ia_thumb.jpg"]
 
 
-def test_recheck_deletes_what_is_left_in_order_and_does_not_ask_about_tasks(monkeypatch):
+def test_recheck_deletes_what_is_left_in_order_and_asks_about_tasks_once(monkeypatch):
     from ia_bulk import recheck_withdrawn_item
 
     deletes = []
+    asked = []
     files = [
         _FakeIAFile(name, deletes) for name in ("__ia_thumb.jpg", "photo1_thumb.jpg", "item_meta.xml")
     ]
     monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
-    monkeypatch.setattr(
-        internetarchive, "get_tasks", lambda **kwargs: pytest.fail("asked about tasks while files remain")
-    )
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: asked.append(1) or _tasks("queued"))
 
     check = recheck_withdrawn_item("item")
 
     assert check.deletes.deleted == ("photo1_thumb.jpg", "__ia_thumb.jpg")
     assert check.clear is False
+    assert asked == [1]
     assert deletes == [("photo1_thumb.jpg", True, NO_BACKUP), ("__ia_thumb.jpg", True, NO_BACKUP)]
+
+
+@pytest.mark.parametrize("state", ["running", "paused"])
+def test_recheck_deletes_nothing_while_ia_runs_or_holds_a_task(monkeypatch, state):
+    """A delete sent while IA runs a task on the item was paused for IA staff, on the live service."""
+    from ia_bulk import recheck_withdrawn_item
+
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: _tasks(state, "queued"))
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: pytest.fail("listed a busy item")
+    )
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.deletes.deleted == ()
+    assert getattr(check.tasks, state) == ("derive.php",)
+    assert check.clear is False
+
+
+def test_recheck_with_only_system_files_is_not_clear_while_a_task_is_paused(monkeypatch):
+    """Paused tasks never clear by themselves, so an item holding one never reports clear."""
+    from ia_bulk import recheck_withdrawn_item
+
+    answers = iter([set(), _tasks("paused")])
+    files = [_FakeIAFile("item_meta.xml", [])]
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: next(answers))
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.tasks.paused == ("derive.php",)
+    assert check.clear is False
+
+
+def test_recheck_raises_when_it_cannot_ask_about_tasks_and_deletes_nothing(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    def refused(**kwargs):
+        raise requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(internetarchive, "get_tasks", refused)
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: pytest.fail("deleted blind")
+    )
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        recheck_withdrawn_item("item")
 
 
 def test_recheck_is_clear_with_only_system_files_and_nothing_queued(monkeypatch):
@@ -3102,7 +3246,8 @@ def test_recheck_is_clear_with_only_system_files_and_nothing_queued(monkeypatch)
     check = recheck_withdrawn_item("item")
 
     assert check.clear is True
-    assert asked == [{
+    # Once before any delete, once more before reporting clear.
+    assert asked == 2 * [{
         "identifier": "item",
         "params": {"catalog": 1, "history": 0},
         "http_adapter_kwargs": IA_HTTP_ADAPTER_KWARGS,
@@ -3114,11 +3259,13 @@ def test_recheck_is_not_clear_while_ia_has_tasks_queued(monkeypatch):
 
     files = [_FakeIAFile("item_meta.xml", [])]
     monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(files))
-    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: {"derive", "delete"})
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: _tasks("queued", cmd="derive.php") | _tasks("queued", cmd="archive.php")
+    )
 
     check = recheck_withdrawn_item("item")
 
-    assert check.pending_tasks == 2
+    assert sorted(check.tasks.queued) == ["archive.php", "derive.php"]
     assert check.clear is False
 
 
@@ -3128,6 +3275,7 @@ def test_recheck_raises_when_the_item_cannot_be_read(monkeypatch):
     def unreachable(identifier, **kwargs):
         raise requests.exceptions.ConnectionError("down")
 
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: set())
     monkeypatch.setattr(internetarchive, "get_item", unreachable)
 
     with pytest.raises(requests.exceptions.ConnectionError):
@@ -3161,22 +3309,30 @@ def test_recheck_of_an_item_ia_does_not_have_is_never_clear(monkeypatch):
     monkeypatch.setattr(
         internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
     )
-    monkeypatch.setattr(
-        internetarchive, "get_tasks", lambda **kwargs: pytest.fail("asked about a missing item's tasks")
-    )
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: set())
 
     with pytest.raises(RuntimeError, match="^Internet Archive has no item 'item'$"):
         recheck_withdrawn_item("item")
 
 
-def test_clearing_detail_says_what_was_deleted_again_or_what_is_queued():
-    from ia_bulk import ClearCheck, DeletePass, clearing_detail
+def test_clearing_detail_says_what_was_deleted_again_or_what_ia_is_doing():
+    from ia_bulk import ClearCheck, DeletePass, TaskState, clearing_detail
 
-    assert clearing_detail(ClearCheck(deletes=DeletePass(deleted=("a.jpg", "__ia_thumb.jpg")))) == (
+    assert clearing_detail(ClearCheck(deletes=DeletePass(deleted=("a.jpg", "__ia_thumb.jpg"))), "x") == (
         "deleted again: a.jpg, __ia_thumb.jpg"
     )
-    assert clearing_detail(ClearCheck(pending_tasks=2)) == (
+    assert clearing_detail(ClearCheck(tasks=TaskState(queued=("a", "b"))), "x") == (
         "no files left to delete; Internet Archive has 2 tasks queued"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(running=("derive.php",))), "x") == (
+        "Internet Archive is running a task on x (derive.php); nothing was deleted - run "
+        "sync-metadata again later"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(paused=("archive.php",))), "x") == (
+        "Internet Archive has paused 1 task(s) on x; IA staff must release them - nothing was deleted"
+    )
+    assert clearing_detail(ClearCheck(tasks=TaskState(error=("derive.php",))), "x") == (
+        "no files left to delete; Internet Archive has 1 failed task(s) on x; IA staff must release them"
     )
 
 
@@ -10115,10 +10271,11 @@ def test_an_ordinary_update_is_not_held_to_the_delete_identity_rule():
 def _setup_withdraw_sync(
     tmp_path, monkeypatch, rows, calls, *, files=("photo1.jpg",), fail=None,
     before_read=None, registry=None, collection_check=None, recheck_result=None,
-    pending_tasks=0,
+    tasks=None,
 ):
     """The sync world plus every IA call a withdraw or restore makes, in one ordered list.
-    `fail` is a set of call kinds to refuse ("refuse" = IA refuses every delete); clear it to let a rerun through."""
+    `fail` is a set of call kinds to refuse ("refuse" = IA refuses every delete); clear it to let a rerun through.
+    `tasks` is the TaskState every task query sees (none open by default)."""
     from ia_bulk import ClearCheck, DeletePass
 
     failing = fail if fail is not None else set()
@@ -10168,16 +10325,111 @@ def _setup_withdraw_sync(
 
     monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", fake_recheck)
 
-    def fake_pending(identifier):
-        if "pending_query" in failing:
+    def fake_task_state(identifier):
+        if "task_query" in failing:
             raise RuntimeError("tasks query refused")
-        return pending_tasks
+        return tasks or TaskState()
 
-    monkeypatch.setattr("ia_bulk.pending_task_count", fake_pending)
+    monkeypatch.setattr("ia_bulk.item_task_state", fake_task_state)
     return registry_path, client
 
 
 WITHDRAWN_ITEM = f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
+
+
+@pytest.mark.parametrize(
+    ("tasks", "refusal"),
+    [
+        (
+            TaskState(running=("derive.php",), queued=("archive.php",)),
+            "Internet Archive is running a task on lcps-astoriaphotos-00001 (derive.php); nothing "
+            "was deleted - run sync-metadata again later",
+        ),
+        (
+            TaskState(paused=("archive.php", "archive.php")),
+            "Internet Archive has paused 2 task(s) on lcps-astoriaphotos-00001; IA staff must "
+            "release them - nothing was deleted",
+        ),
+    ],
+)
+def test_a_withdraw_while_ia_runs_or_holds_a_task_deletes_nothing(
+    tmp_path, monkeypatch, capsys, tasks, refusal
+):
+    """Deletes sent while IA ran a task on the item were paused for IA staff, on the live service."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls, tasks=tasks
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert [call for call in calls if call[0] != "collection_check"] == []
+    assert f"    - {refusal}" in out.splitlines()
+    assert "Withdrawn this run" not in out
+    assert "withdrawn (files deleted" not in out
+    assert client.grid[1][6] == ""
+    assert client.grid[1][9] == ""
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["failures"] == [{"identifier": "lcps-astoriaphotos-00001", "error": refusal}]
+
+
+def test_a_withdraw_with_only_queued_tasks_goes_ahead(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls,
+        tasks=TaskState(queued=("derive.php",), error=("book_op.php",)),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert calls == [("delete", WITHDRAWN_ITEM), ("metadata", WITHDRAWN_ITEM, WITHDRAWN_PAYLOAD)]
+    assert client.grid[1][9] != ""
+
+
+def test_a_withdraw_that_cannot_ask_about_ias_tasks_deletes_nothing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, fail={"task_query"}
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert exit_code == 1
+    assert calls == []
+    assert (
+        f"    - could not check whether Internet Archive is running or holding a task on "
+        f"{WITHDRAWN_ITEM} (tasks query refused); nothing was deleted - run sync-metadata again later"
+    ) in capsys.readouterr().out.splitlines()
+    assert client.grid[1][9] == ""
+
+
+def test_a_withdraw_checks_ias_tasks_after_the_sheet_reread(tmp_path, monkeypatch):
+    """A row changed back to no is refused by the re-read first; IA is never asked."""
+    from ia_bulk import cmd_sync_metadata
+
+    def untick(grid, read_count):
+        if read_count == 2:
+            grid[1][8] = "no"
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls, before_read=untick
+    )
+    asked = []
+    monkeypatch.setattr(
+        "ia_bulk.item_task_state", lambda identifier: asked.append(identifier) or TaskState()
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == []
+    assert asked == []
 
 
 def test_sync_withdraws_a_row_marked_withdrawn(tmp_path, monkeypatch, capsys):
@@ -10664,7 +10916,7 @@ def test_rechecks_are_logged_clear_or_clearing(tmp_path, monkeypatch):
 
     registry_path, _ = _setup_withdraw_sync(
         tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
-        recheck_result=ClearCheck(pending_tasks=1),
+        recheck_result=ClearCheck(tasks=TaskState(queued=("archive.php",))),
     )
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
@@ -10678,6 +10930,42 @@ def test_rechecks_are_logged_clear_or_clearing(tmp_path, monkeypatch):
     }]
     assert summary["clear"] == []
     assert summary["recheck_failures"] == []
+
+
+@pytest.mark.parametrize(
+    ("tasks", "reason"),
+    [
+        (
+            TaskState(running=("derive.php",)),
+            f"Internet Archive is running a task on {WITHDRAWN_ITEM} (derive.php); "
+            "nothing was deleted - run sync-metadata again later",
+        ),
+        (
+            TaskState(paused=("archive.php",)),
+            f"Internet Archive has paused 1 task(s) on {WITHDRAWN_ITEM}; IA staff must "
+            "release them - nothing was deleted",
+        ),
+    ],
+)
+def test_a_recheck_of_a_busy_item_is_still_clearing_and_says_why(
+    tmp_path, monkeypatch, capsys, tasks, reason
+):
+    from ia_bulk import ClearCheck, cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
+        recheck_result=ClearCheck(tasks=tasks),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 0
+    assert f"    - {reason}" in lines
+    assert "1 withdrawn item still clearing: lcps-astoriaphotos-00001" in lines
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["clearing"] == [{"identifier": "lcps-astoriaphotos-00001", "detail": reason}]
+    assert summary["clear"] == []
 
 
 def test_a_refused_recheck_delete_is_a_failure_and_still_clearing(tmp_path, monkeypatch, capsys):
@@ -10720,7 +11008,7 @@ def test_only_a_still_clearing_recheck_is_mirrored_to_the_log_tab(
     registry = make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
     registry_path, client = _setup_withdraw_sync(
         tmp_path, monkeypatch, [_stamped_withdrawn_row()], [], registry=registry,
-        recheck_result=ClearCheck(pending_tasks=pending),
+        recheck_result=ClearCheck(tasks=TaskState(queued=("archive.php",) * pending)),
     )
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
@@ -10860,7 +11148,7 @@ def test_a_restore_while_the_withdrawals_deletes_are_queued_uploads_nothing(
     calls = []
     registry_path, client = _setup_withdraw_sync(
         tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
-        calls, pending_tasks=3,
+        calls, tasks=TaskState(queued=("archive.php",) * 3),
     )
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
@@ -10873,6 +11161,46 @@ def test_a_restore_while_the_withdrawals_deletes_are_queued_uploads_nothing(
     assert client.grid[1][9] == RESTORED_STAMP
 
 
+def test_a_restore_while_ia_holds_a_paused_task_names_ia_staff(tmp_path, monkeypatch, capsys):
+    """A paused task never clears by itself, so "still processing" would be wrong."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, tasks=TaskState(paused=("archive.php",), queued=("derive.php",)),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert (
+        f"Internet Archive has paused 1 task(s) on {WITHDRAWN_ITEM}; IA staff must release them "
+        "- nothing was uploaded"
+    ) in out
+    assert "still processing" not in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_restore_while_ia_runs_a_task_says_what_it_is_waiting_for(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, tasks=TaskState(running=("archive.php",), queued=("derive.php",)),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    assert calls == []
+    assert (
+        "still processing this item's withdrawal (1 task(s) running, 1 task(s) queued)"
+        in capsys.readouterr().out
+    )
+
+
 def test_a_restore_that_cannot_ask_about_queued_tasks_uploads_nothing(
     tmp_path, monkeypatch, capsys
 ):
@@ -10881,7 +11209,7 @@ def test_a_restore_that_cannot_ask_about_queued_tasks_uploads_nothing(
     calls = []
     registry_path, client = _setup_withdraw_sync(
         tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
-        calls, fail={"pending_query"},
+        calls, fail={"task_query"},
     )
 
     exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
@@ -10900,11 +11228,11 @@ def test_a_refused_restore_goes_through_once_the_queue_is_empty(tmp_path, monkey
     calls = []
     registry_path, client = _setup_withdraw_sync(
         tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
-        calls, pending_tasks=1,
+        calls, tasks=TaskState(queued=("archive.php",)),
     )
     assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
 
-    monkeypatch.setattr("ia_bulk.pending_task_count", lambda identifier: 0)
+    monkeypatch.setattr("ia_bulk.item_task_state", lambda identifier: TaskState())
 
     assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
     assert [call[0] for call in calls] == ["upload", "metadata"]
@@ -11051,12 +11379,14 @@ def test_sync_dry_run_says_how_a_real_withdraw_deletes(tmp_path, monkeypatch, ca
     lines = capsys.readouterr().out.splitlines()
 
     preview = lines.index(f"  row 2: {WITHDRAWN_ITEM} - would WITHDRAW")
-    assert lines[preview + 1:preview + 4] == [
+    assert lines[preview + 1:preview + 5] == [
         "      would delete 2 files, with their derivatives: photo1.jpg, __ia_thumb.jpg",
         "      in that order: content files first, __ia_thumb.jpg last (kept while a content "
         "delete is refused)",
         "      a real run re-reads the Sheet just before deleting, and deletes only if this row "
         "still says withdrawn = yes",
+        "      it then checks Internet Archive is not running or holding a paused task on the "
+        "item, and deletes nothing while it is",
     ]
 
 
@@ -11200,13 +11530,18 @@ def test_sync_dry_run_previews_a_recheck_and_deletes_nothing(tmp_path, monkeypat
     assert calls == []
     assert client.write_count == 0
     assert "re-checking 2 withdrawn items (deletes only; the text is not touched):" in lines
-    assert (
+    held = lines.index(
         f"  row 2: {WITHDRAWN_ITEM} - still holds files; would delete again, in this order: "
         "photo1.jpg, __ia_thumb.jpg"
-    ) in lines
+    )
+    assert lines[held + 1] == (
+        "      a real run first checks Internet Archive is not running or holding a paused task "
+        "on the item, and deletes nothing while it is"
+    )
     assert (
         f"  row 3: {second} - holds only Internet Archive's own files; a real run asks "
-        "Internet Archive whether anything is still queued before reporting it clear"
+        "Internet Archive whether anything is still queued, running or paused before reporting "
+        "it clear"
     ) in lines
 
 
