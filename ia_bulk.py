@@ -1712,14 +1712,29 @@ def pending_task_count(identifier: str) -> int:
     return len(tasks)
 
 
+def _delete_what_is_left(identifier: str) -> DeletePass | None:
+    """A withdraw's deletes over a fresh listing; None when only IA's system files are left.
+    Raises when the item cannot be read or IA has no such item."""
+    item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    if not item.exists:
+        raise RuntimeError(f"Internet Archive has no item '{identifier}'")
+    files = list(item.get_files())
+    if not deletable_files(identifier, [file.name for file in files]):
+        return None
+    return _delete_in_order(identifier, files)
+
+
 def recheck_withdrawn_item(identifier: str) -> ClearCheck:
     """Deletes whatever IA rebuilt or has not removed yet, in a withdraw's order; asks about
     queued tasks only once no file is left. Raises when the item cannot be read."""
-    item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
-    files = list(item.get_files())
-    if deletable_files(identifier, [file.name for file in files]):
-        return ClearCheck(deletes=_delete_in_order(identifier, files))
-    return ClearCheck(pending_tasks=pending_task_count(identifier))
+    deletes = _delete_what_is_left(identifier)
+    if deletes is not None:
+        return ClearCheck(deletes=deletes)
+    pending = pending_task_count(identifier)
+    if pending:
+        return ClearCheck(pending_tasks=pending)
+    # A derive that finished between the listing and the task query may have added a photo file.
+    return ClearCheck(deletes=_delete_what_is_left(identifier) or DeletePass())
 
 
 def build_sheets_service(key_path: Path):

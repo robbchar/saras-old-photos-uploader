@@ -2969,8 +2969,9 @@ class _FakeIAFile:
 
 
 class _FakeIAItem:
-    def __init__(self, files):
+    def __init__(self, files, exists=True):
         self._files = files
+        self.exists = exists
 
     def get_files(self):
         return iter(self._files)
@@ -3130,6 +3131,41 @@ def test_recheck_raises_when_the_item_cannot_be_read(monkeypatch):
     monkeypatch.setattr(internetarchive, "get_item", unreachable)
 
     with pytest.raises(requests.exceptions.ConnectionError):
+        recheck_withdrawn_item("item")
+
+
+def test_recheck_lists_again_after_no_tasks_and_deletes_what_a_derive_added(monkeypatch):
+    """A derive that finished between the listing and the task query leaves a photo file behind."""
+    from ia_bulk import recheck_withdrawn_item
+
+    deletes = []
+    listings = iter([
+        [_FakeIAFile("item_meta.xml", deletes)],
+        [_FakeIAFile("item_meta.xml", deletes), _FakeIAFile("x_thumb.jpg", deletes)],
+    ])
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem(next(listings))
+    )
+    monkeypatch.setattr(internetarchive, "get_tasks", lambda **kwargs: set())
+
+    check = recheck_withdrawn_item("item")
+
+    assert check.clear is False
+    assert check.deletes.deleted == ("x_thumb.jpg",)
+    assert deletes == [("x_thumb.jpg", True, NO_BACKUP)]
+
+
+def test_recheck_of_an_item_ia_does_not_have_is_never_clear(monkeypatch):
+    from ia_bulk import recheck_withdrawn_item
+
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
+    )
+    monkeypatch.setattr(
+        internetarchive, "get_tasks", lambda **kwargs: pytest.fail("asked about a missing item's tasks")
+    )
+
+    with pytest.raises(RuntimeError, match="^Internet Archive has no item 'item'$"):
         recheck_withdrawn_item("item")
 
 
@@ -10066,7 +10102,7 @@ def _setup_withdraw_sync(
     return registry_path, client
 
 
-WITHDRAWN_ITEM =f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
+WITHDRAWN_ITEM = f"zztest-{SYNC_STAMP}-lcps-astoriaphotos-00001"
 
 
 def test_sync_withdraws_a_row_marked_withdrawn(tmp_path, monkeypatch, capsys):
@@ -10487,6 +10523,36 @@ def test_rechecks_are_logged_clear_or_clearing(tmp_path, monkeypatch):
     }]
     assert summary["clear"] == []
     assert summary["recheck_failures"] == []
+
+
+def test_a_refused_recheck_delete_is_a_failure_and_still_clearing(tmp_path, monkeypatch, capsys):
+    from ia_bulk import ClearCheck, DeletePass, cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_stamped_withdrawn_row()], [],
+        recheck_result=ClearCheck(
+            deletes=DeletePass(refused=("photo1_thumb.jpg: 403",), skipped=("__ia_thumb.jpg",))
+        ),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    lines = capsys.readouterr().out.splitlines()
+
+    assert exit_code == 1
+    assert "0 item(s) updated successfully, 0 unchanged, 1 error(s)" in lines
+    assert "1 withdrawn item still clearing: lcps-astoriaphotos-00001" in lines
+    rows = [entry for entry in _all_sync_log_lines(tmp_path) if "record" not in entry]
+    assert [(entry["status"], entry["error"]) for entry in rows] == [("clearing", None)]
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["recheck_failures"] == [{
+        "identifier": "lcps-astoriaphotos-00001",
+        "error": "Internet Archive refused to delete photo1_thumb.jpg: 403",
+    }]
+    assert summary["clearing"] == [{
+        "identifier": "lcps-astoriaphotos-00001",
+        "detail": "Internet Archive refused a delete; see the failure",
+    }]
+    assert summary["failures"] == []
 
 
 @pytest.mark.parametrize(("pending", "mirrored"), [(0, False), (1, True)])
