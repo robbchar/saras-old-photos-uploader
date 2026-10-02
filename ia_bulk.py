@@ -77,7 +77,13 @@ from sync_state import (
     withdrawn_updates,
 )
 from utc_time import UTC_TIMESTAMP_FORMAT, utc_now
-from withdrawal import SyncAction, WithdrawnValue, read_withdrawn_cell, sync_action
+from withdrawal import (
+    BULK_WITHDRAW_LIMIT,
+    SyncAction,
+    WithdrawnValue,
+    read_withdrawn_cell,
+    sync_action,
+)
 
 # Shared by build_deployment_checks and cmd_setup - one computed root, not two.
 REPO_ROOT = Path(__file__).resolve().parent
@@ -1683,9 +1689,11 @@ def _delete_in_order(identifier: str, files: list[internetarchive.File]) -> Dele
 
 
 def delete_item_files(identifier: str) -> DeletePass:
-    """A withdraw's deletes over the item's current file list. Raises only when that list
-    cannot be read, in which case nothing was deleted."""
+    """A withdraw's deletes over the item's current file list. Raises when that list cannot be
+    read or IA has no such item; either way nothing was deleted."""
     item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    if not item.exists:
+        raise RuntimeError(f"Internet Archive has no item '{identifier}'")
     return _delete_in_order(identifier, list(item.get_files()))
 
 
@@ -5670,6 +5678,26 @@ def restore_metadata(target: SyncTarget) -> dict[str, str]:
     return restored
 
 
+def withdrawal_refusal(to_push: list[SyncTarget]) -> str | None:
+    """Why this run would move too many items' files at once, or None; both directions count."""
+    withdrawing = [target.row_number for target in to_push if target.action is SyncAction.WITHDRAW]
+    restoring = [target.row_number for target in to_push if target.action is SyncAction.RESTORE]
+    if len(withdrawing) + len(restoring) <= BULK_WITHDRAW_LIMIT:
+        return None
+    named = []
+    if withdrawing:
+        named.append(f"withdraw {format_row_numbers(withdrawing)}")
+    if restoring:
+        named.append(f"restore {format_row_numbers(restoring)}")
+    return (
+        f"refusing to run: this run would withdraw {len(withdrawing):,} and restore "
+        f"{len(restoring):,} items, more than the {BULK_WITHDRAW_LIMIT} one run may change "
+        f"without --allow-bulk-withdraw ({'; '.join(named)}). A fill-down or a paste over the "
+        f"'{WITHDRAWN_COLUMN}' column does this by accident; check those rows, and if every one "
+        "is meant, run again with --allow-bulk-withdraw. Nothing was sent."
+    )
+
+
 SYNC_PROGRESS_VERBS = {
     SyncAction.UPDATE: "updating metadata for",
     SyncAction.WITHDRAW: "withdrawing",
@@ -6188,8 +6216,20 @@ def sync_from_sheet(args) -> int:
         print("nothing to sync - no row is marked uploaded yet")
         return 0
 
+    # A dry run sends nothing, so it still previews, then names the refusal.
+    bulk_refusal = (
+        None if getattr(args, "allow_bulk_withdraw", False) else withdrawal_refusal(to_push)
+    )
+    if bulk_refusal and not dry_run:
+        print(bulk_refusal, file=sys.stderr)
+        return 1
+
     if dry_run:
-        return print_sync_dry_run(to_push, already_synced, problems, rechecking=rechecking)
+        exit_code = print_sync_dry_run(to_push, already_synced, problems, rechecking=rechecking)
+        if bulk_refusal:
+            print(f"\n--dry-run: a real run would be refused now:\n{bulk_refusal}", file=sys.stderr)
+            return 1
+        return exit_code
 
     # From here every path is a real run - even the one that sends nothing -
     # so every path gets a log. A dry run above never reaches this line and
@@ -6882,6 +6922,14 @@ def build_parser() -> argparse.ArgumentParser:
             f"Rows per push/stamp batch (must be positive; default "
             f"{CHUNK_SIZE}). Each batch costs one Sheets write, and a run interrupted "
             "mid-way keeps every chunk it finished."
+        ),
+    )
+    sync_parser.add_argument(
+        "--allow-bulk-withdraw",
+        action="store_true",
+        help=(
+            f"Let one run withdraw or restore more than {BULK_WITHDRAW_LIMIT} items. Without it "
+            "such a run is refused, since a fill-down over the withdrawn column looks just like it."
         ),
     )
 

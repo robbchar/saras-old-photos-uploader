@@ -15888,3 +15888,171 @@ def test_main_dispatches_to_cmd_serve(monkeypatch):
     monkeypatch.setattr(ia_bulk, "cmd_serve", lambda args: called.append(args.command) or 0)
     assert ia_bulk.main(["serve", "--project", "demo"]) == 0
     assert called == ["serve"]
+
+
+def _bulk_rows(withdrawing, restoring=0):
+    rows = [_withdraw_row(n, withdrawn="yes") for n in range(1, withdrawing + 1)]
+    rows += [
+        _withdraw_row(n, withdrawn="no", ia_withdrawn=RESTORED_STAMP)
+        for n in range(withdrawing + 1, withdrawing + restoring + 1)
+    ]
+    return rows
+
+
+BULK_FILES = tuple(f"photo{n}.jpg" for n in range(1, 13))
+
+
+def test_ten_withdrawals_in_one_run_go_through(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(10), calls, files=BULK_FILES
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 10
+
+
+def test_eleven_withdrawals_refuse_the_run_and_name_the_rows(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == []
+    assert client.write_count == 0
+    assert "would withdraw 11 and restore 0 items" in err
+    assert "(withdraw rows 2-12)" in err
+    assert "--allow-bulk-withdraw" in err
+
+
+def test_withdraws_and_restores_count_together(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(6, restoring=5), calls, files=BULK_FILES
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == []
+    assert "(withdraw rows 2-7; restore rows 8-12)" in err
+
+
+def test_the_flag_lets_a_bulk_withdraw_through(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES
+    )
+
+    exit_code = cmd_sync_metadata(
+        _sync_sheet_args(tmp_path, registry_path, allow_bulk_withdraw=True)
+    )
+
+    assert exit_code == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 11
+
+
+def test_an_already_withdrawn_row_does_not_count_toward_the_limit(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    rows = _bulk_rows(10) + [_withdraw_row(11, withdrawn="yes", ia_withdrawn=RESTORED_STAMP)]
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, rows, calls, files=BULK_FILES)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 10
+
+
+def test_rechecks_do_not_count_toward_the_limit(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    rows = _bulk_rows(10) + [_stamped_withdrawn_row(n) for n in (11, 12, 13)]
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, rows, calls, files=BULK_FILES)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert sum(1 for call in calls if call[0] == "delete") == 10
+    assert sum(1 for call in calls if call[0] == "recheck") == 3
+
+
+def test_the_dry_run_shows_the_same_refusal(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: [])
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert calls == []
+    assert "would WITHDRAW" in captured.out
+    assert "--dry-run: a real run would be refused now:" in captured.err
+    assert "would withdraw 11 and restore 0 items" in captured.err
+
+
+def test_sync_parser_takes_allow_bulk_withdraw():
+    parser = build_parser()
+
+    assert parser.parse_args(["sync-metadata", "--project", "p"]).allow_bulk_withdraw is False
+    assert parser.parse_args(
+        ["sync-metadata", "--project", "p", "--allow-bulk-withdraw"]
+    ).allow_bulk_withdraw is True
+
+
+def test_delete_item_files_fails_for_an_item_ia_does_not_have(monkeypatch):
+    from ia_bulk import delete_item_files
+
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
+    )
+
+    with pytest.raises(RuntimeError, match="^Internet Archive has no item 'item'$"):
+        delete_item_files("item")
+
+
+def test_a_live_withdraw_of_an_item_ia_does_not_have_starts_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata, delete_item_files
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls
+    )
+    monkeypatch.setattr("ia_bulk.delete_item_files", delete_item_files)
+    monkeypatch.setattr(
+        internetarchive, "get_item", lambda identifier, **kwargs: _FakeIAItem([], exists=False)
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert [call for call in calls if call[0] == "metadata"] == []
+    assert client.grid[1][9] == ""
+    assert client.grid[1][6] == ""
+    assert "Internet Archive has no item 'lcps-astoriaphotos-00001'" in out
+    assert "withdrawal started" not in out
+    assert "Ask them to darken" not in out
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["withdrawn"] == []
+    assert len(summary["failures"]) == 1
+    assert "no item" in summary["failures"][0]["error"]
