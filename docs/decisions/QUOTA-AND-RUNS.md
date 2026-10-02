@@ -379,13 +379,15 @@ logged as an ordinary failure and picked up by the next run — re-running is
 already the supported recovery, and a failed attempt never burns an
 identifier.
 
-**Retrying is safe for both wrapped calls.** `upload_row()` passes
-`checksum=True`, so Internet Archive skips a file whose MD5 already matches
-the item's: a retry after a timeout that had in fact landed re-sends nothing
-and creates no duplicate. A metadata update is a full statement of the fields
-to set, not an increment, so applying it twice lands where applying it once
-does. In neither case can a retry mint a second identifier — the target is
-chosen before the retried function is reached.
+**Retrying is safe for both wrapped calls.** Every upload attempt PUTs the
+same key to the same identifier, so a retry after a timeout that had in fact
+landed re-sends the file but creates no duplicate. (`checksum=True` skips the
+send only once the item lists the file at a matching MD5 and has no pending
+tasks, which is rarely true within a retry's few seconds.) A metadata update
+is a full statement of the fields to set, not an increment, so applying it
+twice lands where applying it once does. In neither case can a retry mint a
+second identifier — the target is chosen before the retried function is
+reached.
 
 The final attempt's exception is re-raised **unchanged**, not wrapped: every
 caller's `except Exception` branch logs `str(exc)` and hands the object to
