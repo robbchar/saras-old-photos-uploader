@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import copy
 import dataclasses
 import importlib.metadata
 import io
@@ -17,6 +18,7 @@ import internetarchive
 import internetarchive.session
 import pytest
 import requests
+import tqdm
 import urllib3
 from requests.adapters import HTTPAdapter
 from googleapiclient.errors import HttpError
@@ -7232,6 +7234,13 @@ class CannedMetadataAdapter(HTTPAdapter):
         return _canned(request, 200, json.dumps(ITEM_METADATA_DOCUMENT).encode(), "application/json")
 
 
+def _read_whole_body(body):
+    """Drains the body to EOF."""
+    if not hasattr(body, "read"):
+        return body
+    return b"".join(iter(body.read, b""))
+
+
 class FaultInjectingS3Adapter(HTTPAdapter):
     """s3.us.archive.org answers whatever failure the test asks for, and
     counts the attempts so a test can prove a retry did or did not happen."""
@@ -7240,11 +7249,17 @@ class FaultInjectingS3Adapter(HTTPAdapter):
         super().__init__()
         self.fault = fault
         self.calls = []
+        self.bodies = []
 
     def send(self, request, *args, **kwargs):
         self.calls.append(request.url)
+        # A connection failure is modeled as failing before the body is sent; every other
+        # fault follows a full send, which also runs the library's progress bar to its end.
+        if not isinstance(self.fault, requests.exceptions.ConnectionError):
+            self.bodies.append(_read_whole_body(request.body))
         if isinstance(self.fault, Exception):
-            raise self.fault
+            # A fresh copy per attempt, as a real transport raises; reuse would chain every attempt's frames.
+            raise copy.copy(self.fault)
         status_code, body = self.fault
         return _canned(request, status_code, body, "text/xml")
 
@@ -7304,6 +7319,7 @@ def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tm
 
     assert len(s3.calls) == 1
     assert any("s3.us.archive.org" in url for url in s3.calls)
+    assert s3.bodies == [b"pretend-jpeg-bytes"]
 
 
 def test_upload_row_reads_a_real_s3_slowdown_as_a_rate_limit(tmp_path, monkeypatch):
@@ -7338,6 +7354,33 @@ def test_upload_row_retries_a_real_s3_read_timeout(tmp_path, monkeypatch):
         run_upload_row(tmp_path)
 
     assert len(s3.calls) == RETRY_ATTEMPTS
+    assert s3.bodies == [b"pretend-jpeg-bytes"] * RETRY_ATTEMPTS
+
+
+def test_upload_row_closes_the_bar_a_connection_failure_leaves_open(tmp_path, monkeypatch):
+    """A send that never connects leaves the library's bar unread and open; it
+    must close before the retry line prints, or the two share a line."""
+    from ia_bulk import RETRY_ATTEMPTS
+
+    s3 = upload_row_against_s3_fault(
+        requests.exceptions.ConnectTimeout("connect timeout=12"), tmp_path, monkeypatch
+    )
+    # One stream for both, as the upload page reads a run.
+    output = io.StringIO()
+    monkeypatch.setattr("sys.stdout", output)
+    monkeypatch.setattr("sys.stderr", output)
+
+    with pytest.raises(requests.exceptions.ConnectTimeout):
+        run_upload_row(tmp_path)
+
+    assert len(s3.calls) == RETRY_ATTEMPTS
+    assert s3.bodies == []
+    assert " uploading photo1.jpg" in output.getvalue()
+    retry_lines =[line for line in output.getvalue().splitlines() if "attempt" in line]
+    assert len(retry_lines) == RETRY_ATTEMPTS - 1
+    assert all(line.startswith("    - upload of") for line in retry_lines)
+    # tqdm's registry of open bars, untyped in its stubs; empty means none repaints later.
+    assert not getattr(tqdm.tqdm, "_instances")
 
 
 def test_upload_row_retries_a_real_s3_500(tmp_path, monkeypatch):

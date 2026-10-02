@@ -304,7 +304,9 @@ before the final `log written to <path>` line, so a run is never silently
 quiet. `upload_row` also passes `verbose=True` through to
 `internetarchive.upload()`, which prints its own `tqdm` byte-progress bar
 per file — that's IA's own upload status, not something this tool
-fabricates. It also passes `checksum=True`, so re-running `upload` over
+fabricates. An attempt that fails before its file is fully sent (a
+connection error, say) leaves that bar open; `upload_row` closes it so the retry line
+starts on a line of its own. It also passes `checksum=True`, so re-running `upload` over
 rows whose files haven't changed skips re-uploading (and re-triggering
 IA's `derive` task) for anything already present with a matching MD5.
 
