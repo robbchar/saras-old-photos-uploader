@@ -306,9 +306,15 @@ quiet. `upload_row` also passes `verbose=True` through to
 per file — that's IA's own upload status, not something this tool
 fabricates. An attempt that fails before its file is fully sent (a
 connection error, say) leaves that bar open; `upload_row` closes it so the retry line
-starts on a line of its own. It also passes `checksum=True`, so re-running `upload` over
-rows whose files haven't changed skips re-uploading (and re-triggering
-IA's `derive` task) for anything already present with a matching MD5.
+starts on a line of its own. It also passes `checksum=True`. `upload` never revisits
+a DONE row, so the skip matters for a reserved row that a later `--live` run
+resumes after its earlier upload landed (a rehearsal stamps a fresh item every
+run, so it never meets this): once the item lists the file at a matching MD5
+and has no pending tasks, the file is not re-sent. That row prints an
+`already on Internet Archive` note and logs `"already_on_ia": true`; its
+Sheet metadata was not re-sent either, so `sync-metadata` is what pushes it.
+A retry seconds after a landed upload usually re-sends the file, because the
+item has not settled yet.
 
 ## Correcting an uploaded item
 
@@ -599,7 +605,9 @@ identifier actually sent to IA for that row (see "Safety rail" below), so
 you can see exactly what landed on the site. `live` records which mode
 (test vs. `--live`) produced that row's result. `http_status` is the status
 `parsed_status_code()` found on a `failure` (never read from the message), and
-`null` on every other record or when the failure carried none.
+`null` on every other record or when the failure carried none. A `success`
+whose file IA already held, so it was not re-sent, also carries
+`"already_on_ia": true` (see "Progress output").
 
 A rerun resumes by itself: `ia_uploaded` is the record of what is done, so
 done rows are skipped and a reserved row is retried under its existing

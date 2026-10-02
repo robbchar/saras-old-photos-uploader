@@ -17,7 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar
+from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar, cast
 
 import googleapiclient.discovery
 import internetarchive
@@ -1063,6 +1063,7 @@ def log_result(
     error: str | None = None,
     uploaded_as: str | None = None,
     http_status: int | None = None,
+    already_on_ia: bool = False,
 ) -> None:
     entry = {
         "identifier": identifier,
@@ -1075,6 +1076,9 @@ def log_result(
         "live": live,
         "timestamp": utc_timestamp(),
     }
+    if already_on_ia:
+        # A checksum skip: IA already held the file, so neither it nor its metadata was re-sent.
+        entry["already_on_ia"] = True
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 
@@ -1459,7 +1463,8 @@ def close_open_progress_bars() -> None:
             bar.close()
 
 
-def upload_row(row: dict, target_identifier: str, collection: str, files_dir: str | Path) -> None:
+def upload_row(row: dict, target_identifier: str, collection: str, files_dir: str | Path) -> bool:
+    """Returns True when Internet Archive already held the file at this MD5, so it was not re-sent."""
     file_name = (row.get("file") or "").strip()
     if not file_name:
         # Defence in depth against the single most damaging outcome in this
@@ -1485,17 +1490,22 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
     metadata["date"] = (row.get("date") or "").strip() or UNDATED_PLACEHOLDER
     metadata["collection"] = collection
 
-    def send() -> None:
+    def send() -> bool:
         """The retried unit. It covers the not-ok-Response check as well as
-        the call, so a 500 that arrives as a Response is retried on the same
-        terms as one that arrives as an exception.
+        the call, though the pinned library raises HTTPError for a refused
+        PUT itself, so that check is a backstop rather than the live path.
 
-        Repeating the transfer is safe because `checksum=True` makes
-        Internet Archive skip a file whose MD5 already matches the item's -
-        so a retry after a timeout that had in fact landed re-sends nothing
-        and creates no duplicate. Nor can a retry burn an identifier: the
-        target identifier is chosen before this function is reached and is
-        the same on every attempt."""
+        Repeating the transfer is safe because every attempt PUTs the same
+        key to the same identifier: a retry after a timeout that had in fact
+        landed re-sends the file but creates no duplicate. `checksum=True`
+        skips the send only once the item lists the file at this MD5 and has
+        no pending tasks - rarely true seconds after a PUT, but true for a
+        reserved row whose earlier upload landed and settled, resumed by a
+        later --live run. Nor can a retry burn an identifier: the target
+        identifier is chosen before this function is reached and is the same
+        on every attempt.
+
+        Returns True when the library skipped the file, so this attempt sent nothing."""
         try:
             responses = internetarchive.upload(
                 target_identifier,
@@ -1509,6 +1519,7 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
             # Before the retry line prints, so the two never share a line.
             close_open_progress_bars()
             raise
+        already_on_ia = False
         for response in responses:
             # internetarchive.upload() is typed to return Request | Response;
             # a Request is only ever returned when debug=True, which we never
@@ -1519,17 +1530,26 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
                     f"upload of '{target_identifier}' returned an unprepared Request instead of "
                     "a Response - this should be unreachable since debug is never passed"
                 )
-            # checksum=True skips a file IA already holds at this MD5 and answers
-            # a bare Response() with no status, whose .ok raises TypeError.
-            if response.status_code is None:
+            # requests types status_code as int, but the checksum skip answers a
+            # bare Response() whose status is None and whose .ok raises TypeError.
+            status_code = cast("int | None", response.status_code)
+            if status_code is None:
+                # Only that bare Response() lacks a request; any other status-less one fails closed.
+                if cast("requests.PreparedRequest | None", response.request) is not None:
+                    raise RuntimeError(
+                        f"upload of '{target_identifier}' returned a Response with no status "
+                        "that is not internetarchive's checksum skip"
+                    )
+                already_on_ia = True
                 continue
             if not response.ok:
                 raise UploadFailed(
                     f"upload of '{target_identifier}' failed with status {response.status_code}: {response.text}",
                     status_code=response.status_code,
                 )
+        return already_on_ia
 
-    retry_ia_call(send, f"upload of '{target_identifier}'")
+    return retry_ia_call(send, f"upload of '{target_identifier}'")
 
 
 class MetadataUnchanged(Exception):
@@ -3739,7 +3759,7 @@ class SheetUploadRun:
                 print(f"[{position}/{total}] uploading {target.uploaded_as} ({target.row['file']})")
                 self._log_start(target, position)
                 try:
-                    upload_row(
+                    already_on_ia = upload_row(
                         sheet_upload_metadata(target, self.uploadable, self.mediatype),
                         target.uploaded_as,
                         self.collection,
@@ -3757,7 +3777,13 @@ class SheetUploadRun:
                         break
                     continue
                 tally["success"] += 1
-                self._log(target, "success")
+                if already_on_ia:
+                    # The file was not re-sent, so neither was this row's Sheet metadata.
+                    print(
+                        "    - already on Internet Archive at this MD5, so it was not re-sent; "
+                        "run sync-metadata to push this row's metadata"
+                    )
+                self._log(target, "success", already_on_ia=already_on_ia)
                 succeeded.append(target)
 
             if self.write_back and succeeded:
@@ -3893,6 +3919,7 @@ class SheetUploadRun:
         status: str,
         error: str | None = None,
         http_status: int | None = None,
+        already_on_ia: bool = False,
     ) -> None:
         log_result(
             self.log_path,
@@ -3903,6 +3930,7 @@ class SheetUploadRun:
             error=error,
             uploaded_as=target.uploaded_as,
             http_status=http_status,
+            already_on_ia=already_on_ia,
         )
 
     def _log_start(self, target: UploadTarget, index: int) -> None:
@@ -4783,6 +4811,9 @@ class UploadSummary:
 
     Upload keeps its own vocabulary rather than borrowing sync's: there is no
     `unchanged` here, because an upload either created the item or did not.
+    A checksum skip - the file already on the item from an earlier, never
+    confirmed attempt - counts as succeeded; its per-row log record carries
+    `already_on_ia`.
 
     The ways a row can miss are kept apart, because months later they are
     three different phone calls:

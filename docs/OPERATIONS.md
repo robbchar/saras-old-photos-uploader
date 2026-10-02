@@ -768,16 +768,26 @@ dropped connection. `unconfirmed` means the item
 reached Internet Archive but the Sheet could not be updated, because the row
 no longer held the identifier the run reserved — someone edited the Sheet
 mid-run. Rerun once it has settled; the row is picked up as reserved-but-
-unconfirmed and retried under the same identifier.
+unconfirmed and retried under the same identifier. A `success` record also
+carries `"already_on_ia": true` when Internet Archive already held the file,
+so it was not re-sent (see below); an ordinary success has no such key.
 
 To pick up after failures, rerun the same command. `ia_uploaded` is the
 record of what is done, so a rerun resumes by itself: done rows are skipped,
 and a reserved row is retried under its existing identifier. The log is an
 audit record only; the tool never reads it back.
 
-Re-uploading is also cheap on its own: `upload_row` passes `checksum=True`, so
-a file already present with a matching MD5 is skipped rather than re-uploaded
-and re-derived.
+On a `--live` run, a resumed reserved row can also cost nothing: `upload_row`
+passes `checksum=True`, so if that row's earlier upload landed and the item
+has settled (it lists the file at a matching MD5 and has no pending tasks),
+the file is skipped rather than re-sent. The row prints
+`already on Internet Archive at this MD5, so it was not re-sent` and its log
+record carries `"already_on_ia": true`. Its metadata was not re-sent either,
+so run `sync-metadata` afterwards to push the Sheet's fields; collection and
+mediatype stay as the earlier upload set them. An item that has not settled
+yet, such as one uploaded moments before, gets the file re-sent under the
+same key, which creates no duplicate. A rehearsal never meets the skip,
+because every test run stamps a fresh `zztest-` item.
 
 ### Transient network failures are expected, and mostly absorbed
 
