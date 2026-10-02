@@ -4594,21 +4594,30 @@ def collection_refusal(
     )
 
 
-def confirm_collection_on_archive_org(
+def collection_check_refusal(
     project: str, collection: str, wording: CollectionCheckWording = UPLOAD_COLLECTION_WORDING
-) -> bool:
-    """Prints the outcome; False means the live run stops here."""
+) -> str | None:
+    """Asks archive.org; the refusal to print, or None once the collection is confirmed."""
     print(f"asking archive.org whether Internet Archive collection '{collection}' exists...")
     try:
         check = check_ia_collection(collection)
     except KeyboardInterrupt:
         # Before the send loop an interrupt stops at once; one line instead of a traceback.
-        print(f"interrupted while asking archive.org. {wording.interrupted}", file=sys.stderr)
-        return False
+        return f"interrupted while asking archive.org. {wording.interrupted}"
     if not isinstance(check, CollectionConfirmed):
-        print(collection_refusal(check, project, collection, wording), file=sys.stderr)
-        return False
+        return collection_refusal(check, project, collection, wording)
     print(f"Internet Archive collection '{collection}' confirmed on archive.org")
+    return None
+
+
+def confirm_collection_on_archive_org(
+    project: str, collection: str, wording: CollectionCheckWording = UPLOAD_COLLECTION_WORDING
+) -> bool:
+    """Prints the outcome; False means the live run stops here."""
+    refusal = collection_check_refusal(project, collection, wording)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return False
     return True
 
 
@@ -5142,6 +5151,8 @@ class SyncSummary:
     already_synced: int = 0
     # Re-checks of items already withdrawn; their failures count as errors.
     clearance: Clearance = field(default_factory=Clearance)
+    # Why the whole run was refused before anything was sent; None for a run that went ahead.
+    refused: str | None = None
 
     @property
     def pushed(self) -> int:
@@ -5178,6 +5189,7 @@ class SyncSummary:
             "recheck_failures": [failure.as_record() for failure in self.clearance.failures],
             "failures": [failure.as_record() for failure in self.outcome.failures],
             "skipped": [skip.as_record() for skip in self.skipped],
+            "refused": self.refused,
         }
 
 
@@ -6241,6 +6253,22 @@ def sync_header_refusal(
     return None
 
 
+def open_sync_log(
+    log_dir: str | Path, config: ProjectConfig, column_map: ColumnMap, live: bool, dry_run: bool
+) -> Path:
+    """A real sync run's log, its header already written; a failed header write is reported."""
+    log_path = open_log(log_dir, "sync-metadata")
+    try:
+        log_run_header(log_path, config, column_map, live, dry_run)
+    except Exception as exc:
+        print(
+            f"could not write the run-header record to {log_path}: {exc}. Continuing without "
+            "it - this only affects the log's own audit trail.",
+            file=sys.stderr,
+        )
+    return log_path
+
+
 def sync_from_sheet(args) -> int:
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
@@ -6331,16 +6359,33 @@ def sync_from_sheet(args) -> int:
         if getattr(args, "allow_bulk_withdraw", False)
         else withdrawal_refusal(*withdrawal_disagreements(rows, column_map))
     )
-    if bulk_refusal and not dry_run:
-        print(bulk_refusal, file=sys.stderr)
-        return 1
-
+    run_refusal = None if dry_run else bulk_refusal
     # A restore uploads, so a withdraw or restore needs the same confirmed collection as an upload.
-    if live and any(target.action is not SyncAction.UPDATE for target in to_push):
-        if not confirm_collection_on_archive_org(
+    if (
+        run_refusal is None
+        and live
+        and any(target.action is not SyncAction.UPDATE for target in to_push)
+    ):
+        run_refusal = collection_check_refusal(
             config.project_id, config.ia_collection_for(live), SYNC_COLLECTION_WORDING
-        ):
+        )
+    if run_refusal is not None:
+        print(run_refusal, file=sys.stderr)
+        if dry_run:
             return 1
+        # A refused real run is still recorded: the hourly agent's console is read by nobody.
+        log_path = open_sync_log(args.log_dir, config, column_map, live, dry_run)
+        summary = SyncSummary(
+            checked=len(rows),
+            outcome=PushOutcome(),
+            skipped=tuple(skipped_rows(problems)),
+            already_synced=len(already_synced),
+            refused=run_refusal,
+        )
+        record = try_log_run_summary(log_path, summary, live)
+        mirror_run_to_log_tab(sheet.client, config.sync_log_tab, log_path, record, run_refusal)
+        print(f"log written to {log_path}")
+        return 1
 
     if dry_run:
         exit_code = print_sync_dry_run(to_push, already_synced, problems, rechecking=rechecking)
@@ -6352,15 +6397,7 @@ def sync_from_sheet(args) -> int:
     # From here every path is a real run - even the one that sends nothing -
     # so every path gets a log. A dry run above never reaches this line and
     # so still writes none, which is correct: it sent nothing to summarize.
-    log_path = open_log(args.log_dir, "sync-metadata")
-    try:
-        log_run_header(log_path, config, column_map, live, dry_run)
-    except Exception as exc:
-        print(
-            f"could not write the run-header record to {log_path}: {exc}. Continuing without "
-            "it - this only affects the log's own audit trail.",
-            file=sys.stderr,
-        )
+    log_path = open_sync_log(args.log_dir, config, column_map, live, dry_run)
 
     if not to_push and not rechecking:
         # The steady state on an hourly schedule, and the console line must

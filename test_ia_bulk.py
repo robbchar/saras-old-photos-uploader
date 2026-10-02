@@ -16186,6 +16186,73 @@ def test_withdraws_and_restores_count_together(tmp_path, monkeypatch, capsys):
     assert "(withdraw rows 2-7; restore rows 8-12)" in err
 
 
+def _sync_log_tab_registry(tmp_path):
+    return make_sheet_registry(files_dir=str(tmp_path), sync_log_tab="Sync Log")
+
+
+def test_a_bulk_refusal_is_recorded_in_the_log_and_the_log_tab(tmp_path, monkeypatch, capsys):
+    """The hourly agent's refusal is otherwise only on a console nobody reads."""
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), calls, files=BULK_FILES,
+        registry=_sync_log_tab_registry(tmp_path),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+    err = capsys.readouterr().err
+
+    assert calls == []
+    assert client.write_count == 0
+    records = _all_sync_log_lines(tmp_path)
+    assert [record.get("record") for record in records] == ["run_header", "run_summary"]
+    assert records[-1]["refused"].startswith("refusing to run: this run would withdraw 11")
+    assert records[-1]["refused"] in err
+    assert records[-1]["pushed"] == 0
+    tab_rows = client.log_tabs["Sync Log"].appended
+    assert [row[2:] for row in tab_rows] == [["refused", "", records[-1]["refused"]]]
+    assert tab_rows[0][0] == records[-1]["timestamp"]
+
+
+def test_a_live_collection_refusal_is_recorded_in_the_log_and_the_log_tab(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls,
+        collection_check=CollectionUnchecked(reason="ConnectionError", retry_later=True),
+        registry=_sync_log_tab_registry(tmp_path),
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True)) == 1
+    err = capsys.readouterr().err
+
+    assert calls == [("collection_check", "lcpsociety")]
+    assert client.write_count == 0
+    summary = _all_sync_log_lines(tmp_path)[-1]
+    assert summary["refused"].startswith("could not confirm Internet Archive collection 'lcpsociety'")
+    assert summary["refused"] in err
+    assert [row[2] for row in client.log_tabs["Sync Log"].appended] == ["refused"]
+
+
+def test_a_refused_dry_run_writes_no_log_and_no_log_tab_row(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, _bulk_rows(11), [], files=BULK_FILES,
+        registry=_sync_log_tab_registry(tmp_path),
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: [])
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, dry_run=True)) == 1
+    assert not (tmp_path / "logs").exists()
+    assert client.log_tabs == {}
+
+
 def test_rows_refused_for_other_reasons_still_count_toward_the_limit(tmp_path, monkeypatch, capsys):
     """12 disagreeing rows refuse the run even when 3 of them would be refused on their own."""
     from ia_bulk import cmd_sync_metadata

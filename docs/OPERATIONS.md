@@ -856,7 +856,8 @@ python ia_bulk.py sync-metadata --project sarasoldphotos --live --allow-bulk-wit
 ```
 
 The hourly agent never passes that flag, so a bulk change waits for someone at
-the keyboard. Restores re-upload files but are not counted in the 5,000/day
+the keyboard; each refused agent run leaves a `refused` row, naming the rows,
+in the Sync Log tab and a `run_summary` with `refused` in its log. Restores re-upload files but are not counted in the 5,000/day
 total — see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#7-restores-are-not-counted-in-the-daily-upload-total).
 
 ## Pacing and batch limits
@@ -1080,8 +1081,10 @@ anyone through Terminal.
 
 One row per run, then one row per problem. Each row names `when`, the `run`
 (the log file to go and read for per-file detail), the `outcome`
-(`summary`, `failure`, `unconfirmed` or `skipped`), the `identifier`, and the
-`detail`. A clean run is a single row, and a sync run that found everything
+(`summary`, `failure`, `unconfirmed` or `skipped`; a `sync-metadata` run
+refused before sending anything — too many withdraws or restores, or a live
+collection check that failed — is a `refused` row in place of `summary`,
+with the reason as its detail), the `identifier`, and the `detail`. A clean run is a single row, and a sync run that found everything
 already in sync writes nothing at all — the tab stays scannable on purpose.
 
 The tabs are written to and never read from, so nothing there can affect a

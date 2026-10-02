@@ -195,7 +195,10 @@ exactly like a decision to withdraw a whole batch — and the hourly agent
 would carry it out unattended. So a run whose withdraws plus restores exceed
 10 refuses entirely before anything is sent, and names the rows, unless
 `--allow-bulk-withdraw` is passed; the dry run previews the run, shows the
-same refusal and exits 1. Only rows whose `withdrawn` cell and
+same refusal and exits 1. A refused real run still writes its log — a
+`run_summary` whose `refused` says why — and a `refused` row in the
+`sync_log_tab`, because the hourly agent's refusal is otherwise only on a
+console nobody reads; the dry run writes neither, as always. Only rows whose `withdrawn` cell and
 `ia_withdrawn` disagree count — every uploaded one, counted before any
 per-row refusal, so a row refused for another reason (a missing original, an
 `ia_url` that is not its own item) still counts: a paste over the column is
@@ -217,5 +220,5 @@ A live run with any withdraw or restore to send also runs the archive.org
 collection check `upload --live` uses
 ([`FOUNDATIONS.md`, "A live upload goes only into a collection archive.org confirms"](FOUNDATIONS.md#a-live-upload-goes-only-into-a-collection-archiveorg-confirms))
 and refuses the run when archive.org cannot confirm the collection or cannot
-be reached. Re-checks and test-mode runs skip it: a re-check only deletes
+be reached, recorded the same way as a bulk-limit refusal. Re-checks and test-mode runs skip it: a re-check only deletes
 from an item already withdrawn, and test mode targets `test_collection`.

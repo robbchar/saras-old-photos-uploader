@@ -54,7 +54,8 @@ def log_tab_rows(record: dict, run: str, headline: str) -> list[list[str]]:
     each command already renders that line from the same summary object this
     record came from. For an upload that stopped early, that line also names why."""
     when = record.get("timestamp", "")
-    rows = [[when, run, "summary", "", headline]]
+    # A run refused before sending anything says so in the outcome column.
+    rows = [[when, run, "refused" if record.get("refused") else "summary", "", headline]]
     for key, outcome in ACTION_KINDS + PROBLEM_KINDS:
         for entry in record.get(key, ()):
             detail = entry.get("error", entry.get("detail", ""))

@@ -199,3 +199,13 @@ def test_a_sync_names_each_withdrawn_restored_and_clearing_item_but_not_clear_on
         ["clearing", "lcps-sarasoldphotos-00009", "deleted again: __ia_thumb.jpg"],
         ["failure", "lcps-sarasoldphotos-00007", "could not re-check: down"],
     ]
+
+
+def test_a_refused_run_is_one_refused_row_naming_why():
+    record = _upload_record(refused="refusing to run: too many")
+
+    rows = log_tab_rows(record, run="sync-metadata-x.jsonl", headline="refusing to run: too many")
+
+    assert rows == [
+        ["2026-09-17T18:02:11Z", "sync-metadata-x.jsonl", "refused", "", "refusing to run: too many"]
+    ]

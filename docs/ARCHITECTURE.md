@@ -586,8 +586,8 @@ Sheet that could fail to land.
 #### `sync-metadata`
 
 `{… checked, pushed, changed, unchanged, already_synced, withdrawn,
-restored, clearing, clear, recheck_failures, failures, skipped}`. The counts
-mean:
+restored, clearing, clear, recheck_failures, failures, skipped, refused}`.
+The counts mean:
 
 | field | meaning |
 | --- | --- |
@@ -603,6 +603,7 @@ mean:
 | `recheck_failures` | `{identifier, error}` per already-withdrawn item whose re-check failed. Counted in the headline's errors, not in `pushed`. |
 | `failures` | `{identifier, error}` per row IA refused — including a withdrawal that started but did not finish ("withdrawal started on …"), counted here only, and a withdraw or restore refused just before sending. |
 | `skipped` | `{identifier, error}` per row the run declined to send at all. |
+| `refused` | why the whole run was refused before anything was sent — the bulk limit, or a failed live collection check — else `null`. A refused real run still writes its header and this record (every count zero); a refused dry run writes no log. |
 
 #### `upload`
 
@@ -692,7 +693,8 @@ JSONL lives on whichever machine ran the job. `upload` writes
 `upload_log_tab`, `sync-metadata` writes `sync_log_tab`; both are optional
 registry keys, and a command whose key is absent writes no tab at all.
 
-`log_tab.py` renders a record as rows — one `summary` row, then one row per
+`log_tab.py` renders a record as rows — one `summary` row (`refused`, with
+the refusal as its detail, when the record has `refused`), then one row per
 entry in a sync record's `withdrawn`, `restored` and `clearing` lists
 (`ACTION_KINDS`), then one per entry in the record's `failures`,
 `recheck_failures` (as `failure`), `unconfirmed` and `skipped` lists — and
