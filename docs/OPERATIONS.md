@@ -355,8 +355,10 @@ There is no command for this, deliberately — see
 [`docs/DECISIONS.md`](DECISIONS.md), "The rehearsal reset is a hand edit, not
 a command". Do it in the test Sheet only. **Never in the real one**, where
 those four cells are the record that an item exists at all: clearing them
-tells the next run to mint a second identifier for a photograph that is
-already uploaded.
+tells the next run to mint again for a photograph that is already uploaded —
+a second identifier, or, if the row held the Sheet's highest number, that
+same number for whichever photograph is minted first (see
+[`decisions/IDENTIFIERS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet)).
 
 **This is not the `sync-metadata` reset — the two are opposites.**
 `sync-metadata` only targets `DONE` rows, so clearing `ia_identifier` hides a
@@ -1112,8 +1114,10 @@ gives the whole run in one record, without the row lines above it. For
 and `rate_limit_status`.
 Read `unconfirmed`
 first: those files **are** on Internet Archive but were never marked in the
-Sheet. The next run retries them under the same identifiers; clearing their
-`ia_identifier` first would mint second ones.
+Sheet. The next run that includes them retries each under its existing
+identifier. Don't clear their `ia_identifier` first: that mints again for a
+photograph that already has an item (see
+[`decisions/IDENTIFIERS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet)).
 See [`ARCHITECTURE.md`](ARCHITECTURE.md#the-run_summary-record).
 
 Symmetrically, `head -1` of the same log gives its `run_header`, whose

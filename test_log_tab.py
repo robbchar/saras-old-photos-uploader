@@ -164,9 +164,8 @@ def test_mirroring_only_ever_appends(capsys):
 def test_a_failed_mirror_is_reported_and_never_raised(failing_call, capsys):
     """The run is already over and items already exist on Internet Archive
     under permanent identifiers. A Sheets hiccup while writing telemetry must
-    not turn a successful upload into a failed one - a rerun would skip the
-    done rows, but a hand repair that clears a row's ia_identifier mints a
-    second identifier for the same photograph."""
+    not turn a successful upload into a failed one; mirror_run's docstring
+    says why."""
     client = RecordingLogTab(fail_on=failing_call)
 
     mirror_run(client, _upload_record(), run="upload-1.jsonl", headline="a headline")

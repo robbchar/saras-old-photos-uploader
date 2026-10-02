@@ -100,6 +100,16 @@ known list rather than a regex alone. Original filenames and donor folder
 structure are still deliberately not part of the identifier; they belong in
 `identifier-bib`.
 
+Because the maximum is read from the Sheet, a row's `ia_identifier` is the
+only thing that keeps its number spent. A row with `ia_identifier` set and
+`ia_uploaded` blank is retried under that identifier by the next run that
+includes it, never re-minted; a test run still uploads it under a fresh
+`zztest-<stamp>-` name. Clearing `ia_identifier` on a photograph that is
+already on Internet Archive mints again: a fresh number, which is a second
+identifier for that photograph, or, when the cleared number was the Sheet's
+highest, that same number for whichever row is minted first. If that row is
+a different photograph, its upload lands inside the first one's item.
+
 ## Minted numbers are re-checked against the Sheet before reserving
 
 *Decided 2026-08-23.*

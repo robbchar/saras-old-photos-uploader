@@ -16162,11 +16162,12 @@ def test_the_upload_summary_separates_uploaded_but_unrecorded_from_refused(
     tmp_path, monkeypatch, capsys
 ):
     """The distinction the summary exists to preserve, and the one that costs
-    the most to get wrong. A refused send created nothing and left the
-    identifier free; an unconfirmed row IS on Internet Archive but unmarked in
-    the Sheet until a rerun confirms it, and clearing its ia_identifier first
-    mints a second permanent identifier. A flat failure list would flatten the
-    two."""
+    the most to get wrong. A refused send created nothing on Internet Archive;
+    an unconfirmed row IS there but unmarked in the Sheet. A rerun retries
+    both under their reserved identifiers, but clearing an unconfirmed row's
+    ia_identifier mints again for a photograph that already has an item (see
+    docs/decisions/IDENTIFIERS.md, "Identifiers are minted by `upload` and
+    written back to the Sheet"). A flat failure list would flatten the two."""
     from ia_bulk import cmd_upload
 
     grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "", "", "", ""]]
