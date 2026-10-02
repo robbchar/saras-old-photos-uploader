@@ -10758,6 +10758,59 @@ def test_sync_restores_a_row_set_back_to_no(tmp_path, monkeypatch):
     assert client.grid[1][6] == sync_hash(metadata_to_send({"title": "Photo 1"}))
 
 
+UNCLEARED_RESTORE_WARNING = (
+    f"WARNING: the restore of {WITHDRAWN_ITEM} landed but ia_withdrawn was not cleared; let the "
+    "next run finish before setting withdrawn back to yes"
+)
+
+
+def test_a_restore_whose_row_moved_before_its_stamp_warns_by_name(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    def insert_a_row_before_the_stamp(grid, read_count):
+        if read_count == 2:
+            grid.insert(1, _withdraw_row(7, withdrawn=""))
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], calls,
+        before_read=insert_a_row_before_the_stamp,
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert [call[0] for call in calls] == ["upload", "metadata"]
+    assert client.write_count == 0
+    assert UNCLEARED_RESTORE_WARNING in capsys.readouterr().err
+
+
+def test_a_restore_whose_stamp_write_fails_warns_by_name(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], [],
+    )
+    client._raise_on_write = 1
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert client.grid[1][9] == RESTORED_STAMP
+    assert UNCLEARED_RESTORE_WARNING in capsys.readouterr().err
+
+
+def test_a_restore_whose_upload_fails_does_not_warn(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)], [],
+        fail={"upload"},
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "WARNING" not in capsys.readouterr().err
+
+
 def test_a_restore_whose_original_is_missing_is_refused_by_name_and_sends_nothing(
     tmp_path, monkeypatch, capsys
 ):

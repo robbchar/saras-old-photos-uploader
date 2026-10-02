@@ -181,7 +181,10 @@ the restore writes the text with its own metadata call: the Sheet's fields,
 plus the `identifier-bib` and `date` `upload` would generate, and the notice
 removed where the Sheet's title or description cell is blank. Success stamps
 the hash and clears `ia_withdrawn`; a failure leaves both, and the restore
-repeats next run.
+repeats next run. A restore that landed but whose clear could not be written
+(the row moved, or the Sheet write failed) is named in a warning: a `yes`
+typed before the next run finishes it would find `ia_withdrawn` still set,
+skip the withdraw, and leave the restored text up.
 
 ## One run may move at most ten items, and the limit is per run
 

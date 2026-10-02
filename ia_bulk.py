@@ -6035,6 +6035,11 @@ class SheetSyncRun:
         landed = {row for row, _digest in stamped}
         safe = self._verified(pushed, landed)
         safe_rows = {target.row_number for target in safe}
+        cleared_rows = {row for row, _value in marks}
+        restored_on = {
+            target.row_number: target.uploaded_as for target in pushed if target.row_number in cleared_rows
+        }
+        self._warn_uncleared([item for row, item in restored_on.items() if row not in safe_rows])
         safe_stamps = [(row, digest) for row, digest in stamped if row in safe_rows]
         updates = stamp_updates(safe_stamps, self.columns, utc_timestamp()) + withdrawn_updates(
             [(row, value) for row, value in marks if row in safe_rows], self.columns
@@ -6047,6 +6052,7 @@ class SheetSyncRun:
                 f"{self._metadata_landed(len(safe_stamps))}Continuing.",
                 file=sys.stderr,
             )
+            self._warn_uncleared([item for row, item in restored_on.items() if row in safe_rows])
 
     def _mark_started(self, target: SyncTarget, text_landed: bool) -> None:
         """Writes a started withdraw's ia_withdrawn (and its hash, once the text landed) before
@@ -6080,6 +6086,16 @@ class SheetSyncRun:
             "before then will NOT restore the files.",
             file=sys.stderr,
         )
+
+    @staticmethod
+    def _warn_uncleared(identifiers: list[str]) -> None:
+        """A restore landed but the Sheet still says withdrawn; a yes now would skip the withdraw."""
+        for identifier in identifiers:
+            print(
+                f"WARNING: the restore of {identifier} landed but ia_withdrawn was not cleared; "
+                "let the next run finish before setting withdrawn back to yes",
+                file=sys.stderr,
+            )
 
     @staticmethod
     def _metadata_landed(count: int) -> str:

@@ -818,6 +818,13 @@ row by name, leave it withdrawn and exit 1:
   blank. Put the file back (or fix the cells) first, or set the cell back to
   `yes`.
 
+If the run warns `the restore of <item> landed but ia_withdrawn was not
+cleared`, the file and text are back but the Sheet could not record it (the
+row moved mid-run, or the Sheet write failed). Leave `withdrawn` at `no` and
+let the next run finish: it restores the item again and clears the cell.
+Setting `withdrawn` back to `yes` before then would leave the restored text
+and photo up, with the re-check deleting only the files.
+
 If IA has already darkened the item, ask them to undo that too.
 
 **Before upload.** A row that says `yes` before it was ever uploaded is held:
