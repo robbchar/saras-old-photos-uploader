@@ -2,6 +2,7 @@ import argparse
 import contextlib
 import copy
 import dataclasses
+import hashlib
 import importlib.metadata
 import io
 import json
@@ -5669,6 +5670,8 @@ def test_cmd_upload_sheet_path_logs_the_item_each_row_was_uploaded_as(
     assert entry["identifier"] == "lcps-astoriaphotos-00001"
     assert entry["uploaded_as"] == expected_uploaded_as
     assert entry["status"] == "success"
+    # Only a checksum skip carries the key; an ordinary success does not.
+    assert "already_on_ia" not in entry
 
 
 def test_cmd_upload_sheet_path_prints_a_progress_line_per_row(tmp_path, monkeypatch, capsys):
@@ -7797,10 +7800,22 @@ def _canned(request, status_code, body, content_type):
 
 class CannedMetadataAdapter(HTTPAdapter):
     """archive.org answers a real, minimal item-metadata document, so the
-    upload reaches S3 instead of failing before it."""
+    upload reaches S3 instead of failing before it. `document` may be a
+    zero-argument callable, read afresh on every request."""
+
+    def __init__(self, document):
+        super().__init__()
+        self.document = document
 
     def send(self, request, *args, **kwargs):
-        return _canned(request, 200, json.dumps(ITEM_METADATA_DOCUMENT).encode(), "application/json")
+        document = self.document() if callable(self.document) else self.document
+        return _canned(request, 200, json.dumps(document).encode(), "application/json")
+
+
+def item_already_holding(path, **extra):
+    """An item-metadata document listing `path` at its current MD5."""
+    files = [{"name": path.name, "md5": hashlib.md5(path.read_bytes()).hexdigest()}]
+    return {**ITEM_METADATA_DOCUMENT, **extra, "files": files}
 
 
 def _read_whole_body(body):
@@ -7833,10 +7848,12 @@ class FaultInjectingS3Adapter(HTTPAdapter):
         return _canned(request, status_code, body, "text/xml")
 
 
-def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
+def upload_row_against_s3_fault(fault, tmp_path, monkeypatch, item_metadata=None):
     """Runs the real upload_row() against the real internetarchive library,
     with S3 replaced by a fault-injecting adapter. Returns that adapter so the
-    caller can count attempts.
+    caller can count attempts. `item_metadata` is what archive.org answers for
+    the item (a dict, or a callable read per request); ITEM_METADATA_DOCUMENT
+    when omitted.
 
     internetarchive.upload() is wrapped rather than replaced: the wrapper adds
     the prepared session and then calls the real function, so upload_row's own
@@ -7848,7 +7865,10 @@ def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
     session.access_key = "fake-access-key"
     session.secret_key = "fake-secret-key"
     s3_adapter = FaultInjectingS3Adapter(fault)
-    session.mount("https://archive.org", CannedMetadataAdapter())
+    session.mount(
+        "https://archive.org",
+        CannedMetadataAdapter(ITEM_METADATA_DOCUMENT if item_metadata is None else item_metadata),
+    )
     session.mount("https://s3.us.archive.org", s3_adapter)
 
     real_upload = internetarchive.upload
@@ -7870,7 +7890,7 @@ def upload_row_against_s3_fault(fault, tmp_path, monkeypatch):
 def run_upload_row(tmp_path):
     from ia_bulk import upload_row
 
-    upload_row(
+    return upload_row(
         {"identifier": "lcps-astoriaphotos-00001", "file": "photo1.jpg", "mediatype": "image"},
         target_identifier="some-identifier",
         collection="test_collection",
@@ -7884,11 +7904,127 @@ def test_upload_row_succeeds_against_the_s3_harness_when_no_fault_is_injected(tm
     works."""
     s3 = upload_row_against_s3_fault((200, b""), tmp_path, monkeypatch)
 
-    run_upload_row(tmp_path)
+    assert run_upload_row(tmp_path) is False
 
     assert len(s3.calls) == 1
     assert any("s3.us.archive.org" in url for url in s3.calls)
     assert s3.bodies == [b"pretend-jpeg-bytes"]
+
+
+def test_upload_row_counts_a_file_already_on_the_item_as_uploaded(tmp_path, monkeypatch, capsys):
+    """checksum=True skips a file the item already lists at the same MD5, with
+    no pending tasks, and answers a bare Response() with no status. A --live
+    run resuming a reserved row whose upload had landed and settled meets
+    exactly this, so it must succeed - and report the file was not re-sent."""
+    s3 = upload_row_against_s3_fault(
+        (200, b""),
+        tmp_path,
+        monkeypatch,
+        item_metadata=lambda: item_already_holding(tmp_path / "photo1.jpg"),
+    )
+
+    assert run_upload_row(tmp_path) is True
+
+    assert "photo1.jpg already exists, skipping." in capsys.readouterr().err
+    assert s3.calls == []
+
+
+def test_upload_row_re_sends_a_listed_file_while_the_item_has_pending_tasks(tmp_path, monkeypatch):
+    """The library also requires the item to report no pending tasks; one
+    that does gets the whole file re-sent under the same key rather than
+    skipped, even though it already lists the file at this MD5."""
+    s3 = upload_row_against_s3_fault(
+        (200, b""),
+        tmp_path,
+        monkeypatch,
+        item_metadata=lambda: item_already_holding(tmp_path / "photo1.jpg", tasks=[{"cmd": "archive.php"}]),
+    )
+
+    assert run_upload_row(tmp_path) is False
+
+    assert s3.bodies == [b"pretend-jpeg-bytes"]
+
+
+def test_upload_row_succeeds_when_a_retry_finds_the_timed_out_upload_settled(tmp_path, monkeypatch):
+    """Attempt 1's PUT times out, but by attempt 2 the item lists the file at
+    this MD5 with no pending tasks: the library skips it and the row succeeds
+    with nothing re-sent. Rarely that fast in practice, but the path must hold."""
+
+    def item_metadata():
+        return item_already_holding(tmp_path / "photo1.jpg") if s3.calls else ITEM_METADATA_DOCUMENT
+
+    s3 = upload_row_against_s3_fault(
+        requests.exceptions.ReadTimeout("read timeout=12"), tmp_path, monkeypatch, item_metadata=item_metadata
+    )
+
+    assert run_upload_row(tmp_path) is True
+
+    assert len(s3.calls) == 1
+
+
+def test_upload_row_fails_a_status_less_response_that_is_not_the_checksum_skip(tmp_path, monkeypatch):
+    """Only the library's bare Response() may stand for "already there". A
+    status-less response that carries a request is unrecognized, so the row
+    fails, unretried, rather than being stamped uploaded."""
+    response = requests.Response()
+    response.request = requests.Request("PUT", "https://s3.us.archive.org/some-identifier/photo1.jpg").prepare()
+    calls = []
+
+    def fake_upload(identifier, **kwargs):
+        calls.append(identifier)
+        return [response]
+
+    monkeypatch.setattr(internetarchive, "upload", fake_upload)
+    monkeypatch.setattr("ia_bulk.time.sleep", lambda _: None)
+    (tmp_path / "photo1.jpg").write_bytes(b"pretend-jpeg-bytes")
+
+    with pytest.raises(RuntimeError, match="no status"):
+        run_upload_row(tmp_path)
+
+    assert calls == ["some-identifier"]
+
+
+def test_cmd_upload_confirms_a_resumed_reserved_row_whose_file_is_already_on_ia(
+    tmp_path, monkeypatch, capsys
+):
+    """The case the checksum skip exists for: a reserved row's upload landed
+    but was never confirmed, and a later --live run resumes it (a rehearsal
+    stamps a fresh item every run, so only --live meets it). The real
+    upload_row meets the skip, and the row must be confirmed - flagged as
+    already on IA, with a note that its metadata was not re-sent."""
+    from ia_bulk import cmd_upload
+
+    real_upload_row = ia_bulk.upload_row
+    grid = [SHEET_HEADER, ["First photo", "photo1.jpg", "lcps-astoriaphotos-00042", "", "", ""]]
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid)
+    monkeypatch.setattr("ia_bulk.upload_row", real_upload_row)
+    s3 = upload_row_against_s3_fault(
+        (200, b""),
+        tmp_path,
+        monkeypatch,
+        item_metadata=lambda: item_already_holding(tmp_path / "photo1.jpg"),
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, live=True))
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert s3.calls == []
+    assert recorder.writes == [
+        [
+            ("D2", FIXED_TIMESTAMP),
+            ("E2", "https://archive.org/details/lcps-astoriaphotos-00042"),
+            ("F2", "photo1.jpg"),
+        ]
+    ]
+    assert client.grid[1][2] == "lcps-astoriaphotos-00042"
+    assert (
+        "    - already on Internet Archive at this MD5, so it was not re-sent; "
+        "run sync-metadata to push this row's metadata"
+    ) in out
+    entry = _row_records(next((tmp_path / "logs").glob("upload-*.jsonl")))[0]
+    assert entry["status"] == "success"
+    assert entry["already_on_ia"] is True
 
 
 def test_upload_row_reads_a_real_s3_slowdown_as_a_rate_limit(tmp_path, monkeypatch):

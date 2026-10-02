@@ -191,7 +191,9 @@ recorded as a deliberate statement rather than a gap.
 
 ## `checksum=True` and `verbose=True` on upload
 
-`checksum=True` makes a re-run skip files already present with a matching MD5,
-which avoids re-triggering IA's `derive` task — the expensive part of an
-upload. `verbose=True` surfaces the library's own per-file byte-progress bar,
+`checksum=True` skips a file the item already lists at a matching MD5,
+provided the item has no pending tasks, so that file is not re-sent. `upload`
+never revisits a DONE row, so the run that benefits is a `--live` one
+resuming a reserved row whose earlier upload landed and settled.
+`verbose=True` surfaces the library's own per-file byte-progress bar,
 so a long run is never silently quiet.
