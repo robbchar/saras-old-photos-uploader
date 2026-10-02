@@ -22,6 +22,7 @@ from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar
 import googleapiclient.discovery
 import internetarchive
 import requests
+import tqdm
 from urllib3.util.retry import Retry
 from googleapiclient.errors import HttpError
 
@@ -1450,6 +1451,14 @@ def retry_ia_call(operation: Callable[[], _RetryResult], describe: str) -> _Retr
     raise AssertionError(f"{describe} exhausted its retries without raising")
 
 
+def close_open_progress_bars() -> None:
+    """Closes the bars internetarchive leaves open when a send fails before reading its body."""
+    for bar in list(getattr(tqdm.tqdm, "_instances", ())):
+        # Cleanup on a failure path: it must never replace the real error.
+        with contextlib.suppress(Exception):
+            bar.close()
+
+
 def upload_row(row: dict, target_identifier: str, collection: str, files_dir: str | Path) -> None:
     file_name = (row.get("file") or "").strip()
     if not file_name:
@@ -1487,14 +1496,19 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
         and creates no duplicate. Nor can a retry burn an identifier: the
         target identifier is chosen before this function is reached and is
         the same on every attempt."""
-        responses = internetarchive.upload(
-            target_identifier,
-            files=[str(file_path)],
-            metadata=metadata,
-            verbose=True,
-            checksum=True,
-            http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS,
-        )
+        try:
+            responses = internetarchive.upload(
+                target_identifier,
+                files=[str(file_path)],
+                metadata=metadata,
+                verbose=True,
+                checksum=True,
+                http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS,
+            )
+        except Exception:
+            # Before the retry line prints, so the two never share a line.
+            close_open_progress_bars()
+            raise
         for response in responses:
             # internetarchive.upload() is typed to return Request | Response;
             # a Request is only ever returned when debug=True, which we never
