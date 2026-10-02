@@ -10082,6 +10082,7 @@ def test_an_ordinary_update_is_not_held_to_the_delete_identity_rule():
 def _setup_withdraw_sync(
     tmp_path, monkeypatch, rows, calls, *, files=("photo1.jpg",), fail=None,
     before_read=None, registry=None, collection_check=None, recheck_result=None,
+    pending_tasks=0,
 ):
     """The sync world plus every IA call a withdraw or restore makes, in one ordered list.
     `fail` is a set of call kinds to refuse ("refuse" = IA refuses every delete); clear it to let a rerun through."""
@@ -10133,6 +10134,13 @@ def _setup_withdraw_sync(
         return recheck_result or ClearCheck()
 
     monkeypatch.setattr("ia_bulk.recheck_withdrawn_item", fake_recheck)
+
+    def fake_pending(identifier):
+        if "pending_query" in failing:
+            raise RuntimeError("tasks query refused")
+        return pending_tasks
+
+    monkeypatch.setattr("ia_bulk.pending_task_count", fake_pending)
     return registry_path, client
 
 
@@ -10678,6 +10686,65 @@ def test_a_restore_that_fails_partway_stays_withdrawn_and_retries(tmp_path, monk
     assert client.grid[1][9] == ""
 
 
+def test_a_restore_while_the_withdrawals_deletes_are_queued_uploads_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, pending_tasks=3,
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "still processing this item's withdrawal (3 task(s) queued)" in out
+    assert "nothing was uploaded - run sync-metadata again later" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_restore_that_cannot_ask_about_queued_tasks_uploads_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, fail={"pending_query"},
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert calls == []
+    assert "could not check whether Internet Archive has finished" in out
+    assert "tasks query refused" in out
+    assert client.grid[1][9] == RESTORED_STAMP
+
+
+def test_a_refused_restore_goes_through_once_the_queue_is_empty(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", ia_withdrawn=RESTORED_STAMP)],
+        calls, pending_tasks=1,
+    )
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 1
+
+    monkeypatch.setattr("ia_bulk.pending_task_count", lambda identifier: 0)
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+    assert [call[0] for call in calls] == ["upload", "metadata"]
+    assert client.grid[1][9] == ""
+
+
 def test_a_restore_is_logged_as_restored(tmp_path, monkeypatch):
     from ia_bulk import cmd_sync_metadata
 
@@ -10844,6 +10911,10 @@ def test_sync_dry_run_previews_a_restore_with_the_file_it_found(tmp_path, monkey
     assert calls == []
     assert f"  row 2: {WITHDRAWN_ITEM} - would RESTORE" in lines
     assert "      would re-upload photo1.jpg (found on disk)" in lines
+    assert (
+        "      a real run first checks Internet Archive has finished processing the item's "
+        "withdrawal"
+    ) in lines
     title = lines.index("      title")
     assert lines[title + 1:title + 3] == ["          now: Withdrawn", "          new: Photo 1"]
 

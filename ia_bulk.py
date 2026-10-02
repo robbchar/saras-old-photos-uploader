@@ -1720,6 +1720,23 @@ def pending_task_count(identifier: str) -> int:
     return len(tasks)
 
 
+def require_withdrawal_processed(identifier: str) -> None:
+    """Refuses a restore while IA still has tasks queued for the item: a late delete would remove
+    the re-uploaded file. An unanswerable query refuses too."""
+    try:
+        pending = pending_task_count(identifier)
+    except Exception as exc:
+        raise RuntimeError(
+            "could not check whether Internet Archive has finished processing this item's "
+            f"withdrawal ({exc}); nothing was uploaded - run sync-metadata again later"
+        ) from exc
+    if pending:
+        raise RuntimeError(
+            "Internet Archive is still processing this item's withdrawal "
+            f"({pending} task(s) queued); nothing was uploaded - run sync-metadata again later"
+        )
+
+
 def _delete_what_is_left(identifier: str) -> DeletePass | None:
     """A withdraw's deletes over a fresh listing; None when only IA's system files are left.
     Raises when the item cannot be read or IA has no such item."""
@@ -4284,6 +4301,7 @@ def print_withdrawal_preview(target: SyncTarget) -> None:
     else:
         print(f"  row {target.row_number}: {target.uploaded_as} - would RESTORE")
         print(f"      would re-upload {target.restore_file} (found on disk)")
+        print("      a real run first checks Internet Archive has finished processing the item's withdrawal")
         payload = restore_metadata(target)
     remote = fetch_current_metadata(target.uploaded_as)
     if remote is None:
@@ -5883,6 +5901,7 @@ class SheetSyncRun:
     def _send(self, target: SyncTarget) -> None:
         """One row's metadata push; a restore re-uploads its original first."""
         if target.action is SyncAction.RESTORE:
+            require_withdrawal_processed(target.uploaded_as)
             upload_row(
                 restore_upload_row(target, self.mediatype),
                 target.uploaded_as,

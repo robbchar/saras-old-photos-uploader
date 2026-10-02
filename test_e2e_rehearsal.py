@@ -1,6 +1,8 @@
 """E2E rehearsal: the real CLI against the real Test Sheet and IA's test_collection.
 
-Opt-in, takes minutes: python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
+Opt-in, takes minutes: python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s
+Run test_rehearsal alone: the upload-page e2e resets the Test Sheet afterward and wipes the
+withdrawn row step 9a leaves for the hand clear check.
 Each step label names the hand check it replaces.
 """
 
@@ -47,6 +49,7 @@ from ia_bulk import (
     CollectionMissing,
     build_sheets_service,
     check_ia_collection,
+    pending_task_count,
 )
 from log_tab import LOG_TAB_HEADER
 from project_config import DEFAULT_WITHDRAWN_DESCRIPTION, DEFAULT_WITHDRAWN_TITLE
@@ -103,7 +106,7 @@ STEP_9 = "step 9 - quiet sync (OPERATIONS 'Rehearsing the log tabs' step 3, seco
 STEP_9A = "step 9a - withdraw two items (OPERATIONS 'Withdrawing an item' steps 1-2)"
 STEP_9A2 = "step 9a2 - the next run re-checks them (OPERATIONS 'Withdrawing an item' step 4)"
 STEP_9B = "step 9b - restore one (OPERATIONS 'Withdrawing an item', putting it back)"
-STEP_10 = "step 10- tabs match log files (OPERATIONS 'Rehearsing the log tabs' step 4)"
+STEP_10 = "step 10 - tabs match log files (OPERATIONS 'Rehearsing the log tabs' step 4)"
 STEP_11 = "step 11 - only expected cells changed (OPERATIONS 'Rehearsing the log tabs' step 5)"
 STEP_12 = "step 12 - restore the broken filename (OPERATIONS 'Rehearsing the log tabs' step 2: put the cell back)"
 
@@ -298,7 +301,9 @@ def expect_recorded(step: str, sheet: RehearsalSheet, grid: list[list[str]], row
     )
 
 
-def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], *, lock: RehearsalLock) -> Found:
+def wait_for_ia(
+    step: str, description: str, probe: Callable[[], Found | None], *, lock: RehearsalLock, on_timeout: str | None = None
+) -> Found:
     check_in(lock, step)
     deadline = time.monotonic() + IA_POLL_TIMEOUT_SECONDS
     while True:
@@ -306,7 +311,7 @@ def wait_for_ia(step: str, description: str, probe: Callable[[], Found | None], 
         if found is not None:
             return found
         if time.monotonic() >= deadline:
-            pytest.fail(f"{step}: IA did not show {description} within {IA_POLL_TIMEOUT_SECONDS // 60} min")
+            pytest.fail(f"{step}: {on_timeout or f'IA did not show {description}'} (waited {IA_POLL_TIMEOUT_SECONDS // 60} min)")
         time.sleep(IA_POLL_INTERVAL_SECONDS)
 
 
@@ -315,10 +320,13 @@ def item_metadata(identifier: str) -> dict[str, Any] | None:
     return dict(internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS).metadata) or None
 
 
-def item_file_names(identifier: str) -> list[str]:
-    """The item's file names as IA lists them now; raises on failure, like item_metadata."""
+def item_file_mtime(identifier: str, name: str) -> int | None:
+    """When IA last stored the named file (epoch seconds), or None when the item has no such file."""
     item = internetarchive.get_item(identifier, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
-    return [file.name for file in item.get_files()]
+    for file in item.get_files():
+        if file.name == name:
+            return int(getattr(file, "mtime", 0) or 0)
+    return None
 
 
 def has_withdrawn_text(identifier: str) -> bool:
@@ -585,6 +593,9 @@ def test_rehearsal(tmp_path, request):
 
     # Row 3 stays withdrawn after the rehearsal, for the hand clear check (OPERATIONS).
     second_identifier = identifiers[SECOND_UPLOADED]
+    # The restore's proof: the original reappears with a newer mtime, since 9a's deletes may still be queued.
+    original_mtime = item_file_mtime(first_identifier, "e2e-01.jpg")
+    expect(STEP_9A, bool(original_mtime), f"{first_identifier} lists no mtime for e2e-01.jpg before the withdraw")
     check_in(lock, STEP_9A)
     sheet.edit(FIRST_UPLOADED, "Withdrawn", "yes")
     sheet.edit(SECOND_UPLOADED, "Withdrawn", "yes")
@@ -623,6 +634,14 @@ def test_rehearsal(tmp_path, request):
     )
     expect(STEP_9A2, sheet.grid() == grid_before_recheck, "the re-check run changed the Sheet")
 
+    # A restore is refused while IA still has the withdrawal's tasks queued; never restore blind.
+    wait_for_ia(
+        STEP_9B,
+        f"{first_identifier}'s task queue empty",
+        lambda: True if pending_task_count(first_identifier) == 0 else None,
+        lock=lock,
+        on_timeout=f"Internet Archive's queue for {first_identifier} is still busy; re-run later",
+    )
     check_in(lock, STEP_9B)
     sheet.edit(FIRST_UPLOADED, "Withdrawn", "no")
     result = run_cli(STEP_9B, "sync-metadata", lock=lock, log_dir=log_dir)
@@ -640,8 +659,8 @@ def test_rehearsal(tmp_path, request):
     )
     wait_for_ia(
         STEP_9B,
-        f"e2e-01.jpg back in {first_identifier}'s file list",
-        lambda: True if "e2e-01.jpg" in item_file_names(first_identifier) else None,
+        f"a re-uploaded e2e-01.jpg in {first_identifier}'s file list",
+        lambda: True if (item_file_mtime(first_identifier, "e2e-01.jpg") or 0) > (original_mtime or 0) else None,
         lock=lock,
     )
 
@@ -1123,3 +1142,29 @@ def test_waiting_for_ia_after_the_lock_was_lost_fails_before_probing(tmp_path):
         wait_for_ia("step 5", "item zztest-x", lambda: probes.append(1) or True, lock=lock)
 
     assert probes == []
+
+
+def test_waiting_for_ia_that_times_out_says_what_it_was_given(tmp_path, monkeypatch):
+    _, lock, _ = held_lock(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "IA_POLL_TIMEOUT_SECONDS", 0)
+
+    with pytest.raises(pytest.fail.Exception, match=re.escape("queue for x is still busy; re-run later")):
+        wait_for_ia("step 9b", "x's queue empty", lambda: None, lock=lock, on_timeout="queue for x is still busy; re-run later")
+
+
+def test_item_file_mtime_reads_the_named_file_and_is_none_when_it_is_absent(monkeypatch):
+    class Listed:
+        def __init__(self, name: str, mtime: str | None) -> None:
+            self.name = name
+            if mtime is not None:
+                self.mtime = mtime
+
+    class Item:
+        def get_files(self):
+            return [Listed("e2e-01.jpg_meta.xml", "5"), Listed("e2e-01.jpg", "1700000000"), Listed("e2e-02.jpg", None)]
+
+    monkeypatch.setattr(internetarchive, "get_item", lambda identifier, **_kwargs: Item())
+
+    assert item_file_mtime("x", "e2e-01.jpg") == 1700000000
+    assert item_file_mtime("x", "e2e-02.jpg") == 0
+    assert item_file_mtime("x", "e2e-03.jpg") is None
