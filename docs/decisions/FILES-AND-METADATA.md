@@ -197,3 +197,22 @@ never revisits a DONE row, so the run that benefits is a `--live` one
 resuming a reserved row whose earlier upload landed and settled.
 `verbose=True` surfaces the library's own per-file byte-progress bar,
 so a long run is never silently quiet.
+
+## Every upload queues IA's derive
+
+*Decided 2026-10-02, after reading the pinned library and the task history of
+rehearsal items on `test_collection`.*
+
+`upload_row` passes `queue_derive=True`, so each upload sends
+`x-archive-queue-derive: 1`. So does each restore, which re-uploads through
+`upload_row`. IA then runs `derive.php` on the item, which builds the file's
+`_thumb.jpg` and the `__ia_thumb.jpg` item tile. A file that `checksum=True`
+skips is never sent, so it queues nothing.
+
+The pinned library already sends `1` when `queue_derive` is omitted, but its
+own signature marks that default as undecided. Passing it explicitly keeps a
+library upgrade from silently stopping thumbnails, and a test pins the header.
+Turning derive off was rejected. Items would settle sooner, and a withdraw
+would never wait behind an upload's derive (see
+[WITHDRAWAL.md](WITHDRAWAL.md#a-delete-waits-while-ia-runs-or-holds-a-task-on-the-item)),
+but items would go without the thumbnails derive builds.

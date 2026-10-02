@@ -229,7 +229,10 @@ Per chunk, `SheetUploadRun.execute()` does four things in this order:
 2. **reserve** — one batch write (`write_cells_if_any`) putting each target's
    minted `ia_identifier` in the Sheet, before any upload happens.
 3. **upload** — row by row, via `upload_row()`/`internetarchive.upload()`, so
-   each row gets its own logged outcome.
+   each row gets its own logged outcome. Every file `upload_row()` sends
+   queues IA's derive (`queue_derive=True`), which builds the item's
+   thumbnail and tile; see
+   [Every upload queues IA's derive](decisions/FILES-AND-METADATA.md#every-upload-queues-ias-derive).
 4. **verify, then confirm** — re-verifies the rows that actually succeeded,
    then one batch write of `ia_uploaded`, `ia_url`, and `ia_identifier_bib` —
    only for rows whose upload succeeded and whose fingerprint still matches.
