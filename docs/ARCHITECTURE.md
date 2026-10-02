@@ -43,10 +43,11 @@ still visible), but never uploaded.
 
 **Tool-owned columns.** `RESERVED_FIELDS` (`column_map.py`) is seven `ia_`-prefixed
 columns plus `file` and the person-edited `withdrawn`, all excluded by
-`uploadable_fields()` so the tool's own bookkeeping never ships as IA metadata. `upload` writes four of them:
-`ia_identifier`, `ia_uploaded`, `ia_url`, `ia_identifier_bib`. `sync-metadata`
-owns the other two, `ia_sync_hash` and `ia_last_synced`, which record what a
-row last successfully pushed so an unchanged row is not resent — see
+`uploadable_fields()` so the tool's own bookkeeping never ships as IA
+metadata. `upload` writes four of the `ia_` columns: `ia_identifier`,
+`ia_uploaded`, `ia_url`, `ia_identifier_bib`. `sync-metadata` owns
+`ia_sync_hash` and `ia_last_synced`, which record what a row last
+successfully pushed so an unchanged row is not resent — see
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
 The `ia_` prefix is a naming convention only; `RESERVED_FIELDS` being an
 explicit set rather than a `startswith("ia_")` rule is what actually does the
@@ -57,10 +58,11 @@ The Sheet's own `identifier` column, if it has one, is ordinary donor metadata
 `upload`'s four `ia_` columns must already exist as Sheet headers before
 `upload` will run, in every mode including the default rehearsal — see
 [`DECISIONS.md`](decisions/IDENTIFIERS.md#the-four-ia_-columns-are-required-in-every-mode-including-the-safe-one).
-`sync-metadata`'s two are required the same way, by that command alone — see
+`ia_sync_hash` and `ia_last_synced` are required the same way, by
+`sync-metadata` alone — see
 [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#a-row-pushes-only-when-its-content-changed).
-`sync-metadata` also owns `ia_withdrawn`, required only when the Sheet has a
-`withdrawn` column — see "Withdrawing an item" below.
+`sync-metadata` also owns the seventh, `ia_withdrawn`, required only when the
+Sheet has a `withdrawn` column — see "Withdrawing an item" below.
 
 `format_field_receipt()` prints, before anything permanent happens, exactly
 which normalized fields will upload and which are held back. `file`,
@@ -370,25 +372,24 @@ resolved up front by `attach_restore_files()` — the only sync step that reads
 the drive — and a missing, ambiguous or blank-template original refuses the
 row.
 
-In `SheetSyncRun.execute()`, each withdraw first calls `_refused_delete()`: a
-fresh read (`_reread()`, shared with `_verified()`) that refuses the withdraw
-unless the row is unmoved (`split_moved_targets()`) and its `withdrawn` cell
-still parses as yes (`_still_withdrawn()`). Then `_withdraw()` calls
-`delete_item_files()` — refusing an item IA does not have, else deleting
-every file but IA's system files, content first and `__ia_thumb.jpg` last
-(skipped in a pass where a content delete was refused), each with cascade and
+In `SheetSyncRun.execute()`, each withdraw first re-reads the Sheet — the
+same fresh read `_verified()` makes before stamping — and is refused unless
+the row is unmoved and its `withdrawn` cell still parses as yes. Then
+`delete_item_files()` refuses an item IA does not have, or deletes every file
+but IA's system files, content first and `__ia_thumb.jpg` last (skipped in a
+pass where a content delete was refused), each with cascade and
 `x-archive-keep-old-version: 0`; any 2xx is accepted, a 404 counts as gone,
-any other refusal is named in the returned `DeletePass` — and
-`update_metadata_row()`. `ia_withdrawn` (`withdrawn_updates()`) is written
-once the pass started (`DeletePass.started`: a delete accepted, or nothing
-left to delete); `ia_sync_hash`/`ia_last_synced` only when every
-delete was accepted and the text landed. A restore goes through `_send()`:
-`require_withdrawal_processed()` refuses it while IA's task catalog has
-anything queued for the item (or cannot be asked), then `upload_row()`
-re-sends the original with what `upload` sends, then `restore_metadata()`
-goes through `update_metadata_row()`, since an upload into an existing item
-does not set its metadata. Success stamps the hash and clears
-`ia_withdrawn`; a failed restore stays unstamped and repeats.
+and any other refusal is named in the returned `DeletePass`. The withdrawn
+text then goes through `update_metadata_row()`. `ia_withdrawn`
+(`withdrawn_updates()`) is written once the pass started (a delete accepted,
+or nothing left to delete); `ia_sync_hash`/`ia_last_synced` only when every
+delete was accepted and the text landed. A restore is refused while IA's
+task catalog has anything queued for the item, or cannot be asked
+(`require_withdrawal_processed()`); otherwise `upload_row()` re-sends the
+original with what `upload` sends, and `restore_metadata()` goes through
+`update_metadata_row()`, since an upload into an existing item does not set
+its metadata. Success stamps the hash and clears `ia_withdrawn`; a failed
+restore stays unstamped and repeats.
 
 After the push loop, `recheck_withdrawals()` re-checks every row with
 `SyncTarget.recheck`: `recheck_withdrawn_item()` lists the item, deletes
@@ -405,7 +406,7 @@ Before sending, `withdrawal_refusal()` refuses a run moving more than
 `BULK_WITHDRAW_LIMIT` (10) items unless `--allow-bulk-withdraw` (a dry run
 previews, then prints the refusal and exits 1), and a live run with any
 withdraw or restore first confirms `ia_collection` on archive.org
-(`confirm_collection_on_archive_org()` with `SYNC_COLLECTION_WORDING`).
+(`confirm_collection_on_archive_org()`, worded for sync).
 Withdraws, restores and still-clearing items are named in the run summary
 (`withdrawn`/`restored`/`clearing`; clear ones under `clear`, failed
 re-checks under `recheck_failures`), as their own rows in the log tab (a

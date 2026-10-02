@@ -59,8 +59,12 @@ directions the hourly schedule, the per-row log and the identity checks for
 free. A row withdrawn before it was ever uploaded is simply held: `upload`
 skips it and keeps any identifier already reserved (see
 [`READINESS.md`](READINESS.md#a-withdrawn-row-is-held-not-not-ready-or-broken)).
-A reserved row whose upload landed without being confirmed is held too;
-`sync-metadata` only acts on uploaded rows, so confirm it first.
+A reserved row whose upload landed without being confirmed is held too, and
+`sync-metadata` only acts on uploaded rows, so nothing takes it down. The
+route is to confirm it first: set `withdrawn` to no, run `upload` (which
+retries under the reserved identifier and confirms), set `withdrawn` back to
+yes, and run `sync-metadata`. The photo is public in between (see
+[`OPERATIONS.md`, "Withdrawing an item"](../OPERATIONS.md#withdrawing-an-item)).
 
 What a withdrawn row hashes is the withdrawn notice, not its cells: edits to
 its other cells wait for a restore, and flipping the column always pushes
@@ -176,8 +180,13 @@ exactly like a decision to withdraw a whole batch — and the hourly agent
 would carry it out unattended. So a run whose withdraws plus restores exceed
 10 refuses entirely before anything is sent, and names the rows, unless
 `--allow-bulk-withdraw` is passed; the dry run previews the run, shows the
-same refusal and exits 1. Already-withdrawn, stamped rows (re-checks) don't
-count; a row retried after a partial failure does.
+same refusal and exits 1. Only rows whose `withdrawn` cell and
+`ia_withdrawn` disagree count. Already-withdrawn, stamped rows (re-checks)
+don't, and neither does a withdraw that started but did not finish: its
+`ia_withdrawn` is stamped, so it returns as an ordinary update plus a
+re-check (unless that stamp was lost too, when it repeats as a withdraw). A withdraw that never started (refused before its deletes, an item
+IA does not have, a file list that could not be read) and a restore that
+failed both repeat as a withdraw or restore next run, and count again.
 
 Per run rather than a rolling window: the danger is one bad edit, which a
 per-run cap stops on the first run after it, and a window would need state

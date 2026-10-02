@@ -705,7 +705,7 @@ The test, lint and type-check commands are in
 ### E2E rehearsal (opt-in)
 
 ```bash
-python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s
+python -m pytest test_e2e_rehearsal.py --run-e2e -v -s
 ```
 
 Drives the real CLI against the Test Sheet and IA's `test_collection` — the
@@ -716,12 +716,13 @@ automated form of `docs/OPERATIONS.md`, "Rehearsing the log tabs" and
 worktree has none) and `ia configure` done on the machine. It rewrites the
 Test Sheet every run; test data is ephemeral.
 
-Name `::test_rehearsal` on its own. The file's other e2e tests (the upload
-page, and archive.org's answers to the collection check) run too without it,
-and the upload-page one resets the Test Sheet afterward — wiping the
-withdrawn row the rehearsal leaves for the hand clear check in
-[`docs/OPERATIONS.md`, "Withdrawing an item"](docs/OPERATIONS.md#withdrawing-an-item).
-Run the whole file when you want those tests and not that check.
+The whole file also runs the upload-page e2e test, which resets the Test
+Sheet afterward, and the check of archive.org's answers to the collection
+check. For the hand clear check in
+[`docs/OPERATIONS.md`, "Withdrawing an item"](docs/OPERATIONS.md#withdrawing-an-item),
+which needs the withdrawn row the rehearsal leaves behind, run
+`python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s`
+instead.
 
 **One rehearsal at a time.** Step 0 takes an `E2E Lock` tab on the Test
 Sheet, and teardown deletes it. A rehearsal started while another holds it

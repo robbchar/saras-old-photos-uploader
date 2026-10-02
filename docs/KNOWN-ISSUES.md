@@ -1,8 +1,9 @@
 # Known Issues
 
 Verified against the code and the real data in `data/` as of 2026-08-08. Each
-entry was reproduced, not inferred. Ordered by how much damage it can do to a
-`--live` run.
+entry was reproduced, not inferred, unless it says otherwise: a by-design
+limit or one inferred from the code says so in its *Found* line (#7, #8).
+Ordered by how much damage it can do to a `--live` run.
 
 These are the open ones. Issues fixed since this file was written are recorded
 at the bottom under [Fixed](#fixed), so the reasoning survives. Numbers are

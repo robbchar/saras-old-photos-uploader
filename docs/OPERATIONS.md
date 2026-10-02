@@ -427,9 +427,7 @@ real files in the wrong place under a permanent identifier.
       suggestion. A `--live` run reads the Sheet directly; there is no CSV
       export step to redo, and nothing local to go stale.
 - [ ] The e2e rehearsal passes on this checkout
-      (`python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s`
-      — named alone, since the file's upload-page test resets the Test
-      Sheet afterward), **and**
+      (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`), **and**
       `python ia_bulk.py upload --project sarasoldphotos --live --dry-run`
       over the real Sheet named collection `sarasoldphotos` in its opening
       lines and printed `Internet Archive collection 'sarasoldphotos'
@@ -749,6 +747,17 @@ If the hourly agent is enabled, it does steps 2 and 4 on its own within the
 hour, so the dry run is for checking, not a gate. Never type into
 `ia_withdrawn`; clearing it makes the tool treat the item as present again.
 
+**When the agent ran it, read the Sync Log tab.** Nobody watches the agent's
+console, so its darkening hand-off for step 3 is only in
+`logs/launchagent-sarasoldphotos.log` on the Mac. The project's
+`sync_log_tab` (the `Sync Log` tab) has a `withdrawn` row per item withdrawn,
+naming the item it went to, which is enough to write the darkening request
+(a withdraw that started but did not finish is a `failure` row reading
+"withdrawal started on …" — ask for that item too), and a `clearing` row per item still clearing, whose detail says what was
+deleted again or how many tasks IA still has queued. The console's
+"still clearing" line names the items only; that detail is in the tab (and
+the run's JSONL), whoever ran it.
+
 **If a withdraw fails.** The run names the row and exits 1, and the
 `sync_log_tab`, if the project has one, gets a `failure` row. A withdraw of an item Internet Archive does not have deletes
 nothing and stamps nothing — check the row's `ia_url`. One that started but
@@ -762,8 +771,9 @@ failed). Keep `withdrawn` at `yes` and run `sync-metadata` again: that run
 finishes the withdraw and records it. Setting `withdrawn` to `no` before then
 leaves the files deleted with nothing to put them back.
 
-**If an item stays "still clearing" for a day or more** with no files left
-to delete ("Internet Archive has N tasks queued"), an IA task has probably
+**If an item stays "still clearing" for a day or more** and its `clearing`
+rows in the Sync Log tab say "no files left to delete; Internet Archive has
+N tasks queued", an IA task has probably
 errored and is stuck in IA's queue. Ask Internet Archive staff to clear it —
 see [`KNOWN-ISSUES.md` #8](KNOWN-ISSUES.md#8-an-errored-internet-archive-task-blocks-clear-and-restore).
 
@@ -779,7 +789,8 @@ curl -sI "https://archive.org/services/img/$ITEM"
 ```
 
 `ia list` should print only IA's own files (the identifier followed by
-`_meta.xml`, `_files.xml`, `_meta.sqlite`, `_archive.torrent`), and `curl`'s
+`_meta.xml`, `_files.xml`, `_meta.sqlite`, `_archive.torrent`, and
+`_reviews.xml` if present), and `curl`'s
 first line should be a `302` redirect to IA's placeholder, not `200`.
 
 The e2e rehearsal leaves its row 3 withdrawn for exactly this check, but only
@@ -788,8 +799,8 @@ when run on its own:
 Running the whole file also runs the upload-page e2e test, which resets the
 Test Sheet and wipes row 3. Afterwards, on the dev box, repeat
 `python ia_bulk.py sync-metadata --registry e2e_fixtures/registry.json --project e2e`
-until it reports that item clear, then check it as above (in git-bash the
-venv's `ia` is `.venv/Scripts/ia`).
+until it reports that item clear, then check it as above — on the dev box,
+use `ia` in place of `./.venv/bin/ia`.
 
 **Putting it back.** Set the cell back to `no` (or clear it) and run
 `sync-metadata`. It re-uploads the original from the drive — found the same
@@ -814,6 +825,14 @@ If IA has already darkened the item, ask them to undo that too.
 many it held back; `validate` counts it as withdrawn, and the upload page
 lists it under **Withdrawn**. Set it back to `no` and the next upload sends
 it.
+
+A **reserved** row (an `ia_identifier` but no `ia_uploaded`) whose upload
+may already have landed is held the same way, and `sync-metadata` acts only
+on rows marked uploaded, so nothing takes it down yet. To withdraw it: set
+`withdrawn` to `no`, run `upload` (it retries the row under the identifier
+it already reserved and confirms it), set `withdrawn` back to `yes`, and run
+`sync-metadata`. The photo is public on Internet Archive from that upload
+until the `sync-metadata` run, so run the two back to back.
 
 **More than ten at once.** A run that would withdraw or restore more than 10
 items in total refuses before sending anything and names the rows

@@ -701,10 +701,8 @@ with `--registry e2e_fixtures/registry.json --project e2e`, not
    ```
 
 Steps 1 and 2 are also covered by the e2e rehearsal, a development tool run
-on a dev machine
-(`python -m pytest test_e2e_rehearsal.py::test_rehearsal --run-e2e -v -s`,
-named alone because the file's upload-page test resets the Test Sheet
-afterward); step 3 is not, so run it by hand after replacing the key.
+on a dev machine (`python -m pytest test_e2e_rehearsal.py --run-e2e -v -s`);
+step 3 is not, so run it by hand after replacing the key.
 
 For a full round trip — a real edit reaching Internet Archive, and the Sheet's
 version history showing the service account as its editor — follow
