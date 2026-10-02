@@ -16056,3 +16056,107 @@ def test_a_live_withdraw_of_an_item_ia_does_not_have_starts_nothing(
     assert summary["withdrawn"] == []
     assert len(summary["failures"]) == 1
     assert "no item" in summary["failures"][0]["error"]
+
+
+def test_a_live_withdraw_confirms_the_collection_first(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert exit_code == 0
+    assert [call[0] for call in calls] == ["collection_check", "delete", "metadata"]
+    assert calls[0] == ("collection_check", "lcpsociety")
+
+
+def test_a_live_withdraw_refuses_when_archive_org_cannot_be_reached(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, client = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls,
+        collection_check=CollectionUnchecked(reason="ConnectionError", retry_later=True),
+    )
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert calls == [("collection_check", "lcpsociety")]
+    assert client.write_count == 0
+    assert (
+        "could not confirm Internet Archive collection 'lcpsociety' exists (ConnectionError), "
+        "and a live withdraw or restore runs only against a confirmed collection. Nothing was "
+        "sent; archive.org was unreachable or busy, so run this again later."
+    ) in err
+    assert "Nothing was uploaded" not in err
+
+
+def test_the_sync_collection_refusal_speaks_of_sending_not_uploading():
+    from ia_bulk import SYNC_COLLECTION_WORDING, collection_refusal
+
+    message = collection_refusal(
+        CollectionMissing(), "astoriaphotos", "lcpsociety", SYNC_COLLECTION_WORDING
+    )
+
+    assert message.endswith("Check ia_collection in the registry. Nothing was sent.")
+    assert "upload" not in message
+
+
+def test_a_live_dry_run_with_a_withdraw_checks_the_collection_too(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes", live=True)], calls
+    )
+    monkeypatch.setattr("ia_bulk.fetch_current_metadata", lambda identifier: {})
+    monkeypatch.setattr("ia_bulk.fetch_item_files", lambda identifier: [])
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True, dry_run=True))
+
+    assert calls == [("collection_check", "lcpsociety")]
+
+
+def test_a_test_mode_withdraw_does_not_ask_archive_org(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="yes")], calls
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+
+    assert "collection_check" not in [call[0] for call in calls]
+
+
+def test_a_live_recheck_does_not_ask_archive_org(tmp_path, monkeypatch):
+    """A re-check only deletes from an item already withdrawn; nothing goes into a collection."""
+    from ia_bulk import cmd_sync_metadata
+
+    row = _withdraw_row(withdrawn="yes", ia_withdrawn=WITHDRAWN_STAMP, live=True)
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(tmp_path, monkeypatch, [row], calls)
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert "collection_check" not in [call[0] for call in calls]
+    assert ("recheck", "lcps-astoriaphotos-00001") in calls
+
+
+def test_a_live_run_with_only_ordinary_updates_does_not_ask_archive_org(tmp_path, monkeypatch):
+    from ia_bulk import cmd_sync_metadata
+
+    calls = []
+    registry_path, _ = _setup_withdraw_sync(
+        tmp_path, monkeypatch, [_withdraw_row(withdrawn="no", live=True)], calls
+    )
+
+    cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path, live=True))
+
+    assert [call[0] for call in calls] == ["metadata"]

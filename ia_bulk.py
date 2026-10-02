@@ -4532,10 +4532,33 @@ def check_ia_collection(collection: str) -> CollectionCheck:
     return CollectionConfirmed()
 
 
-def collection_refusal(check: CollectionRefusal, project: str, collection: str) -> str:
+@dataclass(frozen=True)
+class CollectionCheckWording:
+    """What a refused collection check says about the command that asked."""
+
+    rule: str = "a live upload goes only into a confirmed collection"
+    nothing_done: str = "Nothing was uploaded"
+    interrupted: str = "The Sheet was not read; nothing was uploaded."
+
+
+UPLOAD_COLLECTION_WORDING = CollectionCheckWording()
+# sync-metadata asks only when a withdraw or restore is pending, after reading the Sheet.
+SYNC_COLLECTION_WORDING = CollectionCheckWording(
+    rule="a live withdraw or restore runs only against a confirmed collection",
+    nothing_done="Nothing was sent",
+    interrupted="Nothing was sent to Internet Archive.",
+)
+
+
+def collection_refusal(
+    check: CollectionRefusal,
+    project: str,
+    collection: str,
+    wording: CollectionCheckWording = UPLOAD_COLLECTION_WORDING,
+) -> str:
     """The stderr message for any check but CollectionConfirmed."""
     target = f"project '{project}' sends items to Internet Archive collection '{collection}'"
-    fix = "Check ia_collection in the registry. Nothing was uploaded."
+    fix = f"Check ia_collection in the registry. {wording.nothing_done}."
     if isinstance(check, CollectionMissing):
         return f"{target}, but archive.org has no item by that name. {fix}"
     if isinstance(check, NotACollection):
@@ -4543,7 +4566,7 @@ def collection_refusal(check: CollectionRefusal, project: str, collection: str) 
         return f"{target}, but '{collection}' is an item with {found}, not a collection. {fix}"
     unconfirmed = (
         f"could not confirm Internet Archive collection '{collection}' exists ({check.reason}), "
-        "and a live upload goes only into a confirmed collection. Nothing was uploaded"
+        f"and {wording.rule}. {wording.nothing_done}"
     )
     if check.retry_later:
         return f"{unconfirmed}; archive.org was unreachable or busy, so run this again later."
@@ -4553,20 +4576,19 @@ def collection_refusal(check: CollectionRefusal, project: str, collection: str) 
     )
 
 
-def confirm_collection_on_archive_org(project: str, collection: str) -> bool:
-    """Prints the outcome; False means the live upload stops here."""
+def confirm_collection_on_archive_org(
+    project: str, collection: str, wording: CollectionCheckWording = UPLOAD_COLLECTION_WORDING
+) -> bool:
+    """Prints the outcome; False means the live run stops here."""
     print(f"asking archive.org whether Internet Archive collection '{collection}' exists...")
     try:
         check = check_ia_collection(collection)
     except KeyboardInterrupt:
         # Before the send loop an interrupt stops at once; one line instead of a traceback.
-        print(
-            "interrupted while asking archive.org. The Sheet was not read; nothing was uploaded.",
-            file=sys.stderr,
-        )
+        print(f"interrupted while asking archive.org. {wording.interrupted}", file=sys.stderr)
         return False
     if not isinstance(check, CollectionConfirmed):
-        print(collection_refusal(check, project, collection), file=sys.stderr)
+        print(collection_refusal(check, project, collection, wording), file=sys.stderr)
         return False
     print(f"Internet Archive collection '{collection}' confirmed on archive.org")
     return True
@@ -6223,6 +6245,13 @@ def sync_from_sheet(args) -> int:
     if bulk_refusal and not dry_run:
         print(bulk_refusal, file=sys.stderr)
         return 1
+
+    # A restore uploads, so a withdraw or restore needs the same confirmed collection as an upload.
+    if live and any(target.action is not SyncAction.UPDATE for target in to_push):
+        if not confirm_collection_on_archive_org(
+            config.project_id, config.ia_collection_for(live), SYNC_COLLECTION_WORDING
+        ):
+            return 1
 
     if dry_run:
         exit_code = print_sync_dry_run(to_push, already_synced, problems, rechecking=rechecking)
