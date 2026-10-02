@@ -97,7 +97,10 @@ it. `app_version.py` reads it for `--version`, `doctor`, `setup` and
 2. **After a releasable merge**, release-please opens (or updates) one PR,
    `chore(main): release X.Y.Z`. It changes only `version.txt` and
    `.release-please-manifest.json`. The number is the last release plus the
-   largest pending bump, whatever order the PRs merged in.
+   largest pending bump, whatever order the PRs merged in. Its author is
+   `lcps-uploader-release[bot]` and it carries the label
+   `autorelease: pending`. GitHub announces it only to watchers, so watch the
+   repository (Watch → Custom → Pull requests) to be notified.
 3. **Merging the release PR** tags `vX.Y.Z` and publishes a GitHub Release
    with notes from the included PRs.
 
@@ -129,19 +132,37 @@ that run.
 
 ## The release token
 
-`release.yml` runs release-please with the repository secret
-`RELEASE_PLEASE_TOKEN`, a fine-grained personal access token. The default
-Actions token can't be used: pull requests it opens don't trigger workflows,
-so the release PR would never get CI and could never pass the required
-checks.
+`release.yml` runs release-please with a token minted on each run from the
+GitHub App `lcps-uploader-release`, so the release PR, its commit and each
+GitHub Release are authored by `lcps-uploader-release[bot]`. The default
+Actions token isn't used: CI on a pull request it opens waits for a manual
+approval, so the release PR couldn't pass the required checks on its own.
 
-- Owner `robbchar`, repository access: this repository only
-- Permissions: Contents, Issues, Pull requests — read and write
-- **Expires: never** (created 2026-09-30)
+- The App: owned by `robbchar`, installable only on that account, installed
+  on this repository only, webhook off
+- Repository permissions: Contents, Issues, Pull requests — read and write
+  (plus the mandatory Metadata, read-only). Issues lets release-please create
+  its `autorelease:` labels if they are missing.
+- The repository variable `RELEASE_APP_CLIENT_ID` holds the App's Client ID;
+  the repository secret `RELEASE_APP_PRIVATE_KEY` holds its private key.
 
-It has no expiry, so it stays valid until revoked. If it may have leaked, or
-its owner loses access, revoke it and create a replacement with the same
-permissions. Store the new one with
-`gh secret set RELEASE_PLEASE_TOKEN -R robbchar/saras-old-photos-uploader`.
-Until then, the `Release` workflow fails on each push to `main`; nothing else
-breaks. Re-run the failed `Release` run once the secret is replaced.
+Each run's token covers this repository and those three permissions only,
+and is revoked when the job ends. The private key doesn't expire. If it may
+have leaked, generate a new key in the App's settings (Settings → Developer
+settings → GitHub Apps → `lcps-uploader-release` → Private keys), store it
+with `gh secret set RELEASE_APP_PRIVATE_KEY -R robbchar/saras-old-photos-uploader`
+reading the downloaded `.pem` file on standard input, delete the downloaded
+file, then delete the old key. Until the secret works, the `Release` workflow
+fails on each push to `main`; nothing else breaks. Re-run the failed
+`Release` run once it is replaced.
+
+Two failures to recognize:
+
+- **"refusing to allow a GitHub App to create or update workflow".** The
+  release branch was rebuilt on a `main` whose `.github/workflows/` changed,
+  such as a Dependabot Actions bump. The App has no Workflows permission on
+  purpose. Grant Workflows read and write in its settings, approve the change
+  on the installation, and re-run the `Release` run.
+- **A run that fails while labeling the release PR.** The PR exists but
+  lacks `autorelease: pending`, and merging it then tags nothing. Add the
+  label by hand before merging.
