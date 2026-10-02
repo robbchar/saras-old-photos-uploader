@@ -1710,13 +1710,14 @@ class ClearCheck:
         return not self.deletes.deleted and not self.deletes.refused and self.pending_tasks == 0
 
 
-def pending_task_count(identifier: str) -> int:
-    """Tasks IA has queued or running for the item (the catalog, not history). Raises on failure."""
-    tasks = internetarchive.get_tasks(
-        identifier=identifier,
-        params={"catalog": 1, "history": 0},
-        http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS,
-    )
+def pending_task_count(identifier: str, archive_session: internetarchive.ArchiveSession | None = None) -> int:
+    """Tasks IA has queued or running for the item (the catalog, not history). Raises on failure.
+    `archive_session` is for a caller whose process has no IA credentials of its own."""
+    query = {"catalog": 1, "history": 0}
+    if archive_session is None:
+        tasks = internetarchive.get_tasks(identifier=identifier, params=query, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+    else:
+        tasks = internetarchive.get_tasks(identifier=identifier, params=query, archive_session=archive_session)
     return len(tasks)
 
 

@@ -22,8 +22,10 @@ from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import IO, Any, Protocol, TextIO, TypeVar
+from unittest.mock import patch
 
 import internetarchive
+import internetarchive.config
 import pytest
 from googleapiclient.errors import HttpError
 
@@ -313,6 +315,22 @@ def wait_for_ia(
         if time.monotonic() >= deadline:
             pytest.fail(f"{step}: {on_timeout or f'IA did not show {description}'} (waited {IA_POLL_TIMEOUT_SECONDS // 60} min)")
         time.sleep(IA_POLL_INTERVAL_SECONDS)
+
+
+def real_ia_session() -> internetarchive.ArchiveSession:
+    """A session with the credentials the CLI runs use; conftest hides them from this process, and IA's task queue needs them."""
+    with patch.dict(os.environ):
+        for name, value in REAL_IA_ENVIRONMENT.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        config = internetarchive.config.get_config()
+    return internetarchive.get_session(config=config, http_adapter_kwargs=IA_HTTP_ADAPTER_KWARGS)
+
+
+def queued_task_count(identifier: str) -> int:
+    return pending_task_count(identifier, archive_session=real_ia_session())
 
 
 def item_metadata(identifier: str) -> dict[str, Any] | None:
@@ -638,7 +656,7 @@ def test_rehearsal(tmp_path, request):
     wait_for_ia(
         STEP_9B,
         f"{first_identifier}'s task queue empty",
-        lambda: True if pending_task_count(first_identifier) == 0 else None,
+        lambda: True if queued_task_count(first_identifier) == 0 else None,
         lock=lock,
         on_timeout=f"Internet Archive's queue for {first_identifier} is still busy; re-run later",
     )
@@ -1004,6 +1022,47 @@ def test_cli_environment_uses_the_real_ia_settings_and_the_current_proxy(monkeyp
     assert environment["IA_CONFIG_FILE"] == "real.ini"
     assert "IA_ACCESS_KEY_ID" not in environment
     assert environment["HTTPS_PROXY"] == "http://proxy.invalid:3128"
+
+
+def test_real_ia_session_carries_the_cli_runs_credentials_not_this_processs_empty_config(monkeypatch, tmp_path):
+    real_config = tmp_path / "real-ia.ini"
+    real_config.write_text("\n".join(["[s3]", "access = real-access", "secret = real-secret", ""]), encoding="utf-8")
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_CONFIG_FILE", str(real_config))
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_ACCESS_KEY_ID", None)
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_SECRET_ACCESS_KEY", None)
+    config_before = os.environ["IA_CONFIG_FILE"]
+
+    session = real_ia_session()
+
+    assert (session.access_key, session.secret_key) == ("real-access", "real-secret")
+    assert os.environ["IA_CONFIG_FILE"] == config_before
+
+
+def test_real_ia_session_prefers_the_cli_runs_key_environment(monkeypatch):
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_ACCESS_KEY_ID", "env-access")
+    monkeypatch.setitem(REAL_IA_ENVIRONMENT, "IA_SECRET_ACCESS_KEY", "env-secret")
+
+    session = real_ia_session()
+
+    assert (session.access_key, session.secret_key) == ("env-access", "env-secret")
+    assert "IA_ACCESS_KEY_ID" not in os.environ
+
+
+def test_queued_task_count_asks_ia_for_the_catalog_with_the_credentialed_session(monkeypatch):
+    session = object()
+    monkeypatch.setattr("test_e2e_rehearsal.real_ia_session", lambda: session)
+    calls: list[dict[str, Any]] = []
+
+    def fake_get_tasks(**kwargs: Any) -> set[str]:
+        calls.append(kwargs)
+        return {"task-1", "task-2"}
+
+    monkeypatch.setattr(internetarchive, "get_tasks", fake_get_tasks)
+
+    assert queued_task_count("lcps-x-00001") == 2
+    assert calls[0]["archive_session"] is session
+    assert calls[0]["identifier"] == "lcps-x-00001"
+    assert calls[0]["params"] == {"catalog": 1, "history": 0}
 
 
 def test_run_summary_timestamp_is_none_without_a_run_summary(tmp_path):
