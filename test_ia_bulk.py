@@ -857,6 +857,34 @@ def test_sync_field_receipt_says_the_file_location_columns_are_removed():
     ) in receipt
 
 
+def test_field_receipt_lists_subject_and_the_columns_it_is_built_from():
+    column_map = build_column_map(
+        ["Title", "Theme", "Subtheme (Optional)", "Subject Terms (Controlled Vocab)"]
+    )
+
+    receipt = format_field_receipt(column_map, "{file}", subject_columns=SUBJECT_COLUMNS)
+
+    assert "will upload these metadata fields:\n  title, subject\n" in receipt
+    assert (
+        "sent together as subject (each cell split on ';'), not under their own names:\n"
+        "  theme, subtheme_optional, subject_terms_controlled_vocab"
+    ) in receipt
+
+
+def test_sync_field_receipt_says_the_subject_columns_are_removed():
+    column_map = build_column_map(
+        ["Title", "Theme", "Subtheme (Optional)", "Subject Terms (Controlled Vocab)"]
+    )
+
+    receipt = format_field_receipt(column_map, "{file}", sync=True, subject_columns=SUBJECT_COLUMNS)
+
+    assert (
+        "sent together as subject (each cell split on ';'), and REMOVED under their own "
+        "names from each item this run pushes:\n"
+        "  theme, subtheme_optional, subject_terms_controlled_vocab"
+    ) in receipt
+
+
 def test_sheet_structure_validation_files_a_grid_shape_error_under_its_own_row_not_row_1():
     """check_grid_shape's message already names the real row number (e.g.
     "row 3 has..."); filing it under row 1 regardless - which an earlier
@@ -6172,6 +6200,66 @@ def test_cmd_upload_without_subject_columns_sends_the_columns_as_before(
 
     assert captured[0]["row"]["theme"] == "Buildings"
     assert "subject" not in captured[0]["row"]
+
+
+def test_cmd_validate_refuses_subject_columns_naming_a_missing_column(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [SHEET_HEADER + ["Theme"], ["First photo", "photo1.jpg", "", "", "", "", "Buildings"]]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_validate(Namespace(project="astoriaphotos", registry=str(registry_path), live=False))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "subject_columns names 'subtheme_optional', which is not a column in this Sheet" in err
+    assert f"fix subject_columns in {registry_path}" in err
+
+
+def test_cmd_upload_refuses_subject_columns_naming_a_missing_column(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER + ["Theme"], ["First photo", "photo1.jpg", "", "", "", "", "Buildings"]]
+    captured = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=captured, registry=registry
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert captured == []
+    assert "subject_columns names 'subtheme_optional'" in err
+
+
+def test_cmd_validate_suggests_nothing_toward_subject_when_subject_columns_build_it(
+    tmp_path, monkeypatch, capsys
+):
+    """subject is already sent; suggesting a rename onto it would advise a collision."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    header = SHEET_HEADER + SUBJECT_HEADER_COLUMNS + ["Keywords"]
+    grid = [header, ["First photo", "photo1.jpg", "", "", "", "", "Buildings", "", "", "harbor"]]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)),
+        encoding="utf-8",
+    )
+
+    cmd_validate(Namespace(project="astoriaphotos", registry=str(registry_path), live=False))
+    out = capsys.readouterr().out
+
+    assert "-> 'subject'" not in out
 
 
 def test_upload_row_sends_a_list_value_as_a_list(tmp_path, monkeypatch):
@@ -12892,6 +12980,22 @@ def test_sync_from_sheet_sends_subject_and_removes_its_source_fields(tmp_path, m
     ]
     for source in SUBJECT_COLUMNS:
         assert metadata[source] == REMOVE_TAG_SENTINEL, source
+
+
+def test_sync_from_sheet_refuses_subject_columns_naming_a_missing_column(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent, registry=registry)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert sent == []
+    assert "subject_columns names 'theme', which is not a column in this Sheet" in captured.out
+    assert "fix subject_columns in" in captured.err
 
 
 def test_plan_sync_targets_re_pushes_a_row_last_synced_before_subject_columns():

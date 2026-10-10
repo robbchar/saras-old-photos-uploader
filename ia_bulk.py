@@ -70,7 +70,7 @@ from project_config import (
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
 from stop_request import StopRequest, stop_request_on_interrupt
-from subject_columns import SUBJECT_FIELD, subject_value
+from subject_columns import SUBJECT_FIELD, check_subject_columns, subject_value
 from sync_state import (
     MissingSyncColumns,
     SyncColumns,
@@ -469,7 +469,12 @@ def sheet_structure_validation(column_map: ColumnMap, grid: list[list[str]]) -> 
     return results
 
 
-def format_field_receipt(column_map: ColumnMap, file_template: str, sync: bool = False) -> str:
+def format_field_receipt(
+    column_map: ColumnMap,
+    file_template: str,
+    sync: bool = False,
+    subject_columns: Sequence[str] = (),
+) -> str:
     """Printed before anything permanent happens, so the transformation from
     Sheet header to IA field name is reviewable by a human.
 
@@ -494,11 +499,16 @@ def format_field_receipt(column_map: ColumnMap, file_template: str, sync: bool =
       rename-suggestion logic cannot disagree about which names are the
       tool's.
 
-    `sync` names what sync does to the file-location columns: it removes them."""
+    `sync` names what sync does to the file-location columns: it removes them.
+
+    `subject_columns` are named as what `subject` is built from; sync also removes them."""
     all_fields = column_map.uploadable_fields()
     location_fields = file_location_fields(file_template)
-    sent = sheet_metadata_fields(column_map, file_template)
+    sent = sheet_metadata_fields(column_map, file_template, subject_columns)
     fields = [name for name in all_fields if name in sent]
+    combined = [name for name in subject_columns if name in all_fields]
+    if subject_columns:
+        fields.append(SUBJECT_FIELD)
     dropped = [name for name in all_fields if name in DROPPED_BY_UPLOAD_ROW]
     locating = [name for name in all_fields if name in location_fields]
     # `identifier` is in both sets; it is listed under "reserves these names"
@@ -520,6 +530,17 @@ def format_field_receipt(column_map: ColumnMap, file_template: str, sync: bool =
     elif locating:
         lines.append("NOT uploaded - only used to find each row's file:")
         lines.append(f"  {', '.join(locating)}")
+    if combined and sync:
+        lines.append(
+            f"sent together as {SUBJECT_FIELD} (each cell split on ';'), and REMOVED under "
+            "their own names from each item this run pushes:"
+        )
+        lines.append(f"  {', '.join(combined)}")
+    elif combined:
+        lines.append(
+            f"sent together as {SUBJECT_FIELD} (each cell split on ';'), not under their own names:"
+        )
+        lines.append(f"  {', '.join(combined)}")
     if generated:
         lines.append(
             "uploaded with a value this tool generates - the column's own value is IGNORED:"
@@ -2770,6 +2791,16 @@ def validate_sheet_content(
         )
         raise SheetSetupFailed
 
+    subject_errors = check_subject_columns(
+        sheet.config.subject_columns,
+        sheet.column_map,
+        file_location_fields(sheet.config.file_template),
+    )
+    if subject_errors:
+        print("\n".join(subject_errors), file=sys.stderr)
+        print(f"fix subject_columns in {args.registry}", file=sys.stderr)
+        raise SheetSetupFailed
+
     # See docs/decisions/FILES-AND-METADATA.md, "A file is found by
     # resolution, not by constructing a path". Both commands run the
     # identical two steps, so the value `upload` records in
@@ -3311,12 +3342,14 @@ def run_validate(args, json_out: TextIO | None) -> int:
 
     print(format_report(results))
     print()
-    print(format_field_receipt(column_map, config.file_template))
+    print(format_field_receipt(column_map, config.file_template, subject_columns=config.subject_columns))
     print()
     print(render_lifecycle_summary(report))
     print()
     print("suggestions (advisory - nothing is changed automatically):")
-    suggestions = suggest_standard_fields(sheet_metadata_fields(column_map, config.file_template))
+    sent = sheet_metadata_fields(column_map, config.file_template, config.subject_columns)
+    # subject is already sent when subject_columns build it, so nothing is steered onto it.
+    suggestions = suggest_standard_fields(sent | {SUBJECT_FIELD} if config.subject_columns else sent)
     if suggestions:
         for suggestion in suggestions:
             print(f"  '{suggestion.field_name}' -> '{suggestion.standard}': {suggestion.reason}")
@@ -5045,7 +5078,7 @@ def upload_from_sheet(args) -> int:
     # `upload` is where something permanent happens, so it shows the same
     # field receipt `validate` does rather than assuming the operator ran
     # validate first and remembers what it said.
-    print(format_field_receipt(column_map, config.file_template))
+    print(format_field_receipt(column_map, config.file_template, subject_columns=config.subject_columns))
     print()
 
     if dry_run:
@@ -6494,6 +6527,13 @@ def sync_header_refusal(
     except TemplateError as exc:
         return f"project '{config.project_id}': {exc} - fix 'file_template' in {registry_path}", []
 
+    # Sync removes every listed column from items, so a bad list is refused before anything is sent.
+    subject_errors = check_subject_columns(
+        config.subject_columns, column_map, file_location_fields(config.file_template)
+    )
+    if subject_errors:
+        return f"project '{config.project_id}': fix subject_columns in {registry_path}", subject_errors
+
     return None
 
 
@@ -6580,7 +6620,11 @@ def sync_from_sheet(args) -> int:
         )
         print()
 
-    print(format_field_receipt(column_map, config.file_template, sync=True))
+    print(
+        format_field_receipt(
+            column_map, config.file_template, sync=True, subject_columns=config.subject_columns
+        )
+    )
     print()
 
     to_push, already_synced = split_unchanged(targets)
