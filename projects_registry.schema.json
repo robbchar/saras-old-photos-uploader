@@ -111,6 +111,13 @@
           "$ref": "#/$defs/normalizedColumnName",
           "description": "Column --batch matches against. Absent: --batch is unavailable."
         },
+        "subject_columns": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/normalizedColumnName" },
+          "description": "Columns sent together as IA's subject (each cell split on ';'), never under their own names; sync removes them from items. Absent: no subject is built."
+        },
         "photo_extensions": {
           "type": "array",
           "minItems": 1,

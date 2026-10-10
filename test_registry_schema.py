@@ -125,6 +125,9 @@ BROKEN_REGISTRIES = {
     "trailing newline in required_for_upload": _registry_with(required_for_upload=["title\n"]),
     "blank withdrawn_title": _registry_with(withdrawn_title="   "),
     "non-string withdrawn_description": _registry_with(withdrawn_description=7),
+    "empty subject_columns": _registry_with(subject_columns=[]),
+    "raw header in subject_columns": _registry_with(subject_columns=["Theme"]),
+    "repeated subject_columns": _registry_with(subject_columns=["theme", "theme"]),
 }
 
 
@@ -155,6 +158,7 @@ def test_schema_rejects_a_mediatype_outside_ia_mediatypes():
         {"live_sheet_tab": "Live", "test_sheet_tab": "Test"},
         {"upload_log_tab": "", "sync_log_tab": "Sync Log"},
         {"withdrawn_title": "Removed", "withdrawn_description": "Taken down on request."},
+        {"subject_columns": ["theme", "subtheme_optional"]},
     ],
     ids=lambda keys: ",".join(keys),
 )

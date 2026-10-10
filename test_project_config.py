@@ -594,3 +594,40 @@ def test_withdrawn_text_can_be_set_per_project():
 def test_withdrawn_text_must_be_non_blank_text(key, value):
     with pytest.raises(ConfigError, match=key):
         load_project_config(_registry(**{key: value}), "p")
+
+
+SUBJECT_COLUMNS = ["theme", "subtheme_optional", "subject_terms_controlled_vocab"]
+
+
+def test_subject_columns_default_to_empty():
+    """Optional: a project that never sends `subject` behaves exactly as before."""
+    assert load_project_config(_registry(), "p").subject_columns == ()
+
+
+def test_subject_columns_are_loaded_in_order():
+    config = load_project_config(_registry(subject_columns=SUBJECT_COLUMNS), "p")
+
+    assert config.subject_columns == tuple(SUBJECT_COLUMNS)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("theme", "subject_columns must be a list"),
+        ([], "subject_columns must name at least one column"),
+        (["theme", ""], "every subject_columns entry must be a non-empty string"),
+        (["theme", 3], "every subject_columns entry must be a non-empty string"),
+        (["theme", "theme"], "subject_columns names 'theme' twice"),
+    ],
+)
+def test_malformed_subject_columns_are_rejected(value, message):
+    with pytest.raises(ConfigError, match=message):
+        load_project_config(_registry(subject_columns=value), "p")
+
+
+def test_subject_columns_raw_header_text_is_rejected_with_the_normalized_name():
+    with pytest.raises(ConfigError) as exc:
+        load_project_config(_registry(subject_columns=["Subtheme (Optional)"]), "p")
+
+    assert "subject_columns entry 'Subtheme (Optional)' is raw header text" in str(exc.value)
+    assert "use 'subtheme_optional'" in str(exc.value)

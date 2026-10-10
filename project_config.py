@@ -31,6 +31,7 @@ OPTIONAL_KEYS = (
     "upload_log_tab",
     "sync_log_tab",
     "batch_column",
+    "subject_columns",
     "photo_extensions",
     "withdrawn_title",
     "withdrawn_description",
@@ -146,6 +147,8 @@ class ProjectConfig:
     # Replace a withdrawn item's title and description; see docs/decisions/WITHDRAWAL.md.
     withdrawn_title: str = DEFAULT_WITHDRAWN_TITLE
     withdrawn_description: str = DEFAULT_WITHDRAWN_DESCRIPTION
+    # Normalized columns sent together as IA's `subject`, never under their own names.
+    subject_columns: tuple[str, ...] = ()
 
     def sheet_id_for(self, live: bool) -> str:
         return self.sheet_id if live else self.test_sheet_id
@@ -237,6 +240,39 @@ def _withdrawn_text(block: dict, key: str, default: str, project_id: str) -> str
             "key to use the default wording."
         )
     return value.strip()
+
+
+def _subject_columns(block: dict, project_id: str) -> tuple[str, ...]:
+    """The optional subject_columns key: absent means none; present must be distinct normalized names."""
+    value = block.get("subject_columns")
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"project '{project_id}': subject_columns must be a list, got {type(value).__name__!r}"
+        )
+    if not value:
+        raise ConfigError(
+            f"project '{project_id}': subject_columns must name at least one column. Remove "
+            "the key entirely if this project sends no subject."
+        )
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(
+                f"project '{project_id}': every subject_columns entry must be a non-empty "
+                f"string, got {name!r}"
+            )
+        normalized = normalize_header(name)
+        if normalized != name:
+            raise ConfigError(
+                f"project '{project_id}': subject_columns entry {name!r} is raw header text, "
+                f"not a normalized column name - use {normalized!r}. Your Sheet is fine; the "
+                "registry entry is not."
+            )
+    repeated = next((name for index, name in enumerate(value) if name in value[:index]), None)
+    if repeated is not None:
+        raise ConfigError(f"project '{project_id}': subject_columns names {repeated!r} twice")
+    return tuple(value)
 
 
 def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
@@ -431,4 +467,5 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
         withdrawn_description=_withdrawn_text(
             block, "withdrawn_description", DEFAULT_WITHDRAWN_DESCRIPTION, project_id
         ),
+        subject_columns=_subject_columns(block, project_id),
     )
