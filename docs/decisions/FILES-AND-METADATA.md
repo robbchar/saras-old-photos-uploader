@@ -179,7 +179,8 @@ So a project's registry may list them as `subject_columns`. For each row the
 tool:
 
 - splits every listed cell on `;` (never on commas);
-- trims each piece and drops empty ones;
+- trims each piece and drops empty ones, and drops `REMOVE_TAG` (inside a
+  list it would be published as a topic, not read as a delete);
 - keeps the first of any exact repeat;
 - sends the result as `subject`, in column order.
 

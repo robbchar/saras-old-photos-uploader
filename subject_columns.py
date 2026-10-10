@@ -8,15 +8,17 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 
 from column_map import RESERVED_FIELDS, ColumnMap
-from ia_fields import IA_STANDARD_FIELDS, PIPELINE_OWNED_FIELDS
+from ia_fields import IA_STANDARD_FIELDS, PIPELINE_OWNED_FIELDS, REMOVE_TAG_SENTINEL
 
 SUBJECT_FIELD = "subject"
 SUBJECT_SEPARATOR = ";"
 
 
 def split_subject_cell(text: str) -> list[str]:
-    """One cell's values: split on ';', trimmed, empty pieces dropped. Commas never split."""
-    return [piece for part in text.split(SUBJECT_SEPARATOR) if (piece := part.strip())]
+    """One cell's values: split on ';', trimmed, empty pieces dropped. Commas never split.
+    REMOVE_TAG is dropped too: a list element is never a delete, only a topic named REMOVE_TAG."""
+    pieces = (part.strip() for part in text.split(SUBJECT_SEPARATOR))
+    return [piece for piece in pieces if piece and piece != REMOVE_TAG_SENTINEL]
 
 
 def subject_values(row: Mapping[str, str], columns: Sequence[str]) -> list[str]:

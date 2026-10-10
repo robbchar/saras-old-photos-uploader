@@ -146,9 +146,11 @@ the same as an intentional one. The same goes for typos in values
 Terms (Controlled Vocab) go to Internet Archive together as the item's
 "Topics", the `subject` field. That is what lists an item under the
 collection's topics. To give a cell several terms, separate them with `;`
-(commas don't split). The three headers are named in `projects_registry.json`
-as `subject_columns`. If one of them is renamed in the Sheet, every run
-refuses until the registry entry matches.
+(commas don't split). To drop a topic, delete it from its cell; `REMOVE_TAG`
+in these columns is ignored rather than published as a topic. The three
+headers are named in `projects_registry.json` as `subject_columns`. If one of
+them is renamed in the Sheet, every run refuses until the registry entry
+matches.
 
 A human-filled field that is simply blank — no title yet, no filename yet —
 is *not* an error. It marks the row **not ready**, a
@@ -519,7 +521,8 @@ python ia_bulk.py sync-metadata --project sarasoldphotos --live
 ```
 
 Decoupled from upload and safe to re-run. Blank cell = leave alone; literal
-`REMOVE_TAG` = delete that field. `noindex` cannot be changed this way —
+`REMOVE_TAG` = delete that field, except in the three topic columns (below).
+`noindex` cannot be changed this way —
 see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata).
 
 The columns `file_template` names are never sent, and every push removes them

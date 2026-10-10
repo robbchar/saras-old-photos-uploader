@@ -54,6 +54,7 @@ from daily_quota import describe_refusal, measure_daily_quota
 from ia_fields import (
     IA_STANDARD_FIELDS,
     PIPELINE_OWNED_FIELDS,
+    REMOVE_TAG_SENTINEL,
     MetadataValue,
     metadata_to_send,
     suggest_standard_fields,
@@ -4292,7 +4293,6 @@ class SheetUploadRun:
             pass
 
 
-REMOVE_TAG_SENTINEL = "REMOVE_TAG"
 # How much of a field value a dry run prints before eliding. Long enough for a
 # typo to be visible in place, short enough that one changed field stays one
 # readable pair of lines.

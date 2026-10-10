@@ -26,6 +26,9 @@ IA_STANDARD_FIELDS = frozenset(
 # identifier and mediatype are derived, not sourced from the Sheet.
 PIPELINE_OWNED_FIELDS = frozenset({"identifier", "mediatype", "collection"})
 
+# IA's own delete marker for a field, as `ia metadata --modify field:REMOVE_TAG` uses it.
+REMOVE_TAG_SENTINEL = "REMOVE_TAG"
+
 # One cell's text, or a field IA repeats (several `subject` values).
 MetadataValue = str | list[str]
 

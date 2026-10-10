@@ -60,6 +60,18 @@ def test_subject_values_treat_a_missing_key_as_blank():
     assert subject_values({"theme": "Buildings"}, COLUMNS) == ["Buildings"]
 
 
+def test_subject_values_never_send_remove_tag_as_a_topic():
+    """REMOVE_TAG deletes a field elsewhere; here it would publish a topic named REMOVE_TAG."""
+    row = _row("Townscape", "REMOVE_TAG", "Buildings; REMOVE_TAG ")
+
+    assert subject_values(row, COLUMNS) == ["Townscape", "Buildings"]
+
+
+def test_subject_value_of_only_remove_tag_cells_is_blank():
+    """Not a delete of the whole field: that would hang on which cells happened to be filled."""
+    assert subject_value(_row("REMOVE_TAG"), COLUMNS) == ""
+
+
 def test_subject_value_is_plain_text_for_one_value():
     assert subject_value(_row("Buildings"), COLUMNS) == "Buildings"
 
