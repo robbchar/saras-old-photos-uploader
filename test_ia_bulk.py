@@ -6119,6 +6119,81 @@ def test_cmd_upload_never_sends_the_file_location_columns(tmp_path, monkeypatch,
     assert metadata_row["identifier-bib"] == "box1/photo1.jpg"
 
 
+SUBJECT_HEADER_COLUMNS = ["Theme", "Subtheme (Optional)", "Subject Terms (Controlled Vocab)"]
+SUBJECT_COLUMNS = ["theme", "subtheme_optional", "subject_terms_controlled_vocab"]
+
+
+def _upload_subject_row(tmp_path, monkeypatch, cells):
+    """Uploads one row with the three subject columns; returns the row upload_row was handed."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER + SUBJECT_HEADER_COLUMNS, ["First photo", "photo1.jpg", "", "", "", "", *cells]]
+    captured = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=captured, registry=registry
+    )
+    assert cmd_upload(make_upload_args(tmp_path, registry_path)) == 0
+    return captured[0]["row"]
+
+
+def test_cmd_upload_sends_the_subject_columns_as_subject_only(tmp_path, monkeypatch, capsys):
+    metadata_row = _upload_subject_row(
+        tmp_path, monkeypatch,
+        ["Townscape & Built Environment", "Commercial Buildings", "Buildings; Streets"],
+    )
+    capsys.readouterr()
+
+    assert sorted(metadata_row) == ["file", "identifier-bib", "mediatype", "subject", "title"]
+    assert metadata_row["subject"] == [
+        "Townscape & Built Environment", "Commercial Buildings", "Buildings", "Streets",
+    ]
+
+
+def test_cmd_upload_sends_a_single_subject_as_plain_text(tmp_path, monkeypatch, capsys):
+    """How IA stores one value, so a later sync compares like with like."""
+    metadata_row = _upload_subject_row(tmp_path, monkeypatch, ["Buildings", "", ""])
+    capsys.readouterr()
+
+    assert metadata_row["subject"] == "Buildings"
+
+
+def test_cmd_upload_without_subject_columns_sends_the_columns_as_before(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER + ["Theme"], ["First photo", "photo1.jpg", "", "", "", "", "Buildings"]]
+    captured = []
+    _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid, captured=captured)
+
+    assert cmd_upload(make_upload_args(tmp_path, registry_path)) == 0
+    capsys.readouterr()
+
+    assert captured[0]["row"]["theme"] == "Buildings"
+    assert "subject" not in captured[0]["row"]
+
+
+def test_upload_row_sends_a_list_value_as_a_list(tmp_path, monkeypatch):
+    """internetarchive sends one header per element; a joined string would be one topic."""
+    from ia_bulk import upload_row
+
+    (tmp_path / "photo1.jpg").write_bytes(b"data")
+    row = {"file": "photo1.jpg", "title": "First photo", "subject": ["Buildings", "Streets"]}
+    captured = {}
+
+    def fake_upload(identifier, files, metadata, **kwargs):
+        captured["metadata"] = metadata
+        return [FakeResponse(ok=True)]
+
+    monkeypatch.setattr(internetarchive, "upload", fake_upload)
+
+    upload_row(row, target_identifier="zztest-lcps-astoriaphotos-00001", collection="test_collection", files_dir=tmp_path)
+
+    assert captured["metadata"]["subject"] == ["Buildings", "Streets"]
+    assert "file" not in captured["metadata"]
+
+
 def test_cmd_upload_refuses_a_sheet_without_the_ia_write_back_columns(
     tmp_path, monkeypatch, capsys
 ):

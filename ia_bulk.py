@@ -54,6 +54,7 @@ from daily_quota import describe_refusal, measure_daily_quota
 from ia_fields import (
     IA_STANDARD_FIELDS,
     PIPELINE_OWNED_FIELDS,
+    MetadataValue,
     metadata_to_send,
     suggest_standard_fields,
 )
@@ -69,6 +70,7 @@ from project_config import (
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
 from stop_request import StopRequest, stop_request_on_interrupt
+from subject_columns import SUBJECT_FIELD, subject_value
 from sync_state import (
     MissingSyncColumns,
     SyncColumns,
@@ -1527,11 +1529,7 @@ def upload_row(row: dict, target_identifier: str, collection: str, files_dir: st
             "one permanent item"
         )
     file_path = Path(files_dir) / file_name
-    metadata = {
-        key: (value or "").strip()
-        for key, value in row.items()
-        if key not in ("identifier", "file") and (value or "").strip()
-    }
+    metadata = metadata_to_send({key: value for key, value in row.items() if key != "file"})
     metadata["date"] = (row.get("date") or "").strip() or UNDATED_PLACEHOLDER
     metadata["collection"] = collection
 
@@ -3701,7 +3699,9 @@ def file_location_fields(file_template: str) -> frozenset[str]:
     )
 
 
-def sheet_metadata_fields(column_map: ColumnMap, file_template: str) -> frozenset[str]:
+def sheet_metadata_fields(
+    column_map: ColumnMap, file_template: str, subject_columns: Sequence[str] = ()
+) -> frozenset[str]:
     """The normalized column names whose values this tool sends to Internet
     Archive as item metadata.
 
@@ -3716,12 +3716,15 @@ def sheet_metadata_fields(column_map: ColumnMap, file_template: str) -> frozense
     it matters twice over: Internet Archive will not change an item's
     mediatype after upload, and `collection` is membership, not metadata.
 
-    Also subtracts file_location_fields(): identifier-bib already records the path."""
+    Also subtracts file_location_fields(): identifier-bib already records the path.
+
+    Also subtracts subject_columns: they are sent together as `subject`, never under their own names."""
     return (
         frozenset(column_map.uploadable_fields())
         - DROPPED_BY_UPLOAD_ROW
         - PIPELINE_OWNED_FIELDS
         - file_location_fields(file_template)
+        - frozenset(subject_columns)
     )
 
 
@@ -3755,8 +3758,11 @@ def item_project_id(uploaded_as: str, live: bool) -> str | None:
 
 
 def sheet_upload_metadata(
-    target: UploadTarget, uploadable: frozenset[str], mediatype: str
-) -> dict[str, str]:
+    target: UploadTarget,
+    uploadable: frozenset[str],
+    mediatype: str,
+    subject_columns: Sequence[str] = (),
+) -> dict[str, MetadataValue]:
     """The row dict handed to upload_row.
 
     upload_row turns every key it is given (bar `identifier` and `file`) into
@@ -3775,7 +3781,11 @@ def sheet_upload_metadata(
     zztest-lcps-sarahsoldphotos-00005 carries a permanently misspelled
     `indentifier-bib` because a header typo shipped once; a generated field
     name cannot do that."""
-    metadata_row = {key: value for key, value in target.row.items() if key in uploadable}
+    metadata_row: dict[str, MetadataValue] = {
+        key: value for key, value in target.row.items() if key in uploadable
+    }
+    if subject_columns:
+        metadata_row[SUBJECT_FIELD] = subject_value(target.row, subject_columns)
     metadata_row["mediatype"] = mediatype
     metadata_row["identifier-bib"] = target.identifier_bib
     metadata_row["file"] = target.row["file"]
@@ -3939,6 +3949,8 @@ class SheetUploadRun:
     chunk_size: int = CHUNK_SIZE
     # Set by the first interrupt; checked before each item and each chunk.
     stop_request: StopRequest = field(default_factory=StopRequest)
+    # The registry's subject_columns, sent together as `subject`.
+    subject_columns: tuple[str, ...] = ()
 
     @functools.cached_property
     def uploadable(self) -> frozenset[str]:
@@ -3950,7 +3962,7 @@ class SheetUploadRun:
         the same set 10,000 times. cached_property works on a frozen
         dataclass because it writes through __dict__ rather than
         __setattr__."""
-        return sheet_metadata_fields(self.column_map, self.file_template)
+        return sheet_metadata_fields(self.column_map, self.file_template, self.subject_columns)
 
     def execute(self, targets: list[UploadTarget]) -> UploadSummary:
         """One chunk at a time: verify, reserve, upload, verify, confirm,
@@ -4062,7 +4074,9 @@ class SheetUploadRun:
                 self._log_start(target, position)
                 try:
                     already_on_ia = upload_row(
-                        sheet_upload_metadata(target, self.uploadable, self.mediatype),
+                        sheet_upload_metadata(
+                            target, self.uploadable, self.mediatype, self.subject_columns
+                        ),
                         target.uploaded_as,
                         self.collection,
                         self.files_dir,
@@ -5088,6 +5102,7 @@ def upload_from_sheet(args) -> int:
             log_path=log_path,
             chunk_size=chunk_size,
             stop_request=stop_request,
+            subject_columns=config.subject_columns,
         ).execute(targets).with_skipped(skipped_rows(blocked))
 
     lines = upload_summary_lines(summary)
