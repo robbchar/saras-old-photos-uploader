@@ -4396,11 +4396,12 @@ def _why_it_reads_unchanged(current: object, new: object) -> str | None:
     current_text, new_text = _display_text(current), _display_text(new)
     if _first_visible_difference(current_text, new_text) is not None:
         return None
-    if isinstance(current, list) and len(current) > 1:
-        return (
-            f"(Internet Archive holds {_pluralize(len(current), 'separate value')}; "
-            "the sync replaces them with one)"
-        )
+    current_count = len(current) if isinstance(current, list) else 1
+    new_count = len(new) if isinstance(new, list) else 1
+    if current_count != new_count:
+        held = "this as one value" if current_count == 1 else _pluralize(current_count, "separate value")
+        sent = "replaces them with one" if new_count == 1 else f"sends {_pluralize(new_count, 'separate value')}"
+        return f"(Internet Archive holds {held}; the sync {sent})"
     if current_text != new_text:
         return "(the two differ only in spaces)"
     return "(the two differ in a way that does not show on screen)"
@@ -4431,8 +4432,8 @@ def metadata_changes(sheet_metadata: Mapping[str, MetadataValue], remote: dict) 
     removing what is not present changes nothing.
 
     Raw values are compared, never their rendered text: two long values that
-    differ only past the display cutoff are still a change, and a string
-    against IA's list is one too, since the real run replaces the list."""
+    differ only past the display cutoff are still a change, and a different
+    number of values is one too, since the real run replaces the whole field."""
     changes: list[FieldChange] = []
     for field_name, value in sorted(metadata_to_send(sheet_metadata).items()):
         current = remote.get(field_name)

@@ -13485,6 +13485,36 @@ def test_metadata_changes_gives_a_one_value_list_the_plain_note():
     assert change.note == "(the two differ in a way that does not show on screen)"
 
 
+def test_metadata_changes_reads_the_same_subject_list_as_unchanged():
+    from ia_bulk import metadata_changes
+
+    assert metadata_changes({"subject": ["a", "b"]}, {"subject": ["a", "b"]}) == []
+
+
+def test_metadata_changes_reads_one_subject_sent_as_text_as_unchanged():
+    from ia_bulk import metadata_changes
+
+    assert metadata_changes({"subject": "Buildings"}, {"subject": "Buildings"}) == []
+
+
+def test_metadata_changes_notes_one_ia_value_that_reads_like_several_sent():
+    """IA holds 'a; b' as one value; the sync sends two. Both lines read 'a; b'."""
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"subject": ["a", "b"]}, {"subject": "a; b"})
+
+    assert (change.now, change.new) == ("a; b", "a; b")
+    assert change.note == "(Internet Archive holds this as one value; the sync sends 2 separate values)"
+
+
+def test_metadata_changes_notes_a_different_count_of_several_values():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"subject": ["a", "b", "c"]}, {"subject": ["a; b", "c"]})
+
+    assert change.note == "(Internet Archive holds 2 separate values; the sync sends 3 separate values)"
+
+
 def test_metadata_changes_does_not_claim_a_spacing_difference_that_is_not_there():
     from ia_bulk import metadata_changes
 
