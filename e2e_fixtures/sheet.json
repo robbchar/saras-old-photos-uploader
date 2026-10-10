@@ -9,7 +9,7 @@
     "ia_withdrawn"
   ],
   "rows": [
-    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-01.jpg", "Title": "E2E fixture 1", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
+    {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-01.jpg", "Title": "E2E fixture 1", "Theme": "E2E", "Subtheme (Optional)": "E2E subtheme", "Subject Terms (Controlled Vocab)": "E2E term A; E2E term B", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-02.jpg", "Title": "E2E fixture 2", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-03.jpg", "Title": "E2E fixture 3", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
     {"Folder on LaCie Drive": "E2E Fixtures", "File Name": "e2e-04.jpg", "Title": "E2E fixture 4", "Theme": "E2E", "Description": "Synthetic image for the e2e rehearsal; not a photograph."},
