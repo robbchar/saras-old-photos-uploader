@@ -142,6 +142,14 @@ correction run to undo. No tool can catch it: a misspelled field name looks
 the same as an intentional one. The same goes for typos in values
 (`Commerical Buildings`); fix those in the Sheet.
 
+**Topics come from three columns.** Theme, Subtheme (Optional) and Subject
+Terms (Controlled Vocab) go to Internet Archive together as the item's
+"Topics", the `subject` field. That is what lists an item under the
+collection's topics. To give a cell several terms, separate them with `;`
+(commas don't split). The three headers are named in `projects_registry.json`
+as `subject_columns`. If one of them is renamed in the Sheet, every run
+refuses until the registry entry matches.
+
 A human-filled field that is simply blank — no title yet, no filename yet —
 is *not* an error. It marks the row **not ready**, a
 different question from whether the row is valid; see

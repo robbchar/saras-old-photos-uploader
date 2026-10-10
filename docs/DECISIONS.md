@@ -92,6 +92,7 @@ Archive metadata.
 - [Sheet metadata is filtered at the upload boundary, not in `upload_row`](decisions/FILES-AND-METADATA.md#sheet-metadata-is-filtered-at-the-upload-boundary-not-in-upload_row)
 - [`identifier-bib` and `mediatype` are generated, not columns](decisions/FILES-AND-METADATA.md#identifier-bib-and-mediatype-are-generated-not-columns)
 - [File-location columns never reach IA, and sync removes them](decisions/FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them)
+- [`subject` is built from the columns the registry lists](decisions/FILES-AND-METADATA.md#subject-is-built-from-the-columns-the-registry-lists)
 - [Blank cell means "leave alone", not "clear"](decisions/FILES-AND-METADATA.md#blank-cell-means-leave-alone-not-clear)
 - [Blank `date` becomes `[n.d.]` rather than being omitted](decisions/FILES-AND-METADATA.md#blank-date-becomes-nd-rather-than-being-omitted)
 - [`checksum=True` and `verbose=True` on upload](decisions/FILES-AND-METADATA.md#checksumtrue-and-verbosetrue-on-upload)

@@ -92,6 +92,16 @@ values. `sync-metadata` also sends `REMOVE_TAG` for them on every push, which
 strips them from items uploaded before they were excluded. See
 [`DECISIONS.md`](decisions/FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them).
 
+**Subject columns.** A project's `subject_columns` (registry) lists the
+columns sent together as `subject`. `subject_columns.py` builds the value:
+each cell is split on `;`, exact repeats are dropped, and the result is one
+value as text or several as a list. It also checks the list against the
+header row before anything is sent. `sheet_metadata_fields()` subtracts the
+listed columns, so neither command sends them under their own names.
+`sync-metadata` sends `REMOVE_TAG` for each of them. The field receipt lists
+them as "sent together as subject". See
+[`DECISIONS.md`](decisions/FILES-AND-METADATA.md#subject-is-built-from-the-columns-the-registry-lists).
+
 **File resolution.** A row's file is *resolved*, not constructed from a
 path template: `resolve_file()` looks in the folder named by `file_template`'s
 substituted columns for an exact filename match, then a case-insensitive
@@ -864,5 +874,5 @@ entry needs the same reading.)
 a misspelled header ships as a misspelled IA field on every item. The header
 row is proofread by hand instead (`OPERATIONS.md` §1).
 
-Repeated IA fields (`subject[0]`, `subject[1]`) cannot be written from the
-Sheet — see `KNOWN-ISSUES.md` §6.
+Repeated IA fields other than `subject` cannot be written from the Sheet — see
+`KNOWN-ISSUES.md` §6.

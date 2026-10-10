@@ -56,8 +56,8 @@ prepared for pasting into the Sheet. Its one unique value, validating with
 no network, was not worth keeping a second schema.
 
 One gap was the CSV path's alone to fill: repeated IA fields (`subject[0]`,
-`subject[1]`). The Sheet path cannot write them — see
-[`KNOWN-ISSUES.md`](../KNOWN-ISSUES.md#6-repeated-ia-fields-cannot-be-written-from-the-sheet) §6. That is not a reason to keep a
+`subject[1]`). The Sheet path cannot write them, except `subject` — see
+[`KNOWN-ISSUES.md`](../KNOWN-ISSUES.md#6-repeated-ia-fields-other-than-subject-cannot-be-written-from-the-sheet) §6. That is not a reason to keep a
 CSV path, because hand-editing a file outside the Sheet defeats the source
 of truth.
 
@@ -189,8 +189,10 @@ Four choices went into the shape:
   forever or silently swallows an edit. Being derived from
   `sheet_metadata_fields()`, it excludes the tool-owned columns and the
   `(LCPS Internal)` ones automatically. It does include the `REMOVE_TAG`
-  entries for the file-location columns, so a row synced before those were
-  excluded pushes once more (see [FILES-AND-METADATA.md](FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them)).
+  entries for the file-location columns and the `subject_columns`, and the
+  built `subject`, so a row synced before either change pushes once more (see
+  [FILES-AND-METADATA.md](FILES-AND-METADATA.md#file-location-columns-never-reach-ia-and-sync-removes-them)
+  and [`subject` is built from the columns the registry lists](FILES-AND-METADATA.md#subject-is-built-from-the-columns-the-registry-lists)).
 - **The hash is captured at read time and stamped unchanged.** Identity is
   checked late — the moved-row guard runs against a fresh read before the
   stamp write — but content is captured early. Re-reading the row at write
