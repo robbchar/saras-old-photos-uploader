@@ -71,7 +71,13 @@ from project_config import (
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
 from stop_request import StopRequest, stop_request_on_interrupt
-from subject_columns import SUBJECT_FIELD, check_subject_columns, subject_value
+from subject_columns import (
+    SUBJECT_FIELD,
+    batch_topic_problem,
+    check_subject_columns,
+    split_subject_cell,
+    subject_value,
+)
 from sync_state import (
     MissingSyncColumns,
     SyncColumns,
@@ -318,6 +324,7 @@ def validate_rows(
     identifier_column: str,
     check_file_exists: bool = True,
     required_for_upload: tuple[str, ...] = (),
+    subject_columns: Sequence[str] = (),
 ) -> list[RowValidation]:
     """project_id is the run's own --project. It is threaded through to
     check_identifier and used nowhere else here - see that function for why
@@ -347,7 +354,9 @@ def validate_rows(
     config.required_for_upload - a blank one of these is a READINESS fact
     (nobody has catalogued this row yet), not a validation error, which is
     the whole reason it is recorded on missing_fields rather than folded
-    into `errors` alongside required_columns."""
+    into `errors` alongside required_columns.
+
+    A required column in subject_columns counts as blank when it yields no topic (only ';' or REMOVE_TAG)."""
     seen_identifiers: dict[str, int] = {}
     results: list[RowValidation] = []
 
@@ -381,7 +390,13 @@ def validate_rows(
                     errors.append(f"file not found: {file_path}")
 
         missing_fields = [
-            column for column in required_for_upload if not (row.get(column) or "").strip()
+            column
+            for column in required_for_upload
+            if not (
+                split_subject_cell(row.get(column) or "")
+                if column in subject_columns
+                else (row.get(column) or "").strip()
+            )
         ]
 
         withdrawn, withdrawn_problem = read_withdrawn_cell(row)
@@ -407,6 +422,7 @@ def validate_sheet_rows(
     registry: dict,
     project_id: str,
     required_for_upload: tuple[str, ...] = (),
+    subject_columns: Sequence[str] = (),
 ) -> list[RowValidation]:
     """The Sheet path's answer, named. Its three choices used to travel as
     loose parameters at every call site:
@@ -429,6 +445,7 @@ def validate_sheet_rows(
         check_file_exists=True,
         identifier_column=IA_IDENTIFIER_COLUMN,
         required_for_upload=required_for_upload,
+        subject_columns=subject_columns,
     )
 
 
@@ -2349,7 +2366,15 @@ def validate_sheet_grid(
         registry,
         config.project_id,
         required_for_upload=config.required_for_upload,
+        subject_columns=config.subject_columns,
     )
+
+    batch_column = config.batch_column
+    if batch_column in config.subject_columns:
+        for row, row_result in zip(rows, row_results):
+            problem = batch_topic_problem(row.get(batch_column) or "", batch_column)
+            if problem:
+                row_result.errors.append(problem)
 
     for row_number, message in outcomes.errors.items():
         # The resolver's own message: it names the folder and the name that
@@ -3349,8 +3374,10 @@ def run_validate(args, json_out: TextIO | None) -> int:
     print()
     print("suggestions (advisory - nothing is changed automatically):")
     sent = sheet_metadata_fields(column_map, config.file_template, config.subject_columns)
-    # subject is already sent when subject_columns build it, so nothing is steered onto it.
-    suggestions = suggest_standard_fields(sent | {SUBJECT_FIELD} if config.subject_columns else sent)
+    if config.subject_columns:
+        # subject is already sent when subject_columns build it, so nothing is steered onto it.
+        sent |= {SUBJECT_FIELD}
+    suggestions = suggest_standard_fields(sent)
     if suggestions:
         for suggestion in suggestions:
             print(f"  '{suggestion.field_name}' -> '{suggestion.standard}': {suggestion.reason}")
@@ -3734,7 +3761,7 @@ def file_location_fields(file_template: str) -> frozenset[str]:
 
 
 def sheet_metadata_fields(
-    column_map: ColumnMap, file_template: str, subject_columns: Sequence[str] = ()
+    column_map: ColumnMap, file_template: str, subject_columns: Sequence[str]
 ) -> frozenset[str]:
     """The normalized column names whose values this tool sends to Internet
     Archive as item metadata.
@@ -3791,11 +3818,22 @@ def item_project_id(uploaded_as: str, live: bool) -> str | None:
     return parsed[1] if parsed else None
 
 
+def sheet_row_metadata(
+    row: Mapping[str, str], fields: frozenset[str], subject_columns: Sequence[str]
+) -> dict[str, MetadataValue]:
+    """A row's own metadata, the one definition `upload` and `sync-metadata` share: its
+    sheet_metadata_fields() cells, plus `subject` from subject_columns (kept even when blank)."""
+    metadata: dict[str, MetadataValue] = {key: value for key, value in row.items() if key in fields}
+    if subject_columns:
+        metadata[SUBJECT_FIELD] = subject_value(row, subject_columns)
+    return metadata
+
+
 def sheet_upload_metadata(
     target: UploadTarget,
     uploadable: frozenset[str],
     mediatype: str,
-    subject_columns: Sequence[str] = (),
+    subject_columns: Sequence[str],
 ) -> dict[str, MetadataValue]:
     """The row dict handed to upload_row.
 
@@ -3815,11 +3853,10 @@ def sheet_upload_metadata(
     zztest-lcps-sarahsoldphotos-00005 carries a permanently misspelled
     `indentifier-bib` because a header typo shipped once; a generated field
     name cannot do that."""
-    metadata_row: dict[str, MetadataValue] = {
-        key: value for key, value in target.row.items() if key in uploadable
-    }
-    if subject_columns:
-        metadata_row[SUBJECT_FIELD] = subject_value(target.row, subject_columns)
+    metadata_row = sheet_row_metadata(target.row, uploadable, subject_columns)
+    # A new item has no topics to delete; sent, REMOVE_TAG would become a topic of that name.
+    if metadata_row.get(SUBJECT_FIELD) == REMOVE_TAG_SENTINEL:
+        del metadata_row[SUBJECT_FIELD]
     metadata_row["mediatype"] = mediatype
     metadata_row["identifier-bib"] = target.identifier_bib
     metadata_row["file"] = target.row["file"]
@@ -4308,7 +4345,8 @@ class FieldChange:
     field_name: str
     now: str
     new: str
-    # Why it is still a change when `now` and `new` read alike; None otherwise.
+    # Why it is still a change when `now` and `new` read alike, or that the number of values
+    # changes; None otherwise.
     note: str | None = None
 
 
@@ -4391,17 +4429,26 @@ def _window(text: str, position: int) -> str:
     return _elide(("..." if start else "") + text[start:], DRY_RUN_VALUE_WIDTH)
 
 
+def _value_count_note(current: object, new: object) -> str | None:
+    """None when IA holds as many values as the sync sends. Lists render joined with '; ', so the
+    count does not show on screen."""
+    current_count = len(current) if isinstance(current, list) else 1
+    new_count = len(new) if isinstance(new, list) else 1
+    if current_count == new_count:
+        return None
+    held = "this as one value" if current_count == 1 else _pluralize(current_count, "separate value")
+    sent = "replaces them with one" if new_count == 1 else f"sends {_pluralize(new_count, 'separate value')}"
+    return f"(Internet Archive holds {held}; the sync {sent})"
+
+
 def _why_it_reads_unchanged(current: object, new: object) -> str | None:
     """None when the two visibly differ. ASCII, for the same reason as _elide."""
     current_text, new_text = _display_text(current), _display_text(new)
     if _first_visible_difference(current_text, new_text) is not None:
         return None
-    current_count = len(current) if isinstance(current, list) else 1
-    new_count = len(new) if isinstance(new, list) else 1
-    if current_count != new_count:
-        held = "this as one value" if current_count == 1 else _pluralize(current_count, "separate value")
-        sent = "replaces them with one" if new_count == 1 else f"sends {_pluralize(new_count, 'separate value')}"
-        return f"(Internet Archive holds {held}; the sync {sent})"
+    count_note = _value_count_note(current, new)
+    if count_note:
+        return count_note
     if current_text != new_text:
         return "(the two differ only in spaces)"
     return "(the two differ in a way that does not show on screen)"
@@ -4417,7 +4464,8 @@ def _render_change(field_name: str, current: object, new: object) -> FieldChange
         current_at, new_at = difference
         if _hidden_by_cutoff(current_text, current_at) or _hidden_by_cutoff(new_text, new_at):
             current_shown, new_shown = _window(current_text, current_at), _window(new_text, new_at)
-    return FieldChange(field_name, current_shown, new_shown, _why_it_reads_unchanged(current, new))
+    note = _why_it_reads_unchanged(current, new) or _value_count_note(current, new)
+    return FieldChange(field_name, current_shown, new_shown, note)
 
 
 def metadata_changes(sheet_metadata: Mapping[str, MetadataValue], remote: dict) -> list[FieldChange]:
@@ -5711,6 +5759,14 @@ def withdrawn_metadata(
     return cleared | {"title": title, "description": description}
 
 
+def withdrawal_hashes(notice: Mapping[str, MetadataValue]) -> set[str]:
+    """The hashes a stamped withdrawal of this row can carry: its notice with and without `subject`,
+    so a withdrawal stamped before subject_columns changed still reads as one."""
+    without = {key: value for key, value in notice.items() if key != SUBJECT_FIELD}
+    with_subject = without | {SUBJECT_FIELD: REMOVE_TAG_SENTINEL}
+    return {sync_hash(metadata_to_send(variant)) for variant in (without, with_subject)}
+
+
 # A row withdrawn under a `withdrawn` column that is now gone; sending its Sheet text would republish it.
 UNTRACKED_WITHDRAWAL = (
     f"this item was withdrawn (its '{IA_WITHDRAWN_COLUMN}' cell is set, or its last push was the "
@@ -5881,16 +5937,13 @@ def plan_sync_targets(
             )
             continue
 
-        metadata: dict[str, MetadataValue] = {key: value for key, value in row.items() if key in fields}
-        metadata |= location_removals | subject_removals
-        if subject_columns:
-            # Kept even when blank, so a withdrawal removes it like any other field.
-            metadata[SUBJECT_FIELD] = subject_value(row, subject_columns)
+        # `subject` is kept even when blank, so a withdrawal removes it like any other field.
+        metadata = sheet_row_metadata(row, fields, subject_columns) | location_removals | subject_removals
         notice = withdrawn_metadata(metadata, withdrawn_title, withdrawn_description)
         stored_hash = (row.get(IA_SYNC_HASH_COLUMN) or "").strip()
         if not withdrawal_tracked and (
             (row.get(IA_WITHDRAWN_COLUMN) or "").strip()
-            or (stored_hash and stored_hash == sync_hash(metadata_to_send(notice)))
+            or (stored_hash and stored_hash in withdrawal_hashes(notice))
         ):
             problems.append(
                 RowValidation(row_number=row_number, identifier=identifier, errors=[UNTRACKED_WITHDRAWAL])
@@ -6496,7 +6549,7 @@ def sync_header_refusal(
             header_errors,
         )
 
-    # All three checks are before anything is sent, and all three apply in
+    # Every check below is before anything is sent, and each applies in
     # test mode as well as live: a rehearsal that passes where the real run
     # refuses is a false negative on the one run an operator trusts.
     try:

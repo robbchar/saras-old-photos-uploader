@@ -180,7 +180,8 @@ tool:
 
 - splits every listed cell on `;` (never on commas);
 - trims each piece and drops empty ones, and drops `REMOVE_TAG` (inside a
-  list it would be published as a topic, not read as a delete);
+  list it would be published as a topic, not read as a delete; see below for
+  when it deletes the field);
 - keeps the first of any exact repeat;
 - sends the result as `subject`, in column order.
 
@@ -212,7 +213,22 @@ Rejected alternatives:
   `required_for_upload` depend on.
 
 A blank cell still means "leave alone". If every listed cell is blank, no
-`subject` is sent and IA's is left as it is. A withdrawal still removes it.
+`subject` is sent and IA's is left as it is. If no topic is left but a listed
+cell says `REMOVE_TAG`, sync sends `subject: REMOVE_TAG`. That is the one way
+to delete an item's last topic, and it is a deliberate act, not an accidental
+clear. `upload` drops it, since a new item has no topic to delete. A
+withdrawal still removes `subject`.
+
+Two row checks follow from the same columns. A required column that is also
+a topic column counts as blank when it yields no topic (only `;` or
+`REMOVE_TAG`), so the row is not ready. And when `batch_column` is a topic
+column, a cell holding more than one topic fails validate, because `--batch`
+matches the whole cell and the row would drop out of its own batch.
+
+A withdrawal stamped under different `subject_columns` hashes its notice
+with or without `subject`. When the `withdrawn` column is gone, sync accepts
+either hash as the record of a withdrawal, so a registry change cannot make a
+withdrawn row look like an ordinary one.
 
 ## Blank cell means "leave alone", not "clear"
 

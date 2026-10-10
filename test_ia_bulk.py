@@ -6186,6 +6186,52 @@ def test_cmd_upload_sends_a_single_subject_as_plain_text(tmp_path, monkeypatch, 
     assert metadata_row["subject"] == "Buildings"
 
 
+def test_cmd_upload_sends_no_subject_for_a_lone_remove_tag(tmp_path, monkeypatch, capsys):
+    """A new item has no topic to delete; sent, REMOVE_TAG would become a topic of that name."""
+    metadata_row = _upload_subject_row(tmp_path, monkeypatch, ["REMOVE_TAG", "", ""])
+    capsys.readouterr()
+
+    assert "subject" not in metadata_row
+
+
+def test_validate_sheet_rows_counts_a_topicless_required_topic_column_as_blank(tmp_path):
+    """';' or REMOVE_TAG alone sends no topic, so the row is not catalogued yet."""
+    rows = [
+        {"ia_identifier": "", "file": "", "mediatype": "image", "title": "T", "theme": theme}
+        for theme in (" ; ", "REMOVE_TAG", "Buildings")
+    ]
+
+    results = validate_sheet_rows(
+        rows, tmp_path, make_registry(), "astoriaphotos",
+        required_for_upload=("title", "theme"), subject_columns=SUBJECT_COLUMNS,
+    )
+
+    assert [result.missing_fields for result in results] == [["theme"], ["theme"], []]
+
+
+def test_cmd_validate_refuses_several_topics_in_the_batch_column(tmp_path, monkeypatch, capsys):
+    """--batch matches the whole cell, so a second topic there hides the row from its batch."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [
+        SHEET_HEADER + SUBJECT_HEADER_COLUMNS,
+        ["First photo", "photo1.jpg", "", "", "", "", "Buildings; Streets", "", ""],
+    ]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry = make_sheet_registry(
+        files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS, batch_column="theme"
+    )
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    exit_code = cmd_validate(Namespace(project="astoriaphotos", registry=str(registry_path), live=False))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "'theme' holds 2 topics, but it is also the batch column" in out
+
+
 def test_cmd_upload_without_subject_columns_sends_the_columns_as_before(
     tmp_path, monkeypatch, capsys
 ):
@@ -13042,6 +13088,56 @@ def test_plan_sync_targets_keeps_a_blank_subject_key_so_a_withdrawal_removes_it(
     assert withdrawn_metadata(target.metadata, "Withdrawn", "Gone")["subject"] == REMOVE_TAG_SENTINEL
 
 
+def test_plan_sync_targets_deletes_subject_when_only_a_remove_tag_is_left():
+    """Blank cells leave IA's subject alone; REMOVE_TAG with no topic left is the deliberate delete."""
+    from ia_bulk import REMOVE_TAG_SENTINEL, FieldChange, metadata_changes
+    from ia_fields import metadata_to_send
+
+    (target,) = _plan_subject_sync(_subject_sync_row("REMOVE_TAG", "", ""))
+
+    assert metadata_to_send(target.metadata)["subject"] == REMOVE_TAG_SENTINEL
+    assert FieldChange("subject", "Buildings", "(deleted)") in metadata_changes(
+        target.metadata, {"subject": "Buildings"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("stamped_with", "planned_with"),
+    [((), SUBJECT_COLUMNS), (SUBJECT_COLUMNS, ())],
+    ids=["stamped-before-subject-columns", "subject-columns-rolled-back"],
+)
+def test_plan_sync_targets_knows_a_withdrawal_stamped_under_other_subject_columns(
+    stamped_with, planned_with
+):
+    """Without the `withdrawn` column the stored notice hash is the only record of a withdrawal."""
+    from ia_bulk import (
+        DEFAULT_WITHDRAWN_DESCRIPTION,
+        DEFAULT_WITHDRAWN_TITLE,
+        UNTRACKED_WITHDRAWAL,
+        plan_sync_targets,
+        withdrawn_metadata,
+    )
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    def plan(row, subject_columns):
+        column_map, rows = grid_to_rows([SUBJECT_SYNC_HEADER, row])
+        return plan_sync_targets(
+            rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}",
+            subject_columns=subject_columns,
+        )
+
+    row = _subject_sync_row()
+    (stamped,), _ = plan(row, stamped_with)
+    notice = withdrawn_metadata(stamped.metadata, DEFAULT_WITHDRAWN_TITLE, DEFAULT_WITHDRAWN_DESCRIPTION)
+    row[SUBJECT_SYNC_HEADER.index("ia_sync_hash")] = sync_hash(metadata_to_send(notice))
+
+    targets, problems = plan(row, planned_with)
+
+    assert targets == []
+    assert [problem.errors for problem in problems] == [[UNTRACKED_WITHDRAWAL]]
+
+
 def test_restore_upload_row_keeps_several_subjects_as_a_list():
     from ia_bulk import restore_upload_row
 
@@ -13437,10 +13533,33 @@ def test_metadata_changes_notes_a_repeated_ia_field_that_reads_like_the_joined_c
     assert change.note is not None and "2 separate values" in change.note
 
 
-def test_metadata_changes_leaves_a_repeated_ia_field_that_already_reads_differently_alone():
+def test_metadata_changes_notes_a_count_change_that_already_reads_differently():
+    """Lists render joined with '; ', so the count change does not show in the two lines."""
     from ia_bulk import FieldChange, metadata_changes
 
     assert metadata_changes({"subject": "a; c"}, {"subject": ["a", "b"]}) == [
+        FieldChange(
+            "subject", "a; b", "a; c",
+            "(Internet Archive holds 2 separate values; the sync replaces them with one)",
+        )
+    ]
+
+
+def test_metadata_changes_notes_one_ia_value_replaced_by_several_that_read_differently():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes(
+        {"subject": ["Buildings", "Streets", "Docks"]}, {"subject": "Buildings; Streets"}
+    )
+
+    assert (change.now, change.new) == ("Buildings; Streets", "Buildings; Streets; Docks")
+    assert change.note == "(Internet Archive holds this as one value; the sync sends 3 separate values)"
+
+
+def test_metadata_changes_gives_a_same_count_visible_change_no_note():
+    from ia_bulk import FieldChange, metadata_changes
+
+    assert metadata_changes({"subject": ["a", "c"]}, {"subject": ["a", "b"]}) == [
         FieldChange("subject", "a; b", "a; c")
     ]
 

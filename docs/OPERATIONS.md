@@ -145,12 +145,17 @@ the same as an intentional one. The same goes for typos in values
 **Topics come from three columns.** Theme, Subtheme (Optional) and Subject
 Terms (Controlled Vocab) go to Internet Archive together as the item's
 "Topics", the `subject` field. That is what lists an item under the
-collection's topics. To give a cell several terms, separate them with `;`
-(commas don't split). To drop a topic, delete it from its cell; `REMOVE_TAG`
-in these columns is ignored rather than published as a topic. The three
-headers are named in `projects_registry.json` as `subject_columns`. If one of
-them is renamed in the Sheet, every run refuses until the registry entry
-matches.
+collection's topics. To give Subtheme or Subject Terms several terms,
+separate them with `;` (commas don't split). Theme takes one value: it is
+also the batch column, and `--batch` matches the whole cell, so validate
+fails a Theme holding more than one term. A Theme of only `;` or
+`REMOVE_TAG` counts as blank, so the row is not ready yet. To drop a topic,
+delete it from its cell. Clearing every topic cell leaves the item's topics
+as they are, like any blank cell; to remove the last topic, put
+`REMOVE_TAG` in a topic cell and leave the others blank. Beside other
+topics, `REMOVE_TAG` just adds nothing. The three headers are named in
+`projects_registry.json` as `subject_columns`. If one of them is renamed in
+the Sheet, every run refuses until the registry entry matches.
 
 A human-filled field that is simply blank — no title yet, no filename yet —
 is *not* an error. It marks the row **not ready**, a
@@ -521,7 +526,8 @@ python ia_bulk.py sync-metadata --project sarasoldphotos --live
 ```
 
 Decoupled from upload and safe to re-run. Blank cell = leave alone; literal
-`REMOVE_TAG` = delete that field, except in the three topic columns (below).
+`REMOVE_TAG` = delete that field; the three topic columns work differently
+(see "Topics come from three columns" in [1. Validate](#1-validate-before-every-upload)).
 `noindex` cannot be changed this way —
 see [`KNOWN-ISSUES.md`](KNOWN-ISSUES.md#1-noindex-cannot-be-changed-by-sync-metadata).
 
@@ -533,11 +539,14 @@ every uploaded row once, and the dry run shows each as `(deleted)`.
 The dry run prints each field it would change as a `now:` / `new:` pair, with
 line breaks shown as `\n` (or `\r\n`) so each value stays on its line. A long
 value edited past what fits on the line is shown from just before the edit,
-starting with `...`. If the two lines still read the same, a line in
-parentheses under them says why the field changes anyway: Internet Archive
-holds several separate values that the sync replaces with one, the two differ
-only in spaces, or they differ in a way that does not show on screen (an
-invisible character, or an accent stored a different way).
+starting with `...`. Several values print joined with `; `, so when Internet
+Archive holds a different number of values than the sync sends, a line in
+parentheses under the pair says so, e.g. "(Internet Archive holds this as one
+value; the sync sends 3 separate values)" or "(Internet Archive holds 2
+separate values; the sync replaces them with one)". If the two lines read the
+same and the count matches, that line says why the field changes anyway: the
+two differ only in spaces, or they differ in a way that does not show on
+screen (an invisible character, or an accent stored a different way).
 
 Every row marked uploaded is checked against the item its own `ia_url` cell
 names, so nothing needs a log and rows uploaded by different runs are each

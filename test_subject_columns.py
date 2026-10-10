@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from column_map import build_column_map
+from ia_fields import REMOVE_TAG_SENTINEL
 from subject_columns import (
+    batch_topic_problem,
     check_subject_columns,
     split_subject_cell,
     subject_value,
@@ -67,9 +69,24 @@ def test_subject_values_never_send_remove_tag_as_a_topic():
     assert subject_values(row, COLUMNS) == ["Townscape", "Buildings"]
 
 
-def test_subject_value_of_only_remove_tag_cells_is_blank():
-    """Not a delete of the whole field: that would hang on which cells happened to be filled."""
-    assert subject_value(_row("REMOVE_TAG"), COLUMNS) == ""
+def test_subject_value_with_no_topic_left_and_a_remove_tag_deletes_the_field():
+    """The one way to delete an item's last topic: blank cells alone leave IA's subject as it is."""
+    assert subject_value(_row("REMOVE_TAG", "", " ; "), COLUMNS) == REMOVE_TAG_SENTINEL
+
+
+def test_subject_value_keeps_the_remaining_topics_beside_a_remove_tag():
+    assert subject_value(_row("Townscape", "REMOVE_TAG"), COLUMNS) == "Townscape"
+
+
+def test_batch_topic_problem_names_a_batch_cell_holding_several_topics():
+    problem = batch_topic_problem("Buildings; Streets", "theme")
+
+    assert problem is not None and problem.isascii()
+    assert problem.startswith("'theme' holds 2 topics, but it is also the batch column")
+
+
+def test_batch_topic_problem_accepts_one_topic():
+    assert batch_topic_problem(" Buildings ; ", "theme") is None
 
 
 def test_subject_value_is_plain_text_for_one_value():

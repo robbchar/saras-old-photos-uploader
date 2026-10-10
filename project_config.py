@@ -242,33 +242,43 @@ def _withdrawn_text(block: dict, key: str, default: str, project_id: str) -> str
     return value.strip()
 
 
+def _normalized_column_list(value: object, key: str, project_id: str, empty_hint: str = "") -> list[str]:
+    """A registry list of column names: a non-empty list of non-blank, already-normalized strings."""
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"project '{project_id}': {key} must be a list, got {type(value).__name__!r}"
+        )
+    if not value:
+        raise ConfigError(f"project '{project_id}': {key} must name at least one column{empty_hint}")
+    for name in value:
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(
+                f"project '{project_id}': every {key} entry must be a non-empty string, got {name!r}"
+            )
+        normalized = normalize_header(name)
+        if normalized != name:
+            raise ConfigError(
+                f"project '{project_id}': {key} entry {name!r} is raw "
+                f"header text, not a normalized column name - use {normalized!r}. "
+                "This is the same rule file_template follows: the Sheet's headers are "
+                "normalized (lowercased, punctuation dropped, spaces to underscores) "
+                "before anything matches against them, so the registry must name the "
+                "normalized form. Your Sheet is fine; the registry entry is not."
+            )
+    return value
+
+
 def _subject_columns(block: dict, project_id: str) -> tuple[str, ...]:
     """The optional subject_columns key: absent means none; present must be distinct normalized names."""
     value = block.get("subject_columns")
     if value is None:
         return ()
-    if not isinstance(value, list):
-        raise ConfigError(
-            f"project '{project_id}': subject_columns must be a list, got {type(value).__name__!r}"
-        )
-    if not value:
-        raise ConfigError(
-            f"project '{project_id}': subject_columns must name at least one column. Remove "
-            "the key entirely if this project sends no subject."
-        )
-    for name in value:
-        if not isinstance(name, str) or not name.strip():
-            raise ConfigError(
-                f"project '{project_id}': every subject_columns entry must be a non-empty "
-                f"string, got {name!r}"
-            )
-        normalized = normalize_header(name)
-        if normalized != name:
-            raise ConfigError(
-                f"project '{project_id}': subject_columns entry {name!r} is raw header text, "
-                f"not a normalized column name - use {normalized!r}. Your Sheet is fine; the "
-                "registry entry is not."
-            )
+    value = _normalized_column_list(
+        value,
+        "subject_columns",
+        project_id,
+        ". Remove the key entirely if this project sends no subject.",
+    )
     repeated = next((name for index, name in enumerate(value) if name in value[:index]), None)
     if repeated is not None:
         raise ConfigError(f"project '{project_id}': subject_columns names {repeated!r} twice")
@@ -358,31 +368,7 @@ def load_project_config(registry: dict, project_id: str) -> ProjectConfig:
             "There is deliberately no default - a project inheriting another "
             "project's readiness rules by silence is worse than stating them."
         )
-    if not isinstance(required_for_upload, list):
-        raise ConfigError(
-            f"project '{project_id}': required_for_upload must be a list, got "
-            f"{type(required_for_upload).__name__!r}"
-        )
-    if not required_for_upload:
-        raise ConfigError(
-            f"project '{project_id}': required_for_upload must name at least one column"
-        )
-    for name in required_for_upload:
-        if not isinstance(name, str) or not name.strip():
-            raise ConfigError(
-                f"project '{project_id}': every required_for_upload entry must be a "
-                f"non-empty string, got {name!r}"
-            )
-        normalized = normalize_header(name)
-        if normalized != name:
-            raise ConfigError(
-                f"project '{project_id}': required_for_upload entry {name!r} is raw "
-                f"header text, not a normalized column name - use {normalized!r}. "
-                "This is the same rule file_template follows: the Sheet's headers are "
-                "normalized (lowercased, punctuation dropped, spaces to underscores) "
-                "before anything matches against them, so the registry must name the "
-                "normalized form. Your Sheet is fine; the registry entry is not."
-            )
+    required_for_upload = _normalized_column_list(required_for_upload, "required_for_upload", project_id)
 
     raw_extensions = block.get("photo_extensions")
     if raw_extensions is None:
