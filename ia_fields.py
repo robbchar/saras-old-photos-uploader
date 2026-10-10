@@ -6,7 +6,7 @@ of truth only the maintainer could see. Nothing here ever rewrites a field:
 it produces advice a human acts on by renaming a column in the Sheet."""
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 # From https://archive.org/developers/metadata-schema/ - the subset a photo
@@ -25,6 +25,9 @@ IA_STANDARD_FIELDS = frozenset(
 # discarded (or overwritten) on upload. ia_bulk.py sets collection unconditionally;
 # identifier and mediatype are derived, not sourced from the Sheet.
 PIPELINE_OWNED_FIELDS = frozenset({"identifier", "mediatype", "collection"})
+
+# One cell's text, or a field IA repeats (several `subject` values).
+MetadataValue = str | list[str]
 
 # Curated equivalences for cases substring matching cannot see.
 SYNONYMS = {
@@ -95,7 +98,7 @@ def suggest_standard_fields(field_names: Iterable[str]) -> list[Suggestion]:
     return suggestions
 
 
-def metadata_to_send(row: dict) -> dict[str, str]:
+def metadata_to_send(row: Mapping[str, object]) -> dict[str, MetadataValue]:
     """Exactly the metadata dict a row sends to Internet Archive.
 
     One definition, shared by the sender (update_metadata_row) and by the
@@ -108,9 +111,14 @@ def metadata_to_send(row: dict) -> dict[str, str]:
     accidental clear or a bad paste would strip metadata from a permanent
     public item with no undo. REMOVE_TAG is the deliberate, visible delete.
 
-    `identifier` names the item being addressed, not a field to set on it."""
-    return {
-        key: (value or "").strip()
-        for key, value in row.items()
-        if key != "identifier" and (value or "").strip()
-    }
+    `identifier` names the item being addressed, not a field to set on it.
+
+    A list is a repeated field: its blank elements are dropped, and an empty list is a blank cell."""
+    cleaned = {key: _cleaned(value) for key, value in row.items() if key != "identifier"}
+    return {key: value for key, value in cleaned.items() if value}
+
+
+def _cleaned(value: object) -> MetadataValue:
+    if isinstance(value, list):
+        return [text for part in value if (text := str(part or "").strip())]
+    return str(value or "").strip()

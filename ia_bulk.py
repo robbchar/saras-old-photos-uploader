@@ -4344,7 +4344,7 @@ def _window(text: str, position: int) -> str:
     return _elide(("..." if start else "") + text[start:], DRY_RUN_VALUE_WIDTH)
 
 
-def _why_it_reads_unchanged(current: object, new: str) -> str | None:
+def _why_it_reads_unchanged(current: object, new: object) -> str | None:
     """None when the two visibly differ. ASCII, for the same reason as _elide."""
     current_text, new_text = _display_text(current), _display_text(new)
     if _first_visible_difference(current_text, new_text) is not None:
@@ -4359,7 +4359,7 @@ def _why_it_reads_unchanged(current: object, new: str) -> str | None:
     return "(the two differ in a way that does not show on screen)"
 
 
-def _render_change(field_name: str, current: object, new: str) -> FieldChange:
+def _render_change(field_name: str, current: object, new: object) -> FieldChange:
     """When the cutoff would hide where the two first read differently, both
     are shown from just before that point instead of from their start."""
     current_shown, new_shown = _render(current), _render(new)

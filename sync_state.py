@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from column_map import (
@@ -28,10 +29,11 @@ from column_map import (
     WITHDRAWN_COLUMN,
     ColumnMap,
 )
+from ia_fields import MetadataValue
 from sheet_client import CellUpdate, column_letter
 
 
-def sync_hash(metadata: dict[str, str]) -> str:
+def sync_hash(metadata: Mapping[str, MetadataValue]) -> str:
     """A row's content, as one opaque string to compare against next run.
 
     Takes the metadata dict as it would actually be SENT - the output of

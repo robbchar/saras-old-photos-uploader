@@ -150,3 +150,23 @@ def test_metadata_to_send_tolerates_a_none_value():
     from ia_fields import metadata_to_send
 
     assert metadata_to_send({"title": "Pier 39", "description": None}) == {"title": "Pier 39"}
+
+
+def test_metadata_to_send_keeps_a_list_value_in_order():
+    from ia_fields import metadata_to_send
+
+    assert metadata_to_send({"subject": ["Buildings", "Streets"]}) == {
+        "subject": ["Buildings", "Streets"]
+    }
+
+
+def test_metadata_to_send_trims_and_drops_blank_list_elements():
+    from ia_fields import metadata_to_send
+
+    assert metadata_to_send({"subject": [" Buildings ", "", "  "]}) == {"subject": ["Buildings"]}
+
+
+def test_metadata_to_send_drops_an_empty_list_like_a_blank_cell():
+    from ia_fields import metadata_to_send
+
+    assert metadata_to_send({"title": "Pier 39", "subject": []}) == {"title": "Pier 39"}

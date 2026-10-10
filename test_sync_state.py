@@ -180,3 +180,13 @@ def test_withdrawn_updates_refuses_marks_without_the_column():
     """Dropping them would leave a withdraw unrecorded, repeating every run."""
     with pytest.raises(ValueError):
         withdrawn_updates([(4, "T")], SyncColumns(ia_sync_hash=6, ia_last_synced=7))
+
+
+def test_sync_hash_reads_a_list_value_in_order():
+    """Reordering topics is an edit; the same topics in the same order are not."""
+    assert sync_hash({"subject": ["a", "b"]}) == sync_hash({"subject": ["a", "b"]})
+    assert sync_hash({"subject": ["a", "b"]}) != sync_hash({"subject": ["b", "a"]})
+
+
+def test_sync_hash_tells_one_joined_value_from_two_values():
+    assert sync_hash({"subject": "a; b"}) != sync_hash({"subject": ["a", "b"]})
