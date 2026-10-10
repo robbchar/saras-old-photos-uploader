@@ -12852,6 +12852,107 @@ def test_sync_dry_run_shows_a_file_location_field_on_the_item_as_deleted():
     ]
 
 
+SUBJECT_SYNC_HEADER = SYNC_SHEET_HEADER + SUBJECT_HEADER_COLUMNS
+
+
+def _subject_sync_row(theme="Townscape & Built Environment", subtheme="Commercial Buildings", terms="Buildings; Streets"):
+    return [
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "", "",
+        theme, subtheme, terms,
+    ]
+
+
+def _plan_subject_sync(row):
+    from ia_bulk import plan_sync_targets
+
+    column_map, rows = grid_to_rows([SUBJECT_SYNC_HEADER, row])
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}",
+        subject_columns=SUBJECT_COLUMNS,
+    )
+    return targets
+
+
+def test_sync_from_sheet_sends_subject_and_removes_its_source_fields(tmp_path, monkeypatch):
+    from ia_bulk import REMOVE_TAG_SENTINEL, cmd_sync_metadata
+
+    sent = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    registry_path, _ = _setup_sync_sheet(
+        tmp_path, monkeypatch, [SUBJECT_SYNC_HEADER, _subject_sync_row()], sent, registry=registry
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+
+    _, metadata = sent[0]
+    assert metadata["subject"] == [
+        "Townscape & Built Environment", "Commercial Buildings", "Buildings", "Streets",
+    ]
+    for source in SUBJECT_COLUMNS:
+        assert metadata[source] == REMOVE_TAG_SENTINEL, source
+
+
+def test_plan_sync_targets_re_pushes_a_row_last_synced_before_subject_columns():
+    """The removals and `subject` are part of the hash, so an older stamp pushes once."""
+    from ia_bulk import split_unchanged
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    previously_sent = {
+        "title": "Stone Customshouse",
+        "theme": "Townscape & Built Environment",
+        "subtheme_optional": "Commercial Buildings",
+        "subject_terms_controlled_vocab": "Buildings; Streets",
+    }
+    row = _subject_sync_row()
+    row[SUBJECT_SYNC_HEADER.index("ia_sync_hash")] = sync_hash(metadata_to_send(previously_sent))
+
+    to_push, _ = split_unchanged(_plan_subject_sync(row))
+
+    assert [target.row_number for target in to_push] == [2]
+
+
+def test_plan_sync_targets_settles_once_subject_has_been_pushed():
+    from ia_bulk import split_unchanged
+
+    (first,) = _plan_subject_sync(_subject_sync_row())
+    row = _subject_sync_row()
+    row[SUBJECT_SYNC_HEADER.index("ia_sync_hash")] = first.content_hash
+
+    to_push, already_synced = split_unchanged(_plan_subject_sync(row))
+
+    assert (to_push, len(already_synced)) == ([], 1)
+
+
+def test_plan_sync_targets_keeps_a_blank_subject_key_so_a_withdrawal_removes_it():
+    """Blank means leave alone on a push; a withdrawal still clears every field the row sends."""
+    from ia_bulk import REMOVE_TAG_SENTINEL, withdrawn_metadata
+    from ia_fields import metadata_to_send
+
+    (target,) = _plan_subject_sync(_subject_sync_row("", "", ""))
+
+    assert target.metadata["subject"] == ""
+    assert "subject" not in metadata_to_send(target.metadata)
+    assert withdrawn_metadata(target.metadata, "Withdrawn", "Gone")["subject"] == REMOVE_TAG_SENTINEL
+
+
+def test_restore_upload_row_keeps_several_subjects_as_a_list():
+    from ia_bulk import restore_upload_row
+
+    target = dataclasses.replace(
+        _sync_target(),
+        metadata={"title": "Pier 39", "subject": ["Buildings", "Streets"], "theme": "REMOVE_TAG"},
+        restore_file="photo1.jpg",
+    )
+
+    row = restore_upload_row(target, "image")
+
+    assert row["subject"] == ["Buildings", "Streets"]
+    assert "theme" not in row
+
+
 def test_sync_from_sheet_skips_rows_that_are_not_uploaded_yet(tmp_path, monkeypatch):
     """An UNASSIGNED row has no item to correct, and a RESERVED row whose
     upload never confirmed is upload's problem, not this command's."""

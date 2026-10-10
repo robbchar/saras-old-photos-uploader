@@ -17,7 +17,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, Protocol, Sequence, TextIO, TypeVar, cast
+from typing import Callable, Iterator, Mapping, Protocol, Sequence, TextIO, TypeVar, cast
 
 import googleapiclient.discovery
 import internetarchive
@@ -4386,7 +4386,7 @@ def _render_change(field_name: str, current: object, new: object) -> FieldChange
     return FieldChange(field_name, current_shown, new_shown, _why_it_reads_unchanged(current, new))
 
 
-def metadata_changes(sheet_metadata: dict[str, str], remote: dict) -> list[FieldChange]:
+def metadata_changes(sheet_metadata: Mapping[str, MetadataValue], remote: dict) -> list[FieldChange]:
     """What IA holds now and what the Sheet would make it, for the fields a
     sync would actually alter.
 
@@ -5128,7 +5128,7 @@ class SyncTarget:
     row_number: int
     identifier: str        # the real, permanent one, from ia_identifier
     uploaded_as: str       # the item to actually send to, from ia_url
-    metadata: dict[str, str]
+    metadata: dict[str, MetadataValue]
     # What this row would send, hashed, as of the run's initial read; and
     # what `ia_sync_hash` held at that same moment. The row pushes when they
     # differ. Both captured at READ time: re-deriving content_hash at write
@@ -5661,7 +5661,9 @@ WITHDRAWN_REPLACED_FIELDS = ("title", "description")
 UPLOAD_GENERATED_FIELDS = ("identifier-bib", "date")
 
 
-def withdrawn_metadata(metadata: dict[str, str], title: str, description: str) -> dict[str, str]:
+def withdrawn_metadata(
+    metadata: Mapping[str, MetadataValue], title: str, description: str
+) -> dict[str, MetadataValue]:
     """A withdrawn row's payload: the notice as title and description, REMOVE_TAG for every
     other field the row sends. Never identifier, collection or mediatype."""
     removed = [
@@ -5669,7 +5671,9 @@ def withdrawn_metadata(metadata: dict[str, str], title: str, description: str) -
         for key in metadata
         if key not in WITHDRAWN_REPLACED_FIELDS and key not in PIPELINE_OWNED_FIELDS
     ]
-    cleared = dict.fromkeys([*removed, *UPLOAD_GENERATED_FIELDS], REMOVE_TAG_SENTINEL)
+    cleared: dict[str, MetadataValue] = dict.fromkeys(
+        [*removed, *UPLOAD_GENERATED_FIELDS], REMOVE_TAG_SENTINEL
+    )
     return cleared | {"title": title, "description": description}
 
 
@@ -5692,6 +5696,7 @@ def plan_sync_targets(
     *,
     withdrawn_title: str = DEFAULT_WITHDRAWN_TITLE,
     withdrawn_description: str = DEFAULT_WITHDRAWN_DESCRIPTION,
+    subject_columns: Sequence[str] = (),
 ) -> tuple[list[SyncTarget], list[RowValidation]]:
     """Decides which rows this run will correct, and what it will send.
 
@@ -5726,10 +5731,14 @@ def plan_sync_targets(
 
     A row whose `withdrawn` cell says yes sends withdrawn_metadata() instead, and that is
     what its hash covers. Without a `withdrawn` column nothing withdraws or restores, and a row
-    still marked or hashed as withdrawn is a problem (UNTRACKED_WITHDRAWAL), never a push."""
-    fields = sheet_metadata_fields(column_map, file_template)
+    still marked or hashed as withdrawn is a problem (UNTRACKED_WITHDRAWAL), never a push.
+
+    With subject_columns, the listed cells go out as `subject` and are removed under their own names."""
+    fields = sheet_metadata_fields(column_map, file_template, subject_columns)
     # Part of every push, and so of the hash: rows synced while these still shipped push once more.
     location_removals = dict.fromkeys(sorted(file_location_fields(file_template)), REMOVE_TAG_SENTINEL)
+    # Sent as `subject` instead; removed under their own names the same way.
+    subject_removals = dict.fromkeys(subject_columns, REMOVE_TAG_SENTINEL)
     # Raw cells: sync never calls resolve_sheet_files(), so row['file'] has
     # not been rewritten and these compare correctly against a fresh read.
     fingerprints = sheet_row_fingerprints(rows, file_template)
@@ -5838,7 +5847,11 @@ def plan_sync_targets(
             )
             continue
 
-        metadata = {key: value for key, value in row.items() if key in fields} | location_removals
+        metadata: dict[str, MetadataValue] = {key: value for key, value in row.items() if key in fields}
+        metadata |= location_removals | subject_removals
+        if subject_columns:
+            # Kept even when blank, so a withdrawal removes it like any other field.
+            metadata[SUBJECT_FIELD] = subject_value(row, subject_columns)
         notice = withdrawn_metadata(metadata, withdrawn_title, withdrawn_description)
         stored_hash = (row.get(IA_SYNC_HASH_COLUMN) or "").strip()
         if not withdrawal_tracked and (
@@ -5939,13 +5952,13 @@ def attach_restore_files(
     return kept, problems
 
 
-def restore_upload_row(target: SyncTarget, mediatype: str) -> dict[str, str]:
+def restore_upload_row(target: SyncTarget, mediatype: str) -> dict[str, MetadataValue]:
     """The row upload_row() re-sends: what `upload` sends, minus REMOVE_TAGs only a metadata write reads."""
     row = {key: value for key, value in target.metadata.items() if value != REMOVE_TAG_SENTINEL}
     return row | {"mediatype": mediatype, "identifier-bib": target.restore_file, "file": target.restore_file}
 
 
-def restore_metadata(target: SyncTarget) -> dict[str, str]:
+def restore_metadata(target: SyncTarget) -> dict[str, MetadataValue]:
     """The text a restore writes after its upload, which does not set an existing item's metadata.
     Puts back what `upload` generates, and removes the notice where the Sheet's cell is blank."""
     sent = metadata_to_send(target.metadata)
@@ -6553,6 +6566,7 @@ def sync_from_sheet(args) -> int:
         config.file_template,
         withdrawn_title=config.withdrawn_title,
         withdrawn_description=config.withdrawn_description,
+        subject_columns=config.subject_columns,
     )
     targets, restore_problems = attach_restore_files(targets, config.files_dir)
     problems = problems + restore_problems
