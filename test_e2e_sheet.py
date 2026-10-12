@@ -159,7 +159,7 @@ class FakeRequest:
     def __init__(self, response: dict | None = None) -> None:
         self._response = response or {}
 
-    def execute(self) -> dict:
+    def execute(self, num_retries: int = 0) -> dict:
         return self._response
 
 

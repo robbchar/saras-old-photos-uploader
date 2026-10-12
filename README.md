@@ -243,8 +243,9 @@ item on Internet Archive that the Sheet has no record of, and the next run's
 permanently. Reserving first degrades the same crash into an unused gap in the
 sequence, which is harmless. Batching matters too: the Sheets API allows 60
 writes per minute per user and counts a batch as one request, so ~10,000 rows
-cost about 40 reserve requests rather than 10,000, plus one read and one write
-per confirm — a few a minute at most.
+cost about 20 reserve writes rather than 10,000, plus one read and one write
+per confirm — a few a minute at a typical upload pace, and the Sheets client
+retries a rate-limited or failed request with backoff before giving up.
 
 A row is chosen by what its two tool-owned columns already hold:
 

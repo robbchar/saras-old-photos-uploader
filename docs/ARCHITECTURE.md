@@ -250,9 +250,12 @@ Per chunk, `SheetUploadRun.execute()` does four things in this order:
    10, `CONFIRM_EVERY`) and once more at the chunk's end for the rest, so the
    Sheet shows progress during a 500-item chunk. Each run of it covers only
    rows not yet confirmed, stamps `ia_uploaded` with its own time, and costs
-   one read and one write — a few requests a minute at most, far under the
-   Sheets API's 60/minute quotas. A failed verify or write stops the run
-   before the next upload, wherever in the chunk it happens.
+   one read and one write — a few requests a minute at a typical upload
+   pace, far under the Sheets API's 60/minute quotas. `SheetClient` retries
+   each read and write on a 5xx, 429 or timeout (`SHEETS_NUM_RETRIES`). A
+   verify or write that still fails stops the run before the next upload,
+   wherever in the chunk it happens. The same re-read also checks the chunk's
+   reserved rows not yet uploaded, and a row that moved is skipped, never sent.
 
 Reserving before uploading is deliberate: uploading first would let a crash
 strand an item on Internet Archive that the Sheet has no record of, and the

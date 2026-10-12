@@ -100,7 +100,7 @@ STEP_1 = "step 1 - validate (DEPLOYMENT §16 step 1; OPERATIONS §1)"
 STEP_2 = "step 2 - upload (OPERATIONS 'Rehearsing the log tabs' step 1, first run)"
 STEP_3 = "step 3 - upload again (OPERATIONS 'Rehearsing the log tabs' step 1, second run)"
 STEP_4 = "step 4 - problem row (OPERATIONS 'Rehearsing the log tabs' step 2)"
-STEP_4B = "step 4b - two files in one run, one progress bar each (OPERATIONS 'Rehearsing the log tabs' step 2, --limit 2)"
+STEP_4B = "step 4b - two files in one run, one progress bar each, each confirmed mid-chunk (OPERATIONS 'Rehearsing the log tabs' step 2, --limit 2, plus --confirm-every 1)"
 STEP_5 = "step 5 - items exist on IA (OPERATIONS pre-live checklist: zztest item eyeballed)"
 STEP_6 = "step 6 - sync dry run (DEPLOYMENT §16 step 2)"
 STEP_7 = "step 7 - sync an edit (OPERATIONS 'Rehearsing the log tabs' step 3, first run)"
@@ -604,7 +604,10 @@ def test_rehearsal(tmp_path, request):
     expect(STEP_4, sheet.cell(grid, THIRD_UPLOADED, "ia_identifier") == "lcps-e2e-00003", "row 5 did not get lcps-e2e-00003")
     expect(STEP_4, not any(sheet.cell(grid, BROKEN_ROW, column) for column in UPLOAD_COLUMNS), "row 4 was marked uploaded")
 
-    result = run_cli(STEP_4B, "upload", "--write-identifier", "--limit", "2", lock=lock, log_dir=log_dir)
+    # --confirm-every 1 sends each item through the mid-chunk confirm, not only the chunk-end remainder.
+    result = run_cli(
+        STEP_4B, "upload", "--write-identifier", "--limit", "2", "--confirm-every", "1", lock=lock, log_dir=log_dir
+    )
     # Row 4 is still broken, so it is skipped again.
     expect_run(STEP_4B, result, 1, "2 file(s) uploaded successfully, 0 error(s)", "skipped (failed validation, or moved in the Sheet mid-run)")
     bars = re.findall(r"uploading (e2e-\d+\.jpg)", result.stderr)
@@ -614,6 +617,8 @@ def test_rehearsal(tmp_path, request):
     grid = sheet.grid()
     expect(STEP_4B, sheet.cell(grid, FOURTH_UPLOADED, "ia_identifier") == "lcps-e2e-00004", "row 7 did not get lcps-e2e-00004")
     expect(STEP_4B, sheet.cell(grid, FIFTH_UPLOADED, "ia_identifier") == "lcps-e2e-00005", "row 8 did not get lcps-e2e-00005")
+    for row in (FOURTH_UPLOADED, FIFTH_UPLOADED):
+        expect(STEP_4B, all(sheet.cell(grid, row, column) for column in UPLOAD_COLUMNS), f"row {row + 1} was not confirmed")
     expect(STEP_4B, not any(sheet.cell(grid, BROKEN_ROW, column) for column in UPLOAD_COLUMNS), "row 4 was marked uploaded")
 
     identifiers = {row: sheet.cell(grid, row, "ia_url").removeprefix(ITEM_URL_PREFIX) for row in UPLOADED_ROWS}

@@ -1,6 +1,6 @@
 import pytest
 
-from sheet_client import CellUpdate, SheetClient, column_letter, quote_tab
+from sheet_client import SHEETS_NUM_RETRIES, CellUpdate, SheetClient, column_letter, quote_tab
 
 
 class FakeValues:
@@ -14,6 +14,8 @@ class FakeValues:
         self.batch_update_spreadsheet_id = None
         self.append_spreadsheet_id = None
         self.first_rows = {}
+        # num_retries per whole-tab read and batch write, in call order.
+        self.execute_retries = []
         self._get_response = get_response if get_response is not None else {"values": grid}
 
     def get(self, spreadsheetId, range):
@@ -23,12 +25,12 @@ class FakeValues:
         # whole-tab read keeps answering with the grid.
         if range in self.first_rows:
             return _Executable({"values": self.first_rows[range]})
-        return _Executable(self._get_response)
+        return _Executable(self._get_response, self.execute_retries)
 
     def batchUpdate(self, spreadsheetId, body):
         self.batch_update_spreadsheet_id = spreadsheetId
         self.batch_update_calls.append(body)
-        return _Executable({"totalUpdatedCells": len(body["data"])})
+        return _Executable({"totalUpdatedCells": len(body["data"])}, self.execute_retries)
 
     def append(self, spreadsheetId, range, valueInputOption, insertDataOption, body):
         self.append_spreadsheet_id = spreadsheetId
@@ -44,10 +46,13 @@ class FakeValues:
 
 
 class _Executable:
-    def __init__(self, result):
+    def __init__(self, result, retries_log=None):
         self._result = result
+        self._retries_log = retries_log
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        if self._retries_log is not None:
+            self._retries_log.append(num_retries)
         return self._result
 
 
@@ -106,6 +111,17 @@ def test_write_cells_issues_a_single_batch_request():
         {"range": "'Donor Photos'!B3", "values": [["y"]]},
     ]
     assert service.values_api.batch_update_spreadsheet_id == "SHEET_ID"
+
+
+def test_read_grid_and_write_cells_let_the_google_client_retry_transient_failures():
+    service = FakeService([["Title"]])
+    client = SheetClient(service, "SHEET_ID", "Donor Photos")
+
+    client.read_grid()
+    client.write_cells([CellUpdate("B2", "x")])
+
+    assert service.values_api.execute_retries == [SHEETS_NUM_RETRIES, SHEETS_NUM_RETRIES]
+    assert SHEETS_NUM_RETRIES > 0
 
 
 def test_write_cells_with_nothing_to_write_makes_no_request():
