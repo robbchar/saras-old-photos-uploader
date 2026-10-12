@@ -165,6 +165,71 @@ and field receipt show each removal before anything is sent.
 remove anything from items: marking a column renames its field, so the name
 already on the item is no longer known.
 
+## `subject` is built from the columns the registry lists
+
+*Decided 2026-10-10, after the first live upload.*
+
+Internet Archive files an item under a collection's left-nav topics by its
+`subject` field, which the item page labels "Topics". The Sheet keeps that
+vocabulary in three columns: Theme, Subtheme (Optional) and Subject Terms
+(Controlled Vocab). Uploaded under their own names, as `theme` and so on, they
+never reached the topics.
+
+So a project's registry may list them as `subject_columns`. For each row the
+tool:
+
+- splits every listed cell on `;` (never on commas);
+- trims each piece and drops empty ones, and drops `REMOVE_TAG` (inside a
+  list it would be published as a topic, not read as a delete; see below for
+  when it deletes the field);
+- keeps the first of any exact repeat;
+- sends the result as `subject`, in column order.
+
+One value goes as plain text and several as a list, which is how IA stores
+the field. The listed columns are never sent under their own names, and sync
+sends `REMOVE_TAG` for each one, so items uploaded before this lose them on
+their next push. The removals and `subject` are part of the hash, so every
+synced row pushes once more.
+
+This is the one exception to "the header is the field name"
+([READINESS.md](READINESS.md#a-malformed-header-is-rejected-never-auto-corrected)).
+It is narrow on purpose. The rule produces one field and nothing else, the
+registry names the columns, and each name is checked against the header row
+before anything is sent. A listed column refuses the run when it:
+
+- is not in the Sheet;
+- is tool-owned, held back, or a file-location column;
+- is a standard IA field, which sync would then delete from every item.
+
+A Sheet with its own `Subject` column is refused too, since that would be two
+sources for one field.
+
+Rejected alternatives:
+
+- Hard-coding the three headers. That isn't generic to a project, and an
+  edited header would silently stop sending its values.
+- Marking the columns in the header text, as `(LCPS Internal)` does. That
+  renames the normalized `theme` that `batch_column` and
+  `required_for_upload` depend on.
+
+A blank cell still means "leave alone". If every listed cell is blank, no
+`subject` is sent and IA's is left as it is. If no topic is left but a listed
+cell says `REMOVE_TAG`, sync sends `subject: REMOVE_TAG`. That is the one way
+to delete an item's last topic, and it is a deliberate act, not an accidental
+clear. `upload` drops it, since a new item has no topic to delete. A
+withdrawal still removes `subject`.
+
+Two row checks follow from the same columns. A required column that is also
+a topic column counts as blank when it yields no topic (only `;` or
+`REMOVE_TAG`), so the row is not ready. And when `batch_column` is a topic
+column, a cell holding more than one topic fails validate, because `--batch`
+matches the whole cell and the row would drop out of its own batch.
+
+A withdrawal stamped under different `subject_columns` hashes its notice
+with or without `subject`. When the `withdrawn` column is gone, sync accepts
+either hash as the record of a withdrawal, so a registry change cannot make a
+withdrawn row look like an ordinary one.
+
 ## Blank cell means "leave alone", not "clear"
 
 A `sync-metadata` CSV lists only the columns that changed, so a blank cell has

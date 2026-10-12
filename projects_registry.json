@@ -14,7 +14,8 @@
       "files_dir": "./data",
       "file_template": "{folder_on_lacie_drive}/{file_name}",
       "batch_column": "theme",
-      "required_for_upload": ["title", "theme"]
+      "required_for_upload": ["title", "theme"],
+      "subject_columns": ["theme", "subtheme_optional", "subject_terms_controlled_vocab"]
     }
   }
 }

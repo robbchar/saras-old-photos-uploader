@@ -857,6 +857,34 @@ def test_sync_field_receipt_says_the_file_location_columns_are_removed():
     ) in receipt
 
 
+def test_field_receipt_lists_subject_and_the_columns_it_is_built_from():
+    column_map = build_column_map(
+        ["Title", "Theme", "Subtheme (Optional)", "Subject Terms (Controlled Vocab)"]
+    )
+
+    receipt = format_field_receipt(column_map, "{file}", subject_columns=SUBJECT_COLUMNS)
+
+    assert "will upload these metadata fields:\n  title, subject\n" in receipt
+    assert (
+        "sent together as subject (each cell split on ';'), not under their own names:\n"
+        "  theme, subtheme_optional, subject_terms_controlled_vocab"
+    ) in receipt
+
+
+def test_sync_field_receipt_says_the_subject_columns_are_removed():
+    column_map = build_column_map(
+        ["Title", "Theme", "Subtheme (Optional)", "Subject Terms (Controlled Vocab)"]
+    )
+
+    receipt = format_field_receipt(column_map, "{file}", sync=True, subject_columns=SUBJECT_COLUMNS)
+
+    assert (
+        "sent together as subject (each cell split on ';'), and REMOVED under their own "
+        "names from each item this run pushes:\n"
+        "  theme, subtheme_optional, subject_terms_controlled_vocab"
+    ) in receipt
+
+
 def test_sheet_structure_validation_files_a_grid_shape_error_under_its_own_row_not_row_1():
     """check_grid_shape's message already names the real row number (e.g.
     "row 3 has..."); filing it under row 1 regardless - which an earlier
@@ -6117,6 +6145,187 @@ def test_cmd_upload_never_sends_the_file_location_columns(tmp_path, monkeypatch,
     metadata_row = captured[0]["row"]
     assert sorted(metadata_row) == ["file", "identifier-bib", "mediatype", "title"]
     assert metadata_row["identifier-bib"] == "box1/photo1.jpg"
+
+
+SUBJECT_HEADER_COLUMNS = ["Theme", "Subtheme (Optional)", "Subject Terms (Controlled Vocab)"]
+SUBJECT_COLUMNS = ["theme", "subtheme_optional", "subject_terms_controlled_vocab"]
+
+
+def _upload_subject_row(tmp_path, monkeypatch, cells):
+    """Uploads one row with the three subject columns; returns the row upload_row was handed."""
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER + SUBJECT_HEADER_COLUMNS, ["First photo", "photo1.jpg", "", "", "", "", *cells]]
+    captured = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=captured, registry=registry
+    )
+    assert cmd_upload(make_upload_args(tmp_path, registry_path)) == 0
+    return captured[0]["row"]
+
+
+def test_cmd_upload_sends_the_subject_columns_as_subject_only(tmp_path, monkeypatch, capsys):
+    metadata_row = _upload_subject_row(
+        tmp_path, monkeypatch,
+        ["Townscape & Built Environment", "Commercial Buildings", "Buildings; Streets"],
+    )
+    capsys.readouterr()
+
+    assert sorted(metadata_row) == ["file", "identifier-bib", "mediatype", "subject", "title"]
+    assert metadata_row["subject"] == [
+        "Townscape & Built Environment", "Commercial Buildings", "Buildings", "Streets",
+    ]
+
+
+def test_cmd_upload_sends_a_single_subject_as_plain_text(tmp_path, monkeypatch, capsys):
+    """How IA stores one value, so a later sync compares like with like."""
+    metadata_row = _upload_subject_row(tmp_path, monkeypatch, ["Buildings", "", ""])
+    capsys.readouterr()
+
+    assert metadata_row["subject"] == "Buildings"
+
+
+def test_cmd_upload_sends_no_subject_for_a_lone_remove_tag(tmp_path, monkeypatch, capsys):
+    """A new item has no topic to delete; sent, REMOVE_TAG would become a topic of that name."""
+    metadata_row = _upload_subject_row(tmp_path, monkeypatch, ["REMOVE_TAG", "", ""])
+    capsys.readouterr()
+
+    assert "subject" not in metadata_row
+
+
+def test_validate_sheet_rows_counts_a_topicless_required_topic_column_as_blank(tmp_path):
+    """';' or REMOVE_TAG alone sends no topic, so the row is not catalogued yet."""
+    rows = [
+        {"ia_identifier": "", "file": "", "mediatype": "image", "title": "T", "theme": theme}
+        for theme in (" ; ", "REMOVE_TAG", "Buildings")
+    ]
+
+    results = validate_sheet_rows(
+        rows, tmp_path, make_registry(), "astoriaphotos",
+        required_for_upload=("title", "theme"), subject_columns=SUBJECT_COLUMNS,
+    )
+
+    assert [result.missing_fields for result in results] == [["theme"], ["theme"], []]
+
+
+def test_cmd_validate_refuses_several_topics_in_the_batch_column(tmp_path, monkeypatch, capsys):
+    """--batch matches the whole cell, so a second topic there hides the row from its batch."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [
+        SHEET_HEADER + SUBJECT_HEADER_COLUMNS,
+        ["First photo", "photo1.jpg", "", "", "", "", "Buildings; Streets", "", ""],
+    ]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry = make_sheet_registry(
+        files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS, batch_column="theme"
+    )
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    exit_code = cmd_validate(Namespace(project="astoriaphotos", registry=str(registry_path), live=False))
+    out = capsys.readouterr().out
+
+    assert exit_code == 1
+    assert "'theme' holds 2 topics, but it is also the batch column" in out
+
+
+def test_cmd_upload_without_subject_columns_sends_the_columns_as_before(
+    tmp_path, monkeypatch, capsys
+):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER + ["Theme"], ["First photo", "photo1.jpg", "", "", "", "", "Buildings"]]
+    captured = []
+    _, _, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, grid, captured=captured)
+
+    assert cmd_upload(make_upload_args(tmp_path, registry_path)) == 0
+    capsys.readouterr()
+
+    assert captured[0]["row"]["theme"] == "Buildings"
+    assert "subject" not in captured[0]["row"]
+
+
+def test_cmd_validate_refuses_subject_columns_naming_a_missing_column(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    grid = [SHEET_HEADER + ["Theme"], ["First photo", "photo1.jpg", "", "", "", "", "Buildings"]]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_validate(Namespace(project="astoriaphotos", registry=str(registry_path), live=False))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "subject_columns names 'subtheme_optional', which is not a column in this Sheet" in err
+    assert f"fix subject_columns in {registry_path}" in err
+
+
+def test_cmd_upload_refuses_subject_columns_naming_a_missing_column(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_upload
+
+    grid = [SHEET_HEADER + ["Theme"], ["First photo", "photo1.jpg", "", "", "", "", "Buildings"]]
+    captured = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    _, _, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, grid, captured=captured, registry=registry
+    )
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert captured == []
+    assert "subject_columns names 'subtheme_optional'" in err
+
+
+def test_cmd_validate_suggests_nothing_toward_subject_when_subject_columns_build_it(
+    tmp_path, monkeypatch, capsys
+):
+    """subject is already sent; suggesting a rename onto it would advise a collision."""
+    from ia_bulk import cmd_validate
+
+    (tmp_path / "photo1.jpg").write_bytes(b"x")
+    header = SHEET_HEADER + SUBJECT_HEADER_COLUMNS + ["Keywords"]
+    grid = [header, ["First photo", "photo1.jpg", "", "", "", "", "Buildings", "", "", "harbor"]]
+    monkeypatch.setattr("ia_bulk.build_sheet_client", lambda config, live: FakeSheetClient(grid))
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(
+        json.dumps(make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)),
+        encoding="utf-8",
+    )
+
+    cmd_validate(Namespace(project="astoriaphotos", registry=str(registry_path), live=False))
+    out = capsys.readouterr().out
+
+    assert "-> 'subject'" not in out
+
+
+def test_upload_row_sends_a_list_value_as_a_list(tmp_path, monkeypatch):
+    """internetarchive sends one header per element; a joined string would be one topic."""
+    from ia_bulk import upload_row
+
+    (tmp_path / "photo1.jpg").write_bytes(b"data")
+    row = {"file": "photo1.jpg", "title": "First photo", "subject": ["Buildings", "Streets"]}
+    captured = {}
+
+    def fake_upload(identifier, files, metadata, **kwargs):
+        captured["metadata"] = metadata
+        return [FakeResponse(ok=True)]
+
+    monkeypatch.setattr(internetarchive, "upload", fake_upload)
+
+    upload_row(row, target_identifier="zztest-lcps-astoriaphotos-00001", collection="test_collection", files_dir=tmp_path)
+
+    assert captured["metadata"]["subject"] == ["Buildings", "Streets"]
+    assert "file" not in captured["metadata"]
 
 
 def test_cmd_upload_refuses_a_sheet_without_the_ia_write_back_columns(
@@ -12777,6 +12986,173 @@ def test_sync_dry_run_shows_a_file_location_field_on_the_item_as_deleted():
     ]
 
 
+SUBJECT_SYNC_HEADER = SYNC_SHEET_HEADER + SUBJECT_HEADER_COLUMNS
+
+
+def _subject_sync_row(theme="Townscape & Built Environment", subtheme="Commercial Buildings", terms="Buildings; Streets"):
+    return [
+        "Stone Customshouse", "photo1.jpg",
+        "lcps-astoriaphotos-00001", "2026-08-23T16:13:31Z", SYNC_URL, "photo1.jpg",
+        "", "",
+        theme, subtheme, terms,
+    ]
+
+
+def _plan_subject_sync(row):
+    from ia_bulk import plan_sync_targets
+
+    column_map, rows = grid_to_rows([SUBJECT_SYNC_HEADER, row])
+    targets, _ = plan_sync_targets(
+        rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}",
+        subject_columns=SUBJECT_COLUMNS,
+    )
+    return targets
+
+
+def test_sync_from_sheet_sends_subject_and_removes_its_source_fields(tmp_path, monkeypatch):
+    from ia_bulk import REMOVE_TAG_SENTINEL, cmd_sync_metadata
+
+    sent = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    registry_path, _ = _setup_sync_sheet(
+        tmp_path, monkeypatch, [SUBJECT_SYNC_HEADER, _subject_sync_row()], sent, registry=registry
+    )
+
+    assert cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path)) == 0
+
+    _, metadata = sent[0]
+    assert metadata["subject"] == [
+        "Townscape & Built Environment", "Commercial Buildings", "Buildings", "Streets",
+    ]
+    for source in SUBJECT_COLUMNS:
+        assert metadata[source] == REMOVE_TAG_SENTINEL, source
+
+
+def test_sync_from_sheet_refuses_subject_columns_naming_a_missing_column(tmp_path, monkeypatch, capsys):
+    from ia_bulk import cmd_sync_metadata
+
+    sent = []
+    registry = make_sheet_registry(files_dir=str(tmp_path), subject_columns=SUBJECT_COLUMNS)
+    registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _synced_grid(), sent, registry=registry)
+
+    exit_code = cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert sent == []
+    assert "subject_columns names 'theme', which is not a column in this Sheet" in captured.out
+    assert "fix subject_columns in" in captured.err
+
+
+def test_plan_sync_targets_re_pushes_a_row_last_synced_before_subject_columns():
+    """The removals and `subject` are part of the hash, so an older stamp pushes once."""
+    from ia_bulk import split_unchanged
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    previously_sent = {
+        "title": "Stone Customshouse",
+        "theme": "Townscape & Built Environment",
+        "subtheme_optional": "Commercial Buildings",
+        "subject_terms_controlled_vocab": "Buildings; Streets",
+    }
+    row = _subject_sync_row()
+    row[SUBJECT_SYNC_HEADER.index("ia_sync_hash")] = sync_hash(metadata_to_send(previously_sent))
+
+    to_push, _ = split_unchanged(_plan_subject_sync(row))
+
+    assert [target.row_number for target in to_push] == [2]
+
+
+def test_plan_sync_targets_settles_once_subject_has_been_pushed():
+    from ia_bulk import split_unchanged
+
+    (first,) = _plan_subject_sync(_subject_sync_row())
+    row = _subject_sync_row()
+    row[SUBJECT_SYNC_HEADER.index("ia_sync_hash")] = first.content_hash
+
+    to_push, already_synced = split_unchanged(_plan_subject_sync(row))
+
+    assert (to_push, len(already_synced)) == ([], 1)
+
+
+def test_plan_sync_targets_keeps_a_blank_subject_key_so_a_withdrawal_removes_it():
+    """Blank means leave alone on a push; a withdrawal still clears every field the row sends."""
+    from ia_bulk import REMOVE_TAG_SENTINEL, withdrawn_metadata
+    from ia_fields import metadata_to_send
+
+    (target,) = _plan_subject_sync(_subject_sync_row("", "", ""))
+
+    assert target.metadata["subject"] == ""
+    assert "subject" not in metadata_to_send(target.metadata)
+    assert withdrawn_metadata(target.metadata, "Withdrawn", "Gone")["subject"] == REMOVE_TAG_SENTINEL
+
+
+def test_plan_sync_targets_deletes_subject_when_only_a_remove_tag_is_left():
+    """Blank cells leave IA's subject alone; REMOVE_TAG with no topic left is the deliberate delete."""
+    from ia_bulk import REMOVE_TAG_SENTINEL, FieldChange, metadata_changes
+    from ia_fields import metadata_to_send
+
+    (target,) = _plan_subject_sync(_subject_sync_row("REMOVE_TAG", "", ""))
+
+    assert metadata_to_send(target.metadata)["subject"] == REMOVE_TAG_SENTINEL
+    assert FieldChange("subject", "Buildings", "(deleted)") in metadata_changes(
+        target.metadata, {"subject": "Buildings"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("stamped_with", "planned_with"),
+    [((), SUBJECT_COLUMNS), (SUBJECT_COLUMNS, ())],
+    ids=["stamped-before-subject-columns", "subject-columns-rolled-back"],
+)
+def test_plan_sync_targets_knows_a_withdrawal_stamped_under_other_subject_columns(
+    stamped_with, planned_with
+):
+    """Without the `withdrawn` column the stored notice hash is the only record of a withdrawal."""
+    from ia_bulk import (
+        DEFAULT_WITHDRAWN_DESCRIPTION,
+        DEFAULT_WITHDRAWN_TITLE,
+        UNTRACKED_WITHDRAWAL,
+        plan_sync_targets,
+        withdrawn_metadata,
+    )
+    from ia_fields import metadata_to_send
+    from sync_state import sync_hash
+
+    def plan(row, subject_columns):
+        column_map, rows = grid_to_rows([SUBJECT_SYNC_HEADER, row])
+        return plan_sync_targets(
+            rows, column_map, live=False, project_id="astoriaphotos", file_template="{file}",
+            subject_columns=subject_columns,
+        )
+
+    row = _subject_sync_row()
+    (stamped,), _ = plan(row, stamped_with)
+    notice = withdrawn_metadata(stamped.metadata, DEFAULT_WITHDRAWN_TITLE, DEFAULT_WITHDRAWN_DESCRIPTION)
+    row[SUBJECT_SYNC_HEADER.index("ia_sync_hash")] = sync_hash(metadata_to_send(notice))
+
+    targets, problems = plan(row, planned_with)
+
+    assert targets == []
+    assert [problem.errors for problem in problems] == [[UNTRACKED_WITHDRAWAL]]
+
+
+def test_restore_upload_row_keeps_several_subjects_as_a_list():
+    from ia_bulk import restore_upload_row
+
+    target = dataclasses.replace(
+        _sync_target(),
+        metadata={"title": "Pier 39", "subject": ["Buildings", "Streets"], "theme": "REMOVE_TAG"},
+        restore_file="photo1.jpg",
+    )
+
+    row = restore_upload_row(target, "image")
+
+    assert row["subject"] == ["Buildings", "Streets"]
+    assert "theme" not in row
+
+
 def test_sync_from_sheet_skips_rows_that_are_not_uploaded_yet(tmp_path, monkeypatch):
     """An UNASSIGNED row has no item to correct, and a RESERVED row whose
     upload never confirmed is upload's problem, not this command's."""
@@ -13157,10 +13533,33 @@ def test_metadata_changes_notes_a_repeated_ia_field_that_reads_like_the_joined_c
     assert change.note is not None and "2 separate values" in change.note
 
 
-def test_metadata_changes_leaves_a_repeated_ia_field_that_already_reads_differently_alone():
+def test_metadata_changes_notes_a_count_change_that_already_reads_differently():
+    """Lists render joined with '; ', so the count change does not show in the two lines."""
     from ia_bulk import FieldChange, metadata_changes
 
     assert metadata_changes({"subject": "a; c"}, {"subject": ["a", "b"]}) == [
+        FieldChange(
+            "subject", "a; b", "a; c",
+            "(Internet Archive holds 2 separate values; the sync replaces them with one)",
+        )
+    ]
+
+
+def test_metadata_changes_notes_one_ia_value_replaced_by_several_that_read_differently():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes(
+        {"subject": ["Buildings", "Streets", "Docks"]}, {"subject": "Buildings; Streets"}
+    )
+
+    assert (change.now, change.new) == ("Buildings; Streets", "Buildings; Streets; Docks")
+    assert change.note == "(Internet Archive holds this as one value; the sync sends 3 separate values)"
+
+
+def test_metadata_changes_gives_a_same_count_visible_change_no_note():
+    from ia_bulk import FieldChange, metadata_changes
+
+    assert metadata_changes({"subject": ["a", "c"]}, {"subject": ["a", "b"]}) == [
         FieldChange("subject", "a; b", "a; c")
     ]
 
@@ -13203,6 +13602,36 @@ def test_metadata_changes_gives_a_one_value_list_the_plain_note():
     (change,) = metadata_changes({"subject": "Astoria"}, {"subject": ["Astoria"]})
 
     assert change.note == "(the two differ in a way that does not show on screen)"
+
+
+def test_metadata_changes_reads_the_same_subject_list_as_unchanged():
+    from ia_bulk import metadata_changes
+
+    assert metadata_changes({"subject": ["a", "b"]}, {"subject": ["a", "b"]}) == []
+
+
+def test_metadata_changes_reads_one_subject_sent_as_text_as_unchanged():
+    from ia_bulk import metadata_changes
+
+    assert metadata_changes({"subject": "Buildings"}, {"subject": "Buildings"}) == []
+
+
+def test_metadata_changes_notes_one_ia_value_that_reads_like_several_sent():
+    """IA holds 'a; b' as one value; the sync sends two. Both lines read 'a; b'."""
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"subject": ["a", "b"]}, {"subject": "a; b"})
+
+    assert (change.now, change.new) == ("a; b", "a; b")
+    assert change.note == "(Internet Archive holds this as one value; the sync sends 2 separate values)"
+
+
+def test_metadata_changes_notes_a_different_count_of_several_values():
+    from ia_bulk import metadata_changes
+
+    (change,) = metadata_changes({"subject": ["a", "b", "c"]}, {"subject": ["a; b", "c"]})
+
+    assert change.note == "(Internet Archive holds 2 separate values; the sync sends 3 separate values)"
 
 
 def test_metadata_changes_does_not_claim_a_spacing_difference_that_is_not_there():

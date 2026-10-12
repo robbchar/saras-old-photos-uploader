@@ -619,6 +619,19 @@ def test_rehearsal(tmp_path, request):
     identifiers = {row: sheet.cell(grid, row, "ia_url").removeprefix(ITEM_URL_PREFIX) for row in UPLOADED_ROWS}
     for identifier in identifiers.values():
         wait_for_ia(STEP_5, f"item {identifier}", lambda identifier=identifier: item_metadata(identifier), lock=lock)
+    first_on_ia = item_metadata(identifiers[FIRST_UPLOADED]) or {}
+    expect(
+        STEP_5,
+        first_on_ia.get("subject") == ["E2E", "E2E subtheme", "E2E term A", "E2E term B"],
+        f"subject on {identifiers[FIRST_UPLOADED]} is {first_on_ia.get('subject')!r}",
+    )
+    expect(STEP_5, "theme" not in first_on_ia, f"theme reached {identifiers[FIRST_UPLOADED]} under its own name")
+    second_on_ia = item_metadata(identifiers[SECOND_UPLOADED]) or {}
+    expect(
+        STEP_5,
+        second_on_ia.get("subject") == "E2E",
+        f"subject on {identifiers[SECOND_UPLOADED]} is {second_on_ia.get('subject')!r}",
+    )
 
     grid_before_sync = sheet.grid()
     result = run_cli(STEP_6, "sync-metadata", "--dry-run", lock=lock, log_dir=log_dir)

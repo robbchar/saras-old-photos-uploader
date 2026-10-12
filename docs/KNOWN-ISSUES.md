@@ -115,7 +115,7 @@ is itself part of why no test exists yet.
 **Mitigation today:** none — this is a test-coverage gap, not a behavior
 change. Recorded here so it is not lost the next time this file is reviewed.
 
-## 6. Repeated IA fields cannot be written from the Sheet
+## 6. Repeated IA fields other than `subject` cannot be written from the Sheet
 
 **Severity: low — no current need, but it silently flattens.**
 
@@ -129,6 +129,13 @@ last CSV sync (2026-07-12) edited a repeated `colors` field on a test item.
 It matters if LCPS wants several subject or name values per item. The export
 already has `Subject Terms (Controlled Vocab)` and `Names (Last, First M.)`,
 which are naturally multi-valued.
+
+**2026-10-10:** `subject` now can be written. A project's `subject_columns`
+sends Theme, Subtheme (Optional) and Subject Terms (Controlled Vocab) as
+separate `subject` values, splitting each cell on `;` (see
+[FILES-AND-METADATA.md](decisions/FILES-AND-METADATA.md#subject-is-built-from-the-columns-the-registry-lists)).
+Other repeated fields, such as `Names (Last, First M.)`, still ship as one
+string.
 
 **Mitigation today:** the raw `ia` CLI —
 `ia metadata <identifier> --modify 'subject[1]:...'` — or the item's
