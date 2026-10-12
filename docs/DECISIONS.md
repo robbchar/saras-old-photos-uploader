@@ -130,6 +130,7 @@ run writes down about itself.
 - [An interrupt stops a run after the current item](decisions/QUOTA-AND-RUNS.md#an-interrupt-stops-a-run-after-the-current-item)
 - [One upload runs at a time, enforced by `upload`](decisions/QUOTA-AND-RUNS.md#one-upload-runs-at-a-time-enforced-by-upload)
 - [Dry-run output is a summary by default; `-v` restores per-item detail](decisions/QUOTA-AND-RUNS.md#dry-run-output-is-a-summary-by-default--v-restores-per-item-detail)
+- [Uploads are confirmed every 10 successes, not once per chunk](decisions/QUOTA-AND-RUNS.md#uploads-are-confirmed-every-10-successes-not-once-per-chunk)
 
 ## [The upload page](decisions/UPLOAD-PAGE.md)
 

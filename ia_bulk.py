@@ -138,6 +138,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 # change from the one this constant's shrink makes.
 SHEET_REQUIRED_COLUMNS = ("mediatype",)
 CHUNK_SIZE = 500
+# Successful uploads per mid-chunk confirm write, so the Sheet shows progress during a chunk.
+CONFIRM_EVERY = 10
 # Internet Archive's per-account daily item cap. CHUNK_SIZE covers the
 # 500-items-per-run half of the limit in `.claude/CLAUDE.md` ("IA batch
 # limits: 500 items per upload run, 5000/day"); this covers the other half,
@@ -1068,6 +1070,7 @@ def log_run_header(
     chunk_size: int = CHUNK_SIZE,
     batch: str | None = None,
     planned: int | None = None,
+    confirm_every: int | None = None,
 ) -> None:
     """The first line written to a Sheet-path run's log. `head -1 <log>` then
     answers "what did this run send, under what field names, and what did it
@@ -1091,7 +1094,8 @@ def log_run_header(
     --chunk-size, cannot be explained later by the rest of this record alone.
     Both default to "the run's own default" (None / CHUNK_SIZE) so the three
     tests that call this directly without passing them still get a header
-    that says so explicitly, rather than omitting the fields.
+    that says so explicitly, rather than omitting the fields. `confirm_every`
+    is upload's --confirm-every, for the same reason.
 
     `batch` is there for the same reason and is the strongest case of the
     three: a scoped run uploads a fraction of the ready rows and looks, in
@@ -1133,6 +1137,7 @@ def log_run_header(
         "limit": limit,
         "planned": planned,  # How many items this run meant to upload, after --limit; None for sync-metadata.
         "chunk_size": chunk_size,
+        "confirm_every": confirm_every,  # None for sync-metadata, which has no confirm step.
         "batch": batch,
         "batch_column": config.batch_column,
     }
@@ -4018,6 +4023,8 @@ class SheetUploadRun:
     # still defaults to whatever CHUNK_SIZE is at call time - including a
     # test's own monkeypatched value).
     chunk_size: int = CHUNK_SIZE
+    # --confirm-every: successes confirmed per mid-chunk write; the chunk's end confirms the rest.
+    confirm_every: int = CONFIRM_EVERY
     # Set by the first interrupt; checked before each item and each chunk.
     stop_request: StopRequest = field(default_factory=StopRequest)
     # The registry's subject_columns, sent together as `subject`.
@@ -4041,9 +4048,16 @@ class SheetUploadRun:
 
         Chunking is what keeps this inside the Sheets API's 60 writes per
         minute per user - a batch counts as one request, so ~10,000 rows cost
-        about 40 requests instead of 10,000. It is also why the guard has to
-        run per chunk: the last chunk's reserve write can be hours after the
-        read that fixed its row numbers.
+        about 40 reserve requests instead of 10,000. It is also why the guard
+        has to run per chunk: the last chunk's reserve write can be hours
+        after the read that fixed its row numbers.
+
+        The confirm leg runs every `self.confirm_every` successes inside a
+        chunk, and once more at its end for the remainder, so someone watching
+        the Sheet sees progress during a 500-item chunk. Each confirm is its
+        own verify (one read) + write; at 10 uploads per confirm that is a
+        few requests a minute at most, far under the 60/minute quotas. A row
+        is confirmed at most once.
 
         `self.chunk_size` is read here rather than taken as chunk_rows'
         default so the chunk boundary is reachable in a test - a protocol
@@ -4053,7 +4067,7 @@ class SheetUploadRun:
 
         A rate-limited row (is_rate_limit_error() matches its exception), or
         a stop request (the first interrupt; see stop_request.py), stops the
-        run after finishing this chunk's confirm write, through one path.
+        run after confirming this chunk's unconfirmed successes, through one path.
         The request is checked before each item and before each chunk's
         reserve write, so the item in flight always finishes. Every row this
         run already uploaded successfully, in this chunk or an earlier one,
@@ -4097,14 +4111,39 @@ class SheetUploadRun:
             print_run_stop(stop, attempted=tally["success"] + len(failures), uploaded=tally["success"])
             return summary()
 
+        def confirm(batch: list[UploadTarget]) -> bool:
+            """Verify, then confirm, rows uploaded but not yet confirmed. False
+            means the run must stop here, with nothing more uploaded."""
+            if not self.write_back or not batch:
+                return True
+            outcome = self._verify(batch, reserved_already=True)
+            for target in outcome.moved:
+                unconfirmed.append(
+                    RowFailure(
+                        identifier=target.identifier,
+                        error=self._report_moved(target, uploaded=True, cause=outcome.stop_reason),
+                    )
+                )
+            if outcome.stop_reason is not None:
+                tally["not_attempted"] += total - settled
+                return False
+            # Fresh per confirm, not per run or chunk: ia_uploaded feeds the
+            # rolling 24-hour daily cap, so it should be close to the upload.
+            updates = confirm_updates(outcome.ok, self.columns, upload_timestamp())
+            if not self._write(updates, "confirm"):
+                for target in outcome.ok:
+                    unconfirmed.append(
+                        RowFailure(identifier=target.identifier, error="the Sheet write failed")
+                    )
+                    self._log(target, "unconfirmed", error="the Sheet write failed")
+                tally["not_attempted"] += total - settled
+                return False
+            return True
+
         for chunk in chunk_rows(targets, self.chunk_size):
             # Before the reserve write, so a pending request never reserves another chunk.
             if self.stop_request.requested:
                 return stop_early(RequestedStop())
-            # Every chunk gets a fresh timestamp. One timestamp for the whole
-            # run would stamp chunk 20 with the time chunk 1 started, which on
-            # a full-collection run is hours wrong.
-            uploaded_at = upload_timestamp()
             working = chunk
 
             if self.write_back:
@@ -4133,6 +4172,7 @@ class SheetUploadRun:
                     return summary()
                 working = outcome.ok
 
+            # Uploaded but not yet confirmed; emptied by every confirm.
             succeeded: list[UploadTarget] = []
             stop: RunStop | None = None
             for target in working:
@@ -4172,32 +4212,14 @@ class SheetUploadRun:
                     )
                 self._log(target, "success", already_on_ia=already_on_ia)
                 succeeded.append(target)
+                if len(succeeded) >= self.confirm_every:
+                    if not confirm(succeeded):
+                        return summary()
+                    succeeded = []
 
-            if self.write_back and succeeded:
-                outcome = self._verify(succeeded, reserved_already=True)
-                for target in outcome.moved:
-                    unconfirmed.append(
-                        RowFailure(
-                            identifier=target.identifier,
-                            error=self._report_moved(
-                                target, uploaded=True, cause=outcome.stop_reason
-                            ),
-                        )
-                    )
-                if outcome.stop_reason is not None:
-                    tally["not_attempted"] += total - settled
-                    return summary()
-                if not self._write(confirm_updates(outcome.ok, self.columns, uploaded_at), "confirm"):
-                    for target in outcome.ok:
-                        unconfirmed.append(
-                            RowFailure(
-                                identifier=target.identifier,
-                                error="the Sheet write failed",
-                            )
-                        )
-                        self._log(target, "unconfirmed", error="the Sheet write failed")
-                    tally["not_attempted"] += total - settled
-                    return summary()
+            # The remainder, including before a rate-limit or requested stop.
+            if not confirm(succeeded):
+                return summary()
 
             if stop is not None:
                 return stop_early(stop)
@@ -4975,6 +4997,18 @@ def upload_from_sheet(args) -> int:
         )
         return 1
 
+    # Read fresh like chunk_size, so a monkeypatched CONFIRM_EVERY still applies.
+    confirm_every = getattr(args, "confirm_every", None)
+    if confirm_every is None:
+        confirm_every = CONFIRM_EVERY
+    if confirm_every <= 0:
+        print(
+            f"--confirm-every must be a positive number of items, not {confirm_every}. Pass "
+            "--confirm-every 1 to confirm after every item.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Read before any Sheet I/O for the same reason --limit and --chunk-size
     # are: a mistyped flag must not cost a full read, a full file-resolution
     # pass over the drive and a full validation first. The rest of --batch's
@@ -5155,6 +5189,7 @@ def upload_from_sheet(args) -> int:
             chunk_size=chunk_size,
             batch=getattr(args, "batch", None),
             planned=len(targets),
+            confirm_every=confirm_every,
         )
     except Exception as exc:
         # This record is a receipt for later, not part of the upload itself -
@@ -5183,6 +5218,7 @@ def upload_from_sheet(args) -> int:
             write_back=write_back,
             log_path=log_path,
             chunk_size=chunk_size,
+            confirm_every=confirm_every,
             stop_request=stop_request,
             subject_columns=config.subject_columns,
         ).execute(targets).with_skipped(skipped_rows(blocked))
@@ -7397,6 +7433,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"default {CHUNK_SIZE}, Internet Archive's own per-run item cap). Applied to "
             "whatever --limit leaves, not instead of it - see --limit's help for the exact "
             "combination."
+        ),
+    )
+    upload_parser.add_argument(
+        "--confirm-every",
+        type=int,
+        default=CONFIRM_EVERY,
+        help=(
+            "Record uploaded items in the Sheet after every N successes within a batch "
+            f"(must be positive; default {CONFIRM_EVERY}). The batch's end records the rest."
         ),
     )
 
