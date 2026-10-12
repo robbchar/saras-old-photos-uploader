@@ -46,6 +46,12 @@ def _no_test_takes_the_real_upload_lock(monkeypatch, tmp_path):
     monkeypatch.setattr("upload_lock.UPLOAD_LOCK_PATH", tmp_path / "upload-lock" / "upload.lock")
 
 
+@pytest.fixture(autouse=True)
+def _no_test_creates_the_real_registry(monkeypatch, tmp_path):
+    """setup copies the example into the checkout's untracked registry when it is missing."""
+    monkeypatch.setattr("ia_bulk.CHECKOUT_REGISTRY", tmp_path / "checkout" / "projects_registry.json")
+
+
 def _is_local(host: object) -> bool:
     """None or "" means this machine, as do "localhost", loopback and unspecified addresses."""
     if host in (None, "", b""):

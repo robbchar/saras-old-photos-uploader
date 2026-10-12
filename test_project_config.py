@@ -1,4 +1,6 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,11 +10,17 @@ from project_config import (
     DEFAULT_WITHDRAWN_TITLE,
     REQUIRED_KEYS,
     TEST_COLLECTION,
+    REGISTRY_EXAMPLE_FILE_NAME,
+    REGISTRY_FILE_NAME,
     ConfigError,
     PlaceholderSheetId,
+    RegistryMissing,
     is_placeholder_sheet_id,
     load_project_config,
+    read_registry,
 )
+
+EXAMPLE_REGISTRY_PATH = Path(__file__).parent / REGISTRY_EXAMPLE_FILE_NAME
 
 REGISTRY = {
     "collection_key": "lcps",
@@ -313,14 +321,45 @@ def test_shipped_registry_json_loads_against_the_current_required_keys():
     settings that get filled in with real Sheet IDs and collection names as the
     project is configured, so asserting placeholders would make this test fail
     the moment the tool starts being used for real."""
-    registry_path = Path(__file__).parent / "projects_registry.json"
-    with open(registry_path) as f:
-        registry = json.load(f)
+    registry = json.loads(EXAMPLE_REGISTRY_PATH.read_text(encoding="utf-8"))
 
     config = load_project_config(registry, "sarasoldphotos")
 
     for key in REQUIRED_KEYS:
         assert getattr(config, key), f"shipped registry has an empty '{key}'"
+
+
+def test_the_example_registry_can_never_run_live():
+    """setup copies the example verbatim, so a fresh copy must refuse --live until edited."""
+    registry = json.loads(EXAMPLE_REGISTRY_PATH.read_text(encoding="utf-8"))
+
+    assert load_project_config(registry, "sarasoldphotos").sheet_id_is_placeholder(live=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+def test_the_real_registry_is_ignored_by_git():
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-q", REGISTRY_FILE_NAME],
+        cwd=Path(__file__).parent,
+    )
+
+    assert result.returncode == 0
+
+
+def test_reading_a_missing_registry_says_how_to_create_it(tmp_path):
+    with pytest.raises(RegistryMissing) as caught:
+        read_registry(tmp_path / REGISTRY_FILE_NAME)
+
+    message = str(caught.value)
+    assert f"copy {REGISTRY_EXAMPLE_FILE_NAME} to {REGISTRY_FILE_NAME}" in message
+    assert "sheet_id" in message
+    assert "--registry" in message
+    assert message.isascii()
+
+
+def test_a_missing_registry_is_a_config_error():
+    """doctor and setup report ConfigErrors without a traceback."""
+    assert issubclass(RegistryMissing, ConfigError)
 
 
 def test_required_for_upload_is_loaded_as_a_tuple():
@@ -499,7 +538,7 @@ def test_the_shipped_registry_batches_this_project_by_theme():
     """The Sheet column an operator scopes a run to with --batch. Asserted
     against the shipped file because a rename there silently turns every
     --batch run into a refusal."""
-    registry = json.loads(Path("projects_registry.json").read_text(encoding="utf-8"))
+    registry = json.loads(EXAMPLE_REGISTRY_PATH.read_text(encoding="utf-8"))
 
     config = load_project_config(registry, "sarasoldphotos")
 

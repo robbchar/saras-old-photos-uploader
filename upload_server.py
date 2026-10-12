@@ -5,9 +5,9 @@ frontend polls and drives. Runs under `ia_bulk.py serve` (Task 9), which is
 why this module must NEVER `import ia_bulk` at module top: Task 9 adds
 `import upload_server` to the top of ia_bulk.py, and a top-level
 `import ia_bulk` here would make the two modules import each other before
-either has finished loading. The one thing this module needs from ia_bulk
--- load_registry (a plain json.load) -- is obtained without a module-top
-import; see _load_registry.
+either has finished loading. The registry is read through
+project_config.read_registry, ia_bulk.load_registry's own reader, so no
+ia_bulk import is needed; see _load_registry.
 
 Binds 127.0.0.1 only. Every request is checked by a small guard (Host,
 Origin, POST Content-Type) before it reaches any route -- see
@@ -270,11 +270,10 @@ class _StartupRefusal(Exception):
 
 
 def _load_registry(registry_path: str) -> dict:
-    """Mirrors ia_bulk.load_registry (which is nothing but `json.load`)
-    without importing ia_bulk at module load time -- see the module
-    docstring's note on the circular-import constraint."""
-    with open(registry_path, encoding="utf-8") as handle:
-        return json.load(handle)
+    """ia_bulk.load_registry's own reader, reached without importing ia_bulk
+    at module load time -- see the module docstring's note on the
+    circular-import constraint."""
+    return project_config.read_registry(registry_path)
 
 
 def _last_nonempty_line(text: str) -> str | None:
@@ -297,6 +296,8 @@ def _check_startup(config: ServerConfig) -> project_config.ProjectConfig:
     """
     try:
         registry = _load_registry(config.registry)
+    except project_config.RegistryMissing as error:
+        raise _StartupRefusal(str(error)) from error
     except (OSError, ValueError) as error:
         raise _StartupRefusal(f"cannot load registry '{config.registry}': {error}") from error
 

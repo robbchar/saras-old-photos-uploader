@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import tempfile
 from argparse import Namespace
@@ -1738,7 +1739,7 @@ def test_cmd_validate_resolves_a_filename_missing_its_extension_and_writes_ident
 def test_cmd_validate_resolves_using_a_two_column_file_template_like_the_real_registry(
     tmp_path, monkeypatch, capsys
 ):
-    """projects_registry.json's real file_template joins two Sheet columns
+    """The registry's real file_template joins two Sheet columns
     ('{file_on_array}/{identifier}'), not one - proves cmd_validate's
     wiring isn't accidentally hardcoded to a single-placeholder template."""
     from ia_bulk import cmd_validate
@@ -2037,7 +2038,7 @@ def test_cmd_validate_rejects_a_project_id_off_the_identifier_scheme_before_touc
 def test_cmd_validate_rejects_an_unreplaced_placeholder_sheet_id_before_touching_the_network(
     tmp_path, monkeypatch, capsys
 ):
-    """projects_registry.json ships sheet_id/test_sheet_id as
+    """projects_registry.example.json ships sheet_id as
     REPLACE_WITH_* until a human edits in the real Google Sheet ID. Asking
     Google about a placeholder produces an opaque 404/permission error that
     doesn't say what to fix; catching it before the network call and naming
@@ -3831,6 +3832,7 @@ def test_cmd_setup_without_enable_agent_never_calls_launchctl(monkeypatch):
     assert ia_bulk.cmd_setup(args) == 0
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_with_enable_agent_bootstraps_it(monkeypatch):
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
     _stub_plist_write(monkeypatch)
@@ -3848,6 +3850,7 @@ def test_cmd_setup_with_enable_agent_bootstraps_it(monkeypatch):
     assert len(loaded) == 1
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_with_enable_upload_page_bootstraps_it(monkeypatch):
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
     written = []
@@ -3985,6 +3988,91 @@ def _setup_args(*extra):
     )
 
 
+@pytest.fixture
+def example_registry_in_cwd(tmp_path, monkeypatch):
+    """The default --registry resolves against cwd, and the real registry is untracked."""
+    shutil.copyfile(ia_bulk.REGISTRY_EXAMPLE, tmp_path / ia_bulk.DEFAULT_REGISTRY)
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture
+def fresh_checkout(tmp_path, monkeypatch):
+    """A checkout with no registry of its own yet; returns where setup should create it."""
+    checkout_registry = tmp_path / ia_bulk.DEFAULT_REGISTRY
+    monkeypatch.setattr(ia_bulk, "CHECKOUT_REGISTRY", checkout_registry)
+    monkeypatch.chdir(tmp_path)
+    return checkout_registry
+
+
+def test_cmd_setup_creates_the_missing_registry_from_the_example(fresh_checkout, monkeypatch, capsys):
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+
+    ia_bulk.cmd_setup(_setup_args("--offline"))
+
+    assert fresh_checkout.read_bytes() == ia_bulk.REGISTRY_EXAMPLE.read_bytes()
+    assert (
+        "created projects_registry.json from projects_registry.example.json" in capsys.readouterr().out
+    )
+
+
+def test_cmd_setup_creates_the_registry_before_reading_it(fresh_checkout, monkeypatch):
+    """The checks load the registry, so a fresh checkout's first setup must not fail on it."""
+    seen = []
+    monkeypatch.setattr(
+        ia_bulk,
+        "build_deployment_checks",
+        lambda args, include_network: (seen.append(ia_bulk.load_registry(args.registry)), [])[1],
+    )
+
+    ia_bulk.cmd_setup(_setup_args("--offline"))
+
+    assert seen and seen[0]["projects"]["sarasoldphotos"]["sheet_id"].startswith("REPLACE_WITH")
+
+
+def test_cmd_setup_never_overwrites_an_existing_registry(fresh_checkout, monkeypatch, capsys):
+    fresh_checkout.write_text('{"edited": "by hand"}', encoding="utf-8")
+    monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
+
+    ia_bulk.cmd_setup(_setup_args("--offline"))
+
+    assert fresh_checkout.read_text(encoding="utf-8") == '{"edited": "by hand"}'
+    assert "created" not in capsys.readouterr().out
+
+
+def test_cmd_setup_does_not_create_a_missing_non_default_registry(fresh_checkout, tmp_path, capsys):
+    """A missing --registry elsewhere is a typo; filling it from the example would hide that."""
+    missing = tmp_path / "elsewhere" / "alt.json"
+
+    assert ia_bulk.cmd_setup(_setup_args("--offline", "--registry", str(missing))) == 1
+
+    assert not missing.exists()
+    assert not fresh_checkout.exists()
+    assert "copy projects_registry.example.json to projects_registry.json" in capsys.readouterr().err
+
+
+def test_cmd_doctor_reports_a_missing_registry_with_the_copy_remedy(fresh_checkout, capsys):
+    args = ia_bulk.build_parser().parse_args(["doctor", "--project", "sarasoldphotos", "--offline"])
+
+    assert ia_bulk.cmd_doctor(args) == 1
+
+    err = capsys.readouterr().err
+    assert "projects_registry.json does not exist" in err
+    assert "copy projects_registry.example.json to projects_registry.json" in err
+    assert "Traceback" not in err
+    # doctor only reports; setup is what changes the machine.
+    assert not fresh_checkout.exists()
+
+
+def test_a_missing_registry_ends_any_command_with_the_copy_remedy_not_a_traceback(tmp_path, capsys):
+    missing = tmp_path / "projects_registry.json"
+
+    assert ia_bulk.main(["validate", "--project", "sarasoldphotos", "--registry", str(missing)]) == 1
+
+    err = capsys.readouterr().err
+    assert "copy projects_registry.example.json to projects_registry.json" in err
+    assert err.isascii()
+
+
 # What _setup_args' operator pastes back into zsh; `<project>` there is a redirect.
 RUNNABLE_ENABLE_COMMAND = "./install.sh --project sarasoldphotos --live --enable-agent"
 
@@ -4075,6 +4163,7 @@ def test_cmd_setup_does_not_enable_the_agent_when_a_check_failed(monkeypatch, ca
     assert "[FAIL] service account key" in captured.out
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_enables_the_agent_when_every_check_passes(monkeypatch):
     monkeypatch.setattr(
         ia_bulk,
@@ -4155,6 +4244,7 @@ def test_doctor_still_exits_zero_on_the_same_unverified_sheet(monkeypatch):
     assert ia_bulk.cmd_doctor(args) == 0
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_enables_the_agent_when_a_check_is_only_unknown(monkeypatch):
     """UNKNOWN outside the two Sheet checks still does not block - the files
     drive being unplugged is no reason to refuse to enable the agent."""
@@ -4183,6 +4273,7 @@ def test_cmd_setup_enables_the_agent_when_a_check_is_only_unknown(monkeypatch):
     assert len(loaded) == 1
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_returns_non_zero_when_the_bootstrap_failed(monkeypatch, capsys):
     """agent_loaded_check reports "not loaded" as UNKNOWN by design, so exit_code
     stays 0 - the one command whose purpose is loading the agent could not fail."""
@@ -4199,6 +4290,7 @@ def test_cmd_setup_returns_non_zero_when_the_bootstrap_failed(monkeypatch, capsy
     assert "not loaded" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_boots_out_an_already_loaded_agent_before_bootstrapping(monkeypatch, capsys):
     """launchd holds its own copy of the plist from bootstrap time, so after
     `git pull && ./install.sh` changes ProgramArguments the running job still
@@ -4251,6 +4343,7 @@ def test_cmd_setup_announces_the_bootout_before_it_happens(monkeypatch, capsys):
     ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent"))
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_does_not_bootout_an_agent_that_is_not_loaded(monkeypatch):
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
     _stub_plist_write(monkeypatch)
@@ -4266,6 +4359,7 @@ def test_cmd_setup_does_not_bootout_an_agent_that_is_not_loaded(monkeypatch):
     assert ia_bulk.cmd_setup(_setup_args("--live", "--enable-agent")) == 0
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_writes_the_plist_only_when_enabling_and_before_bootstrapping(monkeypatch):
     """launchd loads every plist in LaunchAgents at login, so a plain install
     that wrote one started a live agent nobody enabled."""
@@ -4289,6 +4383,7 @@ def test_cmd_setup_writes_the_plist_only_when_enabling_and_before_bootstrapping(
     assert calls == ["write", "bootstrap"]
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_does_not_bootstrap_when_the_plist_cannot_be_written(monkeypatch, capsys):
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
 
@@ -4304,6 +4399,7 @@ def test_cmd_setup_does_not_bootstrap_when_the_plist_cannot_be_written(monkeypat
     assert "not loaded" in captured.err
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_does_not_bootstrap_when_a_failed_bootout_leaves_the_agent_loaded(
     monkeypatch, capsys
 ):
@@ -4331,6 +4427,7 @@ def test_cmd_setup_does_not_bootstrap_when_a_failed_bootout_leaves_the_agent_loa
     assert "not loaded" in captured.err
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_bootstraps_once_an_in_progress_bootout_finishes(monkeypatch):
     """launchctl bootout exits 36 while a running job is still stopping."""
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
@@ -4355,6 +4452,7 @@ def test_cmd_setup_bootstraps_once_an_in_progress_bootout_finishes(monkeypatch):
     assert len(loaded) == 1
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_does_not_bootstrap_until_the_old_agent_is_gone(monkeypatch, capsys):
     monkeypatch.setattr(ia_bulk, "build_deployment_checks", lambda args, include_network: [])
     _stub_plist_write(monkeypatch)
@@ -4437,6 +4535,7 @@ def test_doctor_flags_a_plist_enabled_for_a_different_registry(tmp_path, monkeyp
     assert "registry" in outcome.detail
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_reenables_an_agent_whose_last_run_failed(tmp_path, monkeypatch):
     """The loaded check's FAIL used to block the very reload its remedy prescribes."""
     spec = ia_bulk.launch_agent.sync_agent_spec(tmp_path, "sarasoldphotos", tmp_path / "registry.json")
@@ -4467,6 +4566,7 @@ def test_cmd_setup_reenables_an_agent_whose_last_run_failed(tmp_path, monkeypatc
     assert launchd["listing"] == "\tpid = 42\n\tlast exit code = (never exited)\n"
 
 
+@pytest.mark.usefixtures("example_registry_in_cwd")
 def test_cmd_setup_enables_the_agent_despite_a_failing_files_drive(tmp_path, monkeypatch, capsys):
     """sync-metadata never reads the drive, so its FAIL is reported but does not gate."""
     not_a_directory = tmp_path / "files"

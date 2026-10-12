@@ -27,8 +27,8 @@ and digits only (see [`docs/decisions/IDENTIFIERS.md`](docs/decisions/IDENTIFIER
   [The collection key is `lcps`](docs/decisions/IDENTIFIERS.md#the-collection-key-is-lcps).
   Not the IA collection items land in (`ia_collection`).
 - PROJECTID: short project code, e.g. `photosexample` (illustrative only —
-  see `projects_registry.json` for the actual registered codes; tracked in
-  a small project registry, not invented ad hoc per script run)
+  see `projects_registry.example.json` for the actual registered codes;
+  tracked in a small project registry, not invented ad hoc per script run)
 - NUMBER: 5-digit zero-padded sequential number, unique per project
 Identifiers are permanent once uploaded — never reused, never renamed.
 Original filenames/donor folder structure are NOT part of the identifier;
@@ -41,6 +41,16 @@ files live, how a row's file path is built, and which fields a human must
 fill in before a row can upload — lives in `projects_registry.json`, never on
 the command line. See [`docs/DECISIONS.md`](docs/DECISIONS.md), "Technical
 configuration lives in the registry, not the command line".
+
+`projects_registry.json` is untracked: it holds this machine's real
+`sheet_id`. The tracked template is `projects_registry.example.json`; copy it
+and set `sheet_id` (`./install.sh` makes the copy on a Mac, and never
+overwrites one). A command run without either refuses and says so; see
+[The real registry is untracked](docs/decisions/FOUNDATIONS.md#the-real-registry-is-untracked).
+
+```bash
+cp projects_registry.example.json projects_registry.json
+```
 
 ```json
 {

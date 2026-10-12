@@ -328,7 +328,8 @@ digits, which `format_identifier` never produces.
 
 *Settled 2026-08-23.*
 
-`collection_key` in `projects_registry.json` is `"lcps"`. It is the first
+`collection_key` in `projects_registry.json` (and the tracked
+`projects_registry.example.json` it is copied from) is `"lcps"`. It is the first
 segment of every minted identifier and of every item's permanent public URL
 (`archive.org/details/lcps-sarasoldphotos-00001`). It was chosen as the most
 specific pointer to the organization. `lcpsociety` (the IA account's domain)

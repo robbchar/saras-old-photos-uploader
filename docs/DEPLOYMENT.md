@@ -294,6 +294,15 @@ list above:
 `files_dir` in `projects_registry.json` must point at wherever the project's
 photos actually live on this machine.
 
+`projects_registry.json` is untracked — it holds this Mac's own settings — so
+a fresh clone has only `projects_registry.example.json`. `./install.sh` (§10)
+copies it when the registry is missing and never overwrites one; to edit
+before then, make the copy yourself:
+
+```bash
+cp -n projects_registry.example.json projects_registry.json
+```
+
 1. Plug in the LaCie drive and confirm its mount path, e.g. `ls /Volumes`.
 2. Open `projects_registry.json` and set the `<project>` entry's `files_dir`
    to that path (or a path under it).
@@ -306,7 +315,7 @@ photos actually live on this machine.
 
 ## 8. The real `sheet_id`
 
-`projects_registry.json` ships with a placeholder:
+A fresh copy of `projects_registry.example.json` carries a placeholder:
 
 ```json
 "sheet_id": "REPLACE_WITH_REAL_SHEET_ID"
@@ -381,7 +390,10 @@ first run on an empty Mac or the twentieth. In order, it:
    when its Python is missing or older than 3.10 — a venv built from macOS's
    3.9, or from a Homebrew Python since removed.
 3. Installs/upgrades `pip`, then installs `requirements.txt` into `.venv`.
-4. Runs `ia_bulk.py setup --project <project>`, which converges every check
+4. Runs `ia_bulk.py setup --project <project>`, which first creates
+   `projects_registry.json` from `projects_registry.example.json` if it is
+   missing (never over an existing one; set its `sheet_id`, §8), then
+   converges every check
    in `deployment.py` it can fix on its own (key file permissions) and then
    re-verifies everything, printing a `[PASS]`/`[FAIL]`/`[UNKNOWN]` report.
    It never writes the LaunchAgent plist — launchd loads every plist in
@@ -598,6 +610,29 @@ the new definition:
 ```
 
 That starts another live sync immediately, the same as the first time.
+
+### Upgrading past the untracked registry
+
+The release that untracked `projects_registry.json` (see
+[FOUNDATIONS.md](decisions/FOUNDATIONS.md#the-real-registry-is-untracked))
+makes `git pull` refuse on a Mac whose registry has local edits, such as a real
+`sheet_id`: `Your local changes to the following files would be overwritten`.
+Set the file aside, pull, and put it back:
+
+```bash
+cp projects_registry.json ~/projects_registry.json.bak
+git checkout -- projects_registry.json
+git pull
+cp ~/projects_registry.json.bak projects_registry.json
+./install.sh --project <project>
+.venv/bin/python ia_bulk.py doctor --project <project> --live
+```
+
+An hourly sync that starts between the pull and the copy back fails on the
+missing registry; the next one runs normally. From then on `git pull` never
+touches `projects_registry.json`. A key later added to the example is not
+copied in for you: a new required one makes `doctor` refuse by name; a new
+optional one stays unset until you copy it across.
 
 ## 15. Checking a machine later
 

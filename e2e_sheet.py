@@ -6,6 +6,7 @@ Every write takes an E2ESheet, and only check_reset_allowed builds one.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,12 +58,24 @@ def _required(block: dict[str, Any], key: str, project: str) -> str:
     return value
 
 
+def _read_live_registries(paths: Sequence[Path]) -> list[tuple[Path, dict[str, Any]]]:
+    """Every live registry that exists, read in full. The real one is untracked,
+    so a checkout may hold only the example; one that exists but will not read,
+    or none at all, refuses."""
+    present = [path for path in paths if path.exists()]
+    if not present:
+        raise ResetRefused(f"cannot read any live registry: none of {', '.join(map(str, paths))} exist")
+    return [(path, _read_registry(path)) for path in present]
+
+
 def check_reset_allowed(
-    e2e_registry_path: Path, live_registry_path: Path, project: str = E2E_PROJECT
+    e2e_registry_path: Path, live_registry_paths: Path | Sequence[Path], project: str = E2E_PROJECT
 ) -> E2ESheet:
-    """Fails closed: any doubt about either registry refuses."""
+    """Fails closed: any doubt about any registry refuses. live_registry_paths is
+    checked as a set, so the guard holds whichever of them this checkout has."""
     e2e_registry = _read_registry(e2e_registry_path)
-    live_registry = _read_registry(live_registry_path)
+    live_paths = [live_registry_paths] if isinstance(live_registry_paths, Path) else list(live_registry_paths)
+    live_registries = _read_live_registries(live_paths)
 
     block = e2e_registry["projects"].get(project)
     if not isinstance(block, dict):
@@ -92,13 +105,14 @@ def check_reset_allowed(
     if LOCK_TAB in (target.data_tab, *target.log_tabs):
         raise ResetRefused(f"'{project}' names a tab '{LOCK_TAB}', the tab that holds the rehearsal lock")
 
-    live_ids = {
-        str(live_block.get("sheet_id") or "").strip()
-        for live_block in live_registry["projects"].values()
-        if isinstance(live_block, dict)
-    }
-    if target.sheet_id in live_ids:
-        raise ResetRefused(f"{target.sheet_id} is a live sheet_id in {live_registry_path}; refusing to write to it")
+    for live_registry_path, live_registry in live_registries:
+        live_ids = {
+            str(live_block.get("sheet_id") or "").strip()
+            for live_block in live_registry["projects"].values()
+            if isinstance(live_block, dict)
+        }
+        if target.sheet_id in live_ids:
+            raise ResetRefused(f"{target.sheet_id} is a live sheet_id in {live_registry_path}; refusing to write to it")
     return target
 
 

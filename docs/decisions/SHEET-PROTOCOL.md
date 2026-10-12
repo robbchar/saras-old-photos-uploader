@@ -547,7 +547,9 @@ The rewrite lives in `e2e_sheet.py`, test code only; `ia_bulk.py` has no
 reset command. Every write goes through `check_reset_allowed`, which refuses
 unless the e2e registry's own `sheet_id` is a `REPLACE_WITH…` placeholder and
 its `test_sheet_id` is no project's live `sheet_id` in
-`projects_registry.json`. It compares against live IDs only, so it does not
+`projects_registry.json` or `projects_registry.example.json`, whichever exist.
+The real registry is untracked, so a checkout may hold only the example; with
+neither, or with one that will not parse, it refuses. It compares against live IDs only, so it does not
 object to another project reusing the rehearsal's Test Sheet. It also refuses a
 placeholder `test_sheet_id`, and a log tab named like the data tab, since the
 reset deletes the log tabs.

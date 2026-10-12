@@ -52,6 +52,14 @@ if [ ! -x "$PYTHON" ]; then
   pause_then_exit 1
 fi
 
+# The real registry is untracked; ./install.sh copies it from the example.
+if [ ! -f "$REGISTRY" ]; then
+  printf 'ERROR: no project registry at:\n  %s/%s\n' "$REPO_ROOT" "$REGISTRY" >&2
+  printf 'Run ./install.sh to create it from projects_registry.example.json,\n' >&2
+  printf 'then set its sheet_id (see docs/DEPLOYMENT.md).\n' >&2
+  pause_then_exit 1
+fi
+
 # If a server is already listening on this port - an earlier launch still
 # running - starting a second one would only abort with an "address already in
 # use" traceback. Point the browser at the page already up, and stop here.

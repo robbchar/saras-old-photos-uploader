@@ -63,10 +63,14 @@ from identifiers import RowState, classify_row, next_identifiers, parse_identifi
 from project_config import (
     DEFAULT_WITHDRAWN_DESCRIPTION,
     DEFAULT_WITHDRAWN_TITLE,
+    REGISTRY_EXAMPLE_FILE_NAME,
+    REGISTRY_FILE_NAME,
     ConfigError,
     ProjectConfig,
+    RegistryMissing,
     is_placeholder_sheet_id,
     load_project_config,
+    read_registry,
 )
 from reconcile import AmbiguousMatch, Proposal, propose_match
 from sheet_client import CellUpdate, SheetClient, column_letter
@@ -182,12 +186,15 @@ def chunk_rows(
         yield rows[start : start + chunk_size]
 
 
-DEFAULT_REGISTRY = "projects_registry.json"
+DEFAULT_REGISTRY = REGISTRY_FILE_NAME
+# The checkout's own registry (untracked) and the tracked example setup copies it from.
+CHECKOUT_REGISTRY = REPO_ROOT / DEFAULT_REGISTRY
+REGISTRY_EXAMPLE = REPO_ROOT / REGISTRY_EXAMPLE_FILE_NAME
 
 
 def load_registry(registry_path: str | Path) -> dict:
-    with open(registry_path, encoding="utf-8") as f:
-        return json.load(f)
+    """Never falls back to the example: its placeholder sheet_id would only fail later, less clearly."""
+    return read_registry(registry_path)
 
 
 def check_identifier(
@@ -2932,6 +2939,22 @@ def install_command_for(args) -> deployment.InstallCommand:
     return deployment.InstallCommand(args.project, None if is_default else registry)
 
 
+def create_checkout_registry(args, announce: Callable[[str], None]) -> None:
+    """setup's first step on a fresh checkout: the real registry is untracked, so
+    copy the example. Never overwrites, and only for the checkout's own path - a
+    missing --registry elsewhere is a typo, not a fresh install."""
+    if Path(args.registry).resolve() != CHECKOUT_REGISTRY or CHECKOUT_REGISTRY.exists():
+        return
+    content = REGISTRY_EXAMPLE.read_bytes()
+    # "x": a registry that appeared since the check above is kept, not replaced.
+    with open(CHECKOUT_REGISTRY, "xb") as handle:
+        handle.write(content)
+    announce(
+        f"created {DEFAULT_REGISTRY} from {REGISTRY_EXAMPLE_FILE_NAME}; "
+        "set its sheet_id to the real Sheet before a live run"
+    )
+
+
 # {command} is install_command_for(args).render(enable_agent=True).
 ENABLE_AGENT_NEEDS_LIVE = (
     "--enable-agent loads an agent that runs `sync-metadata --live`, so it refuses to run "
@@ -3153,6 +3176,9 @@ REGISTRY_READ_ERRORS = (ConfigError, ValueError, OSError)
 def report_unreadable_registry(args, exc: Exception) -> int:
     # `doctor` and `setup` are the commands you talk someone through over the
     # phone; a traceback is the one output that helps nobody.
+    if isinstance(exc, RegistryMissing):
+        print(exc, file=sys.stderr)
+        return 1
     print(f"could not read the project registry {args.registry}: {exc}", file=sys.stderr)
     return 1
 
@@ -3206,6 +3232,7 @@ def cmd_setup(args) -> int:
         print(line)
 
     try:
+        create_checkout_registry(args, announce)
         checks = build_deployment_checks(args, include_network=not args.offline)
     except REGISTRY_READ_ERRORS as exc:
         return report_unreadable_registry(args, exc)
@@ -7530,6 +7557,14 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "verbose", False) and not getattr(args, "dry_run", False):
         print("-v only changes --dry-run output; this run ignores it", file=sys.stderr)
 
+    try:
+        return run_command(parser, args)
+    except RegistryMissing as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+
+def run_command(parser: argparse.ArgumentParser, args) -> int:
     if args.command == "validate":
         return cmd_validate(args)
     if args.command == "upload":

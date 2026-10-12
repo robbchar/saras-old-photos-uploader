@@ -49,6 +49,8 @@ to find the Sheet. A wrong `--collection` on a `--live` run pushes real files
 into the wrong collection and reports success — and unlike `collection_key`,
 nothing catches it. As a registry value it is confirmed once, in version
 control, per project, instead of retyped correctly on every run forever.
+(Since 2026-10-12 the tracked copy is the example; see "The real registry is
+untracked".)
 
 The same reasoning puts `files_dir` and `file_template` there. A row's file
 path is assembled from a root plus one or more Sheet columns, which is
@@ -60,6 +62,31 @@ as overrides on the `--csv` path, where `--collection` was still used as typed
 and never checked against the registry. They were removed with that path.
 The registry is now the only source of the collection and the files
 directory, with no flag to override either.
+
+## The real registry is untracked
+
+*Decided 2026-10-12.*
+
+`projects_registry.json` mixed shared settings with one machine's state: the
+live `sheet_id` (and `files_dir`, the drive's mount) is set by hand on the
+uploading Mac. Tracked, that edit made every `git pull` there refuse, and a
+real ID typed into a developer checkout could ride into a commit.
+
+So the tracked file is `projects_registry.example.json`, `sheet_id` still the
+`REPLACE_WITH_…` placeholder, and `projects_registry.json` is gitignored.
+`setup` (so `./install.sh`) copies the example when the checkout's own
+registry is missing, never over an existing one, and never for a `--registry`
+elsewhere — a missing path there is a typo. Every other command refuses a
+missing registry with the copy that fixes it, rather than falling back to the
+example: the placeholder would only fail later and less clearly, or run on
+settings nobody chose for this machine.
+
+The cost: a machine's registry no longer moves with `git pull`. A new key or a
+changed shared value in the example is copied in by hand, and `ia_collection`
+is no longer pinned by review on the machine that uploads — `upload --live`
+still refuses a collection archive.org does not confirm (below). The e2e reset
+guard checks whichever of the two files exist; see SHEET-PROTOCOL.md,
+"Test data is ephemeral".
 
 ## A live upload goes only into a collection archive.org confirms
 
