@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "projects_registry.schema.json",
   "title": "LCPS project registry",
-  "description": "Editor and test aid for projects_registry.json. project_config.load_project_config is the authoritative check; it also refuses what this schema cannot express, e.g. sheet_id equal to test_sheet_id, or a log tab named after a metadata tab. Stricter than the loader where the loader normalizes instead of refusing: a whitespace-padded batch_column, a non-string log tab or description, and a mediatype outside the enum below are rejected here but accepted by the loader.",
+  "description": "Editor and test aid for projects_registry.json and the tracked projects_registry.example.json it is copied from. project_config.load_project_config is the authoritative check; it also refuses what this schema cannot express, e.g. sheet_id equal to test_sheet_id, or a log tab named after a metadata tab. Stricter than the loader where the loader normalizes instead of refusing: a whitespace-padded batch_column, a non-string log tab or description, and a mediatype outside the enum below are rejected here but accepted by the loader.",
   "type": "object",
   "required": ["collection_key", "projects"],
   "additionalProperties": false,

@@ -13,7 +13,7 @@ from project_config import OPTIONAL_KEYS, REQUIRED_KEYS, ConfigError, load_proje
 REPO_ROOT = Path(__file__).parent
 SCHEMA_PATH = REPO_ROOT / "projects_registry.schema.json"
 SHIPPED_REGISTRIES = [
-    REPO_ROOT / "projects_registry.json",
+    REPO_ROOT / "projects_registry.example.json",
     REPO_ROOT / "e2e_fixtures" / "registry.json",
 ]
 

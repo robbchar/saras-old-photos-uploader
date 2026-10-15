@@ -68,7 +68,8 @@ from test_upload_server import _post_json, _read_sse
 
 REPO_ROOT = Path(__file__).resolve().parent
 E2E_REGISTRY = REPO_ROOT / "e2e_fixtures" / "registry.json"
-LIVE_REGISTRY = REPO_ROOT / "projects_registry.json"
+# The real registry is untracked, so the guard checks whichever of these exist.
+LIVE_REGISTRIES = (REPO_ROOT / "projects_registry.json", REPO_ROOT / "projects_registry.example.json")
 FIXTURE_SHEET = REPO_ROOT / "e2e_fixtures" / "sheet.json"
 # Both read at import, before conftest's autouse fixtures hide the real key and IA config from each test.
 REAL_KEY_PATH = google_auth.DEFAULT_SERVICE_ACCOUNT_KEY_PATH
@@ -557,7 +558,7 @@ def test_rehearsal(tmp_path, request):
     header = fixture[0]
 
     preflight()
-    target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRY)
+    target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRIES)
     service = build_sheets_service(REAL_KEY_PATH)
     sheet = RehearsalSheet(service, target, header)
     lock = take_lock(service, target, log_dir, request)
@@ -775,7 +776,7 @@ def test_upload_page_drives_a_real_run_end_to_end(tmp_path, request, monkeypatch
 
     preflight()
     _restore_real_ia_environment(monkeypatch)
-    target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRY)
+    target = check_reset_allowed(E2E_REGISTRY, LIVE_REGISTRIES)
     service = build_sheets_service(REAL_KEY_PATH)
     sheet = RehearsalSheet(service, target, header)
     lock = take_lock(service, target, tmp_path / "logs", request)

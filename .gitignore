@@ -13,3 +13,5 @@ data/
 # Defense in depth: these must never land in a public repo even outside .ignored/.
 *service-account*.json
 client_secret_*.json
+# The real registry holds this machine's sheet_id; copy projects_registry.example.json.
+/projects_registry.json

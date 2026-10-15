@@ -7,7 +7,9 @@ and report success, with nothing to catch it. See docs/DECISIONS.md,
 "Technical configuration lives in the registry, not the command line"."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from column_map import normalize_header
 from identifiers import is_identifier_part
@@ -53,7 +55,12 @@ DEFAULT_WITHDRAWN_DESCRIPTION = (
     "This item has been withdrawn by the Lower Columbia Preservation Society."
 )
 
-# Sheet ID marker: not yet set in projects_registry.json; required (never live) in e2e_fixtures/registry.json.
+# The real registry is untracked; the example is its tracked template. See
+# docs/decisions/FOUNDATIONS.md, "The real registry is untracked".
+REGISTRY_FILE_NAME = "projects_registry.json"
+REGISTRY_EXAMPLE_FILE_NAME = "projects_registry.example.json"
+
+# Sheet ID marker: not yet set in a fresh copy of the example registry; required (never live) in e2e_fixtures/registry.json.
 _PLACEHOLDER_SHEET_ID_PREFIX = "REPLACE_WITH"
 # For messages only; matching goes through is_placeholder_sheet_id.
 PLACEHOLDER_SHEET_ID_FORM = f"{_PLACEHOLDER_SHEET_ID_PREFIX}..."
@@ -69,6 +76,27 @@ class ConfigError(Exception):
 
 class PlaceholderSheetId(ConfigError):
     pass
+
+
+class RegistryMissing(ConfigError):
+    pass
+
+
+def missing_registry_message(path: str | Path) -> str:
+    return (
+        f"project registry {path} does not exist. The real registry is untracked: copy "
+        f"{REGISTRY_EXAMPLE_FILE_NAME} to {REGISTRY_FILE_NAME} and set its sheet_id "
+        "(./install.sh makes the copy), or pass --registry PATH."
+    )
+
+
+def read_registry(path: str | Path) -> dict:
+    """The registry file as parsed JSON; a missing file says how to create it."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        raise RegistryMissing(missing_registry_message(path)) from None
 
 
 def resolve_sheet_tab_override(override: str | None, default: str) -> str:

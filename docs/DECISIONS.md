@@ -23,6 +23,7 @@ limit rather than missed.
 - [Use the `internetarchive` Python library, not `ia upload --spreadsheet`](decisions/FOUNDATIONS.md#use-the-internetarchive-python-library-not-ia-upload---spreadsheet)
 - [Generic to "a project", not hardcoded to photos](decisions/FOUNDATIONS.md#generic-to-a-project-not-hardcoded-to-photos)
 - [Technical configuration lives in the registry, not the command line](decisions/FOUNDATIONS.md#technical-configuration-lives-in-the-registry-not-the-command-line)
+- [The real registry is untracked](decisions/FOUNDATIONS.md#the-real-registry-is-untracked)
 - [A live upload goes only into a collection archive.org confirms](decisions/FOUNDATIONS.md#a-live-upload-goes-only-into-a-collection-archiveorg-confirms)
 - [The Sheet is reached as a service account, not as a person](decisions/FOUNDATIONS.md#the-sheet-is-reached-as-a-service-account-not-as-a-person)
 - [One version for the whole tool, kept on the Python side](decisions/FOUNDATIONS.md#one-version-for-the-whole-tool-kept-on-the-python-side)

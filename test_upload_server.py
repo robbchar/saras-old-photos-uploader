@@ -1065,7 +1065,8 @@ def test_startup_refuses_when_registry_missing_returns_0(tmp_path, capsys):
     cfg = _make_config(tmp_path, write_registry=False)
     result = upload_server.run_server(cfg, _fake_deps())
     assert result == 0
-    assert "registry" in capsys.readouterr().err.lower()
+    # The launcher's window shows this line; it must name the copy that fixes it.
+    assert "copy projects_registry.example.json to projects_registry.json" in capsys.readouterr().err
 
 
 def test_startup_refuses_when_registry_is_malformed_json_returns_0(tmp_path, capsys):

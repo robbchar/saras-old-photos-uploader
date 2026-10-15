@@ -9,8 +9,8 @@ so keep things generic to "a project" rather than hardcoded to photos.
 - COLLECTIONKEY: `lcps`, settled — see `docs/DECISIONS.md`, "The collection
   key is `lcps`". Not the IA collection items land in (`ia_collection`).
 - PROJECTID: short project code, e.g. `photosexample` (illustrative only —
-  see `projects_registry.json` for the actual registered codes; tracked in
-  a small project registry, not invented ad hoc per script run)
+  see `projects_registry.example.json` for the actual registered codes;
+  tracked in a small project registry, not invented ad hoc per script run)
 - NUMBER: 5-digit zero-padded sequential number, unique per project
 Identifiers are permanent once uploaded — never reused, never renamed.
 Original filenames/donor folder structure are NOT part of the identifier;

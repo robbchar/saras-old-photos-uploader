@@ -23,6 +23,8 @@ Terminal window stops the server.
   committed to the repo, so `git pull` brings it along. This Mac never runs
   `yarn` or Node — the bundle is built and committed by a developer before
   deployment.
+- **`projects_registry.json`**, untracked, which `./install.sh` creates from
+  `projects_registry.example.json`. Without it the launcher stops and says so.
 - **The real `sheet_id`.** Until it is set (see [`DEPLOYMENT.md`](DEPLOYMENT.md)
   §8), the server still starts and the page still loads, but a validate or
   upload from the page fails with a placeholder-sheet-id message. That is

@@ -136,7 +136,7 @@ class InstallCommand:
     """The ./install.sh line a remedy names, runnable in zsh exactly as printed."""
 
     project_id: str
-    # None for the checkout's own projects_registry.json, which install.sh reads by default.
+    # None for the checkout's own (untracked) projects_registry.json, which install.sh reads by default.
     registry: Path | None = None
 
     def render(self, *, enable_agent: bool = False, enable_upload_page: bool = False) -> str:

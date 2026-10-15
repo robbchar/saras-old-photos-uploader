@@ -12,7 +12,9 @@ over the Sheets API — see [`DECISIONS.md`](decisions/SHEET-PROTOCOL.md#the-she
 The Sheet is the only input; the offline CSV paths were removed on
 2026-09-23. Generic to "a
 project" so a second LCPS project can reuse this pipeline — see
-`projects_registry.json`.
+`projects_registry.json` (untracked; copied from the tracked
+`projects_registry.example.json`, see
+[FOUNDATIONS.md](decisions/FOUNDATIONS.md#the-real-registry-is-untracked)).
 
 ## Sheet source and column mapping
 `validate`/`upload` read a project's Sheet (its test Sheet by default, its
@@ -136,7 +138,7 @@ all. See
 [`IDENTIFIERS.md`](decisions/IDENTIFIERS.md#an-identifier-is-checked-against-the-runs-project-not-the-whole-registry).
 
 Every registry key, its type and its meaning are in
-`projects_registry.schema.json` (JSON Schema 2020-12). Both registries point to
+`projects_registry.schema.json` (JSON Schema 2020-12). The registries point to
 it with a `$schema` key, so an editor validates and autocompletes them. It is
 an aid, not the check: `load_project_config` is authoritative and also refuses
 what the schema cannot express, such as `sheet_id` equal to `test_sheet_id`.

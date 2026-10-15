@@ -147,6 +147,38 @@ def test_guard_refuses_an_unreadable_live_registry(tmp_path):
         check_reset_allowed(e2e_path, tmp_path / "missing.json")
 
 
+def test_guard_checks_whichever_live_registries_exist(tmp_path):
+    """The real registry is untracked: a checkout holding only the example still runs."""
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(), {})
+
+    assert check_reset_allowed(e2e_path, [tmp_path / "missing.json", live_path]).sheet_id == TEST_SHEET_ID
+
+
+def test_guard_refuses_a_live_sheet_id_in_any_live_registry(tmp_path):
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(), {"photos": {"sheet_id": TEST_SHEET_ID}})
+    example_path = tmp_path / "example.json"
+    example_path.write_text(json.dumps({"collection_key": "lcps", "projects": {}}), encoding="utf-8")
+
+    with pytest.raises(ResetRefused, match="is a live sheet_id in"):
+        check_reset_allowed(e2e_path, [example_path, live_path])
+
+
+def test_guard_refuses_when_no_live_registry_exists(tmp_path):
+    e2e_path, _ = write_registries(tmp_path, e2e_block(), {})
+
+    with pytest.raises(ResetRefused, match="cannot read any live registry"):
+        check_reset_allowed(e2e_path, [tmp_path / "missing.json", tmp_path / "also-missing.json"])
+
+
+def test_guard_refuses_when_a_present_live_registry_will_not_read(tmp_path):
+    e2e_path, live_path = write_registries(tmp_path, e2e_block(), {})
+    broken_path = tmp_path / "broken.json"
+    broken_path.write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ResetRefused, match="cannot read registry"):
+        check_reset_allowed(e2e_path, [live_path, broken_path])
+
+
 def test_guard_refuses_a_live_registry_without_projects(tmp_path):
     e2e_path, live_path = write_registries(tmp_path, e2e_block(), {})
     live_path.write_text(json.dumps({"collection_key": "lcps"}), encoding="utf-8")
@@ -308,8 +340,8 @@ def test_checked_in_registry_can_never_run_live():
     assert load_project_config(registry, "e2e").sheet_id_is_placeholder(live=True)
 
 
-def test_checked_in_registry_passes_the_guard_against_the_real_registry():
-    target = check_reset_allowed(FIXTURES / "registry.json", REPO_ROOT / "projects_registry.json")
+def test_checked_in_registry_passes_the_guard_against_the_example_registry():
+    target = check_reset_allowed(FIXTURES / "registry.json", REPO_ROOT / "projects_registry.example.json")
 
     assert target.data_tab == "Test Sheet"
 
