@@ -232,7 +232,9 @@ Per chunk of 500 rows `upload` does four things **in this order**:
 1. **reserve** — one batch write putting the minted `ia_identifier` in the Sheet
 2. **upload** — row by row, to Internet Archive, under that identifier
 3. **confirm** — one batch write of `ia_uploaded`, `ia_url` and
-   `ia_identifier_bib`, but only for rows whose upload succeeded
+   `ia_identifier_bib`, but only for rows whose upload succeeded. It runs
+   every 10 successful uploads within the chunk (`--confirm-every N`) and
+   once more at its end, so the Sheet shows progress as the chunk goes
 4. **log** — per-row outcomes appended to the JSONL log
 
 Reserving first is deliberate. Uploading first would let a crash strand an
@@ -241,7 +243,9 @@ item on Internet Archive that the Sheet has no record of, and the next run's
 permanently. Reserving first degrades the same crash into an unused gap in the
 sequence, which is harmless. Batching matters too: the Sheets API allows 60
 writes per minute per user and counts a batch as one request, so ~10,000 rows
-cost about 40 requests rather than 10,000.
+cost about 20 reserve writes rather than 10,000, plus one read and one write
+per confirm — a few a minute at a typical upload pace, and the Sheets client
+retries a rate-limited or failed request with backoff before giving up.
 
 A row is chosen by what its two tool-owned columns already hold:
 
@@ -326,9 +330,10 @@ scanned. On a Sheet with 2,900 uncatalogued rows and 150 ready ones,
 `--limit 100` uploads 100 of the 150 ready rows, not the first 100 rows
 read. `--chunk-size` overrides the reserve/upload/confirm batch size
 (default 500, Internet Archive's per-run cap) for the rows `--limit` leaves;
-the two combine literally, as shown above. Both are recorded in the
-`run_header` record every upload log starts with (see
-`docs/ARCHITECTURE.md`).
+the two combine literally, as shown above. `--confirm-every N` (default
+10) sets how many successful uploads go between confirm writes inside a
+chunk. All three are recorded in the `run_header` record every upload log
+starts with (see `docs/ARCHITECTURE.md`).
 
 **The 5,000/day cap is enforced.** Internet Archive allows 5,000 items per
 account per day. A run that would take the last 24 hours past that, counting

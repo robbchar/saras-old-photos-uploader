@@ -190,13 +190,15 @@ throttle stays the backstop:
   either.
 - An upload whose Sheet write-back failed, which has no timestamp.
 - A run still going on another machine. Its uploads count only as each
-  500-item chunk is confirmed, and what it has yet to upload not at all. The
-  upload lock covers one machine, not two.
-- When exactly each item was created. `ia_uploaded` is stamped as its chunk
-  starts, so a chunk's items leave the window up to that chunk's upload time
-  early, and "fits after" can be early by as much. Padding the window would
-  trade that for refusing runs IA would take; the stamp's meaning is a
-  separate decision.
+  confirm write lands (every `--confirm-every` successes, default 10), and
+  what it has yet to upload not at all. The upload lock covers one machine,
+  not two.
+- When exactly each item was created. `ia_uploaded` is stamped when its
+  confirm write is made, so an item stays in the window up to that many
+  items' upload time longer than it needs to — the safe direction. (Until
+  2026-10-12 it was stamped as its 500-item chunk started, which let items
+  leave the window early.) See "Uploads are confirmed every 10 successes,
+  not once per chunk".
 
 The refusal names the room left as a `--limit` and when the whole run fits.
 The second half exists for the upload page (`serve`), which shows the
@@ -505,7 +507,7 @@ touching `str(exc)`. Verified end to end through the real
 
 | Status | Rate limit | Retryable | Effect |
 | --- | --- | --- | --- |
-| 503, 429 | yes | no | run stops after the chunk's confirm write |
+| 503, 429 | yes | no | run stops once the chunk's unconfirmed successes are confirmed |
 | 500, 502 | no | yes | retry absorbs it |
 | 403, 400, 404 | no | no | row fails immediately |
 
@@ -815,3 +817,47 @@ you suppress.
   toggle, not a verbosity control, and is untouched.
 - **`-v` only shapes dry-run output.** Outside `--dry-run` it changes nothing,
   and says so on stderr rather than being silently ignored.
+
+## Uploads are confirmed every 10 successes, not once per chunk
+
+*Decided 2026-10-12.*
+
+A 500-item chunk takes hours, and its confirm write came only at the end, so
+a volunteer watching the Sheet saw nothing move for that long. The chunk, its
+single upfront reserve write and its pre-reserve verify are unchanged. Inside
+it, the verify-then-confirm step now runs after every `--confirm-every N`
+successful uploads (default 10, `CONFIRM_EVERY`), and once more at the
+chunk's end — or before a rate-limit or requested stop — for whatever is
+left.
+
+- **Each row is confirmed once.** A confirm covers only successes not yet
+  confirmed; failed rows never count toward N and are never confirmed.
+- **A mid-chunk failure stops the run like a chunk-end one.** A failed
+  re-read or write stops before the next upload, prints the summary, and
+  leaves the chunk's remaining reserved rows RESERVED for the next run. If
+  the run was already stopping for a rate limit or a stop request, the
+  summary still says so.
+- **Sheet reads and writes are retried first.** About 1,000 of each on a
+  full-collection run make a transient Google 5xx, 429 or timeout likely,
+  so `SheetClient` passes `num_retries` (`SHEETS_NUM_RETRIES`, 5) to the
+  Google client, which backs off exponentially. Unlike Internet Archive's
+  503 (see "Retry covers transport failures, never refusals"), Google's 429
+  is a per-minute quota that backoff is the remedy for, and the write is
+  idempotent. Only a failure that outlasts the retries stops the run.
+- **A row that moved mid-chunk is never sent.** Each confirm's re-read also
+  checks the chunk's reserved rows not yet uploaded. A row someone shifted
+  in the meantime is skipped, as at reserve, rather than uploaded into an
+  item the Sheet can no longer record.
+- **`ia_uploaded` is stamped per confirm, not per chunk.** It feeds the
+  rolling 24-hour daily cap, so it should be close to the upload, and a
+  stamp taken after the uploads only errs toward counting them longer.
+- **Quota.** Each confirm is one read and one write. At about 20 seconds an
+  upload and 10 uploads a confirm, that is a few requests a minute, far under
+  the Sheets API's 60/minute read and write quotas. Fast items, such as
+  checksum-skipped resumes, confirm more often, and `--confirm-every 1` on
+  those can reach the quota; the retries above absorb the resulting 429s
+  by slowing down rather than stopping.
+- **Silent on success**, as the chunk-end confirm always was; a failure
+  prints what it always did. `confirm_every` is recorded in `run_header`.
+- A dry run's preview counts the cells a run would write, which N does not
+  change, so it is untouched.

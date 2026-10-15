@@ -30,7 +30,7 @@ class _Request:
     def __init__(self, run: Callable[[], dict]) -> None:
         self._run = run
 
-    def execute(self) -> dict:
+    def execute(self, num_retries: int = 0) -> dict:
         return self._run()
 
 

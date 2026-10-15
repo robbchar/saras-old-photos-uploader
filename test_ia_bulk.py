@@ -1333,7 +1333,7 @@ class _RecordingExecutable:
     def __init__(self, result):
         self._result = result
 
-    def execute(self):
+    def execute(self, num_retries=0):
         return self._result
 
 
@@ -3466,6 +3466,7 @@ def test_build_parser_upload_subcommand_defaults():
     assert args.live is False
     assert args.write_identifier is False
     assert args.dry_run is False
+    assert args.confirm_every == 10
 
 
 def test_build_parser_upload_subcommand_accepts_write_identifier_and_dry_run():
@@ -7003,7 +7004,7 @@ def test_cmd_upload_reports_a_deleted_ia_column_instead_of_a_traceback(
     assert "log written to" in captured.out
 
 
-def test_cmd_upload_reserves_and_confirms_once_per_chunk_not_once_per_run(
+def test_cmd_upload_reserves_and_confirms_each_chunk_separately_not_once_per_run(
     tmp_path, monkeypatch, capsys
 ):
     """Every other Sheet test runs 1-3 rows against CHUNK_SIZE = 500, so none
@@ -7013,7 +7014,10 @@ def test_cmd_upload_reserves_and_confirms_once_per_chunk_not_once_per_run(
     rows x 3 cells would likely exceed the Sheets request limit and lose the
     entire run's write-back.
 
-    The full ordered sequence is asserted, chunk boundaries included."""
+    Each chunk here holds fewer rows than --confirm-every's default, so its
+    one confirm is the chunk-end remainder; the mid-chunk confirms have
+    their own tests below. The full ordered sequence is asserted, chunk
+    boundaries included."""
     from ia_bulk import cmd_upload
 
     grid = [
@@ -7053,6 +7057,355 @@ def test_cmd_upload_reserves_and_confirms_once_per_chunk_not_once_per_run(
             ("E3", f"https://archive.org/details/zztest-{FIXED_STAMP}-lcps-astoriaphotos-00002"),
             ("F3", "photo2.jpg"),
         ],
+    ]
+
+
+def _photo_grid(count):
+    return [SHEET_HEADER] + [
+        [f"Photo {n}", f"photo{n}.jpg", "", "", "", ""] for n in range(1, count + 1)
+    ]
+
+
+def _photo_files(count):
+    return tuple(f"photo{n}.jpg" for n in range(1, count + 1))
+
+
+def _uploaded_as(n):
+    return f"zztest-{FIXED_STAMP}-lcps-astoriaphotos-{n:05d}"
+
+
+def _reserved_rows(writes):
+    """Sheet rows per reserve write (column C), in write order."""
+    return [[int(a1[1:]) for a1, _ in write] for write in writes if write[0][0].startswith("C")]
+
+
+def _confirmed_rows(writes):
+    """Sheet rows per confirm write (column D carries ia_uploaded), in write order."""
+    return [
+        [int(a1[1:]) for a1, _ in write if a1.startswith("D")]
+        for write in writes
+        if write[0][0].startswith("D")
+    ]
+
+
+def test_cmd_upload_confirms_every_n_successes_within_a_chunk(tmp_path, monkeypatch, capsys):
+    """25 rows in one chunk with --confirm-every 10: one reserve up front,
+    then confirms of 10, 10 and the chunk-end remainder of 5, each verified
+    first and each stamped with its own time."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _photo_grid(25),
+        files=_photo_files(25),
+        timestamps=["2026-08-19T09:00:00", "2026-08-19T09:05:00", "2026-08-19T09:08:00"],
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=10)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert recorder.kinds == (
+        ["read", "read", "write"]
+        + ["upload"] * 10 + ["read", "write"]
+        + ["upload"] * 10 + ["read", "write"]
+        + ["upload"] * 5 + ["read", "write"]
+    )
+    assert _reserved_rows(recorder.writes) == [list(range(2, 27))]
+    assert _confirmed_rows(recorder.writes) == [
+        list(range(2, 12)), list(range(12, 22)), list(range(22, 27))
+    ]
+    assert [client.grid[row][3] for row in (1, 11, 21)] == [
+        "2026-08-19T09:00:00", "2026-08-19T09:05:00", "2026-08-19T09:08:00"
+    ]
+    assert [client.grid[row][4] for row in range(1, 26)] == [
+        f"https://archive.org/details/{_uploaded_as(n)}" for n in range(1, 26)
+    ]
+
+
+def test_cmd_upload_failed_rows_are_never_confirmed_and_do_not_count_toward_confirm_every(
+    tmp_path, monkeypatch, capsys
+):
+    """Rows 2 and 4 fail: the first confirm waits for two SUCCESSES (1 and
+    3), and a chunk end with nothing left to confirm costs no read or write."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path,
+        monkeypatch,
+        _photo_grid(6),
+        files=_photo_files(6),
+        fail_for=(_uploaded_as(2), _uploaded_as(4)),
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=2)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.kinds == [
+        "read", "read", "write",
+        "upload", "upload", "upload", "read", "write",
+        "upload", "upload", "upload", "read", "write",
+    ]
+    assert _confirmed_rows(recorder.writes) == [[2, 4], [6, 7]]
+    assert client.grid[2][3] == ""
+    assert client.grid[4][3] == ""
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["succeeded"] == 4
+    assert len(summary["failures"]) == 2
+    assert summary["unconfirmed"] == []
+
+
+def test_cmd_upload_rate_limit_mid_chunk_confirms_only_the_unconfirmed_remainder(
+    tmp_path, monkeypatch, capsys
+):
+    """Rows 1-4 were already confirmed in pairs; the stop confirms row 5
+    alone, never rows 1-4 a second time, and never the rate-limited row 6."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(7), files=_photo_files(7)
+    )
+
+    def fake_upload_row(row, target_identifier, collection, files_dir):
+        recorder.events.append(("upload", target_identifier))
+        if target_identifier == _uploaded_as(6):
+            raise UploadFailed(
+                f"upload of '{target_identifier}' failed with status 503: SlowDown",
+                status_code=503,
+            )
+
+    monkeypatch.setattr("ia_bulk.upload_row", fake_upload_row)
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=2)
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [_uploaded_as(n) for n in range(1, 7)]
+    assert _reserved_rows(recorder.writes) == [list(range(2, 9))]
+    assert _confirmed_rows(recorder.writes) == [[2, 3], [4, 5], [6]]
+    assert (
+        "stopped: Internet Archive asked us to slow down (HTTP 503) after 6 items"
+        in captured.err.splitlines()
+    )
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["succeeded"] == 5
+    assert summary["not_attempted"] == 1
+
+
+def test_an_interrupt_mid_chunk_confirms_only_the_unconfirmed_remainder(
+    tmp_path, monkeypatch, capsys
+):
+    """Rows 1-2 were confirmed together; item 3, in flight when the interrupt
+    came, finishes and is confirmed alone before the run stops."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(5), files=_photo_files(5)
+    )
+    monkeypatch.setattr("ia_bulk.upload_row", interrupting_upload(recorder, during="00003"))
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=2)
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [_uploaded_as(n) for n in range(1, 4)]
+    assert _confirmed_rows(recorder.writes) == [[2, 3], [4]]
+    assert "stopped: as requested, after 3 items" in captured.err.splitlines()
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["stopped_by_request"] is True
+    assert summary["succeeded"] == 3
+    assert summary["not_attempted"] == 2
+
+
+def test_a_failed_mid_chunk_confirm_write_stops_the_run_before_another_upload(
+    tmp_path, monkeypatch, capsys
+):
+    """Write 1 is the reserve, write 2 the first mid-chunk confirm. It fails
+    just like a chunk-end confirm: no further uploads, the two rows reported
+    unconfirmed, the rest not attempted."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(5), files=_photo_files(5), raise_on_write=2
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=2)
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [_uploaded_as(1), _uploaded_as(2)]
+    assert recorder.kinds[-2:] == ["read", "write"]
+    assert "the Sheet confirm write failed" in captured.err
+    assert "log written to" in captured.out
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["succeeded"] == 2
+    assert [entry["identifier"] for entry in summary["unconfirmed"]] == [
+        "lcps-astoriaphotos-00001",
+        "lcps-astoriaphotos-00002",
+    ]
+    assert summary["not_attempted"] == 3
+
+
+def test_a_failed_mid_chunk_confirm_verify_stops_the_run_before_another_upload(
+    tmp_path, monkeypatch, capsys
+):
+    """Read 1 plans, read 2 is the reserve verify, read 3 the first
+    mid-chunk confirm verify. It fails: nothing is confirmed and nothing
+    more is uploaded."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(5), files=_photo_files(5), raise_on_read=3
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=2)
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [_uploaded_as(1), _uploaded_as(2)]
+    assert _confirmed_rows(recorder.writes) == []
+    assert "the Sheet could not be re-read" in captured.err
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert len(summary["unconfirmed"]) == 2
+    assert summary["not_attempted"] == 3
+
+
+def test_a_row_moved_at_a_mid_chunk_confirm_is_reported_once_and_the_run_continues(
+    tmp_path, monkeypatch, capsys
+):
+    """Read 3 is the first mid-chunk confirm verify. By then photos 2 (sent)
+    and 4 (reserved, not yet sent) have new file cells: 2 is reported
+    unconfirmed, 4 is skipped and never sent, 1 is confirmed, and the run goes
+    on with 3 and 5 without reporting 2 again."""
+    from ia_bulk import cmd_upload
+
+    def edit_files(grid, read_count):
+        if read_count == 3:
+            grid[2][1] = "photo2-renamed.jpg"
+            grid[4][1] = "photo4-renamed.jpg"
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(5), files=_photo_files(5), before_read=edit_files
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, confirm_every=2)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [_uploaded_as(n) for n in (1, 2, 3, 5)]
+    assert _confirmed_rows(recorder.writes) == [[2], [4, 6]]
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["succeeded"] == 4
+    assert [entry["identifier"] for entry in summary["unconfirmed"]] == ["lcps-astoriaphotos-00002"]
+    assert [entry["identifier"] for entry in summary["skipped"]] == ["lcps-astoriaphotos-00004"]
+    assert summary["not_attempted"] == 1
+
+
+def test_a_failed_remainder_confirm_after_a_rate_limit_still_reports_the_rate_limit(
+    tmp_path, monkeypatch, capsys
+):
+    """Item 2 is rate limited, then write 2 (item 1's remainder confirm)
+    fails. The run still says it was rate limited, not only that the Sheet
+    write failed, and item 3 counts once as not attempted."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(3), files=_photo_files(3), raise_on_write=2
+    )
+
+    def fake_upload_row(row, target_identifier, collection, files_dir):
+        recorder.events.append(("upload", target_identifier))
+        if target_identifier == _uploaded_as(2):
+            raise UploadFailed(
+                f"upload of '{target_identifier}' failed with status 503: SlowDown",
+                status_code=503,
+            )
+
+    monkeypatch.setattr("ia_bulk.upload_row", fake_upload_row)
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, write_identifier=True))
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert recorder.uploads == [_uploaded_as(1), _uploaded_as(2)]
+    assert "the Sheet confirm write failed" in captured.err
+    assert (
+        "stopped: Internet Archive asked us to slow down (HTTP 503) after 2 items"
+        in captured.err.splitlines()
+    )
+    summary = _upload_log_entries(tmp_path)[-1]
+    assert summary["rate_limited"] is True
+    assert summary["rate_limit_status"] == 503
+    assert [entry["identifier"] for entry in summary["unconfirmed"]] == ["lcps-astoriaphotos-00001"]
+    assert summary["not_attempted"] == 1
+
+
+def test_cmd_upload_default_confirm_every_restarts_at_each_chunk_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    """25 rows in chunks of 12 with the default of 10: each chunk is reserved
+    once, confirms 10 mid-chunk and its own remainder at its end."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(
+        tmp_path, monkeypatch, _photo_grid(25), files=_photo_files(25)
+    )
+
+    exit_code = cmd_upload(
+        make_upload_args(tmp_path, registry_path, write_identifier=True, chunk_size=12)
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert _reserved_rows(recorder.writes) == [list(range(2, 14)), list(range(14, 26)), [26]]
+    assert _confirmed_rows(recorder.writes) == [
+        list(range(2, 12)),
+        [12, 13],
+        list(range(14, 24)),
+        [24, 25],
+        [26],
+    ]
+    # Reserve, confirm, confirm per full chunk; reserve, confirm for the last.
+    assert [kind for kind in recorder.kinds if kind != "upload"] == (
+        ["read"] + ["read", "write"] * 3 + ["read", "write"] * 3 + ["read", "write"] * 2
+    )
+    header = _upload_log_entries(tmp_path)[0]
+    assert header["confirm_every"] == 10
+
+
+@pytest.mark.parametrize("confirm_every", [0, -1])
+def test_cmd_upload_rejects_a_non_positive_confirm_every(
+    tmp_path, monkeypatch, capsys, confirm_every
+):
+    """Refused before any Sheet I/O, like --chunk-size."""
+    from ia_bulk import cmd_upload
+
+    recorder, client, registry_path, _ = setup_sheet_upload(tmp_path, monkeypatch, _photo_grid(1))
+
+    exit_code = cmd_upload(make_upload_args(tmp_path, registry_path, confirm_every=confirm_every))
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert recorder.kinds == []
+    assert err.splitlines() == [
+        f"--confirm-every must be a positive number of items, not {confirm_every}. Pass "
+        "--confirm-every 1 to confirm after every item."
     ]
 
 
@@ -14212,17 +14565,21 @@ def test_sync_from_sheet_ends_with_a_machine_readable_summary(tmp_path, monkeypa
     assert summary["skipped"] == []
 
 
-def test_sync_from_sheet_pins_a_null_planned_in_its_run_header(tmp_path, monkeypatch):
-    """sync-metadata never plans upload targets or takes --limit, so its
-    run_header's `planned` is always null - unlike upload's, which counts
-    what --limit capped."""
+def test_sync_from_sheet_pins_a_null_planned_and_confirm_every_in_its_run_header(
+    tmp_path, monkeypatch
+):
+    """sync-metadata never plans upload targets, takes --limit or confirms
+    uploads, so its run_header's `planned` and `confirm_every` are always
+    null - unlike upload's."""
     from ia_bulk import cmd_sync_metadata
 
     registry_path, _ = _setup_sync_sheet(tmp_path, monkeypatch, _two_synced_rows(), [])
 
     cmd_sync_metadata(_sync_sheet_args(tmp_path, registry_path))
 
-    assert _sync_log_entries(tmp_path)[0]["planned"] is None
+    header = _sync_log_entries(tmp_path)[0]
+    assert header["planned"] is None
+    assert header["confirm_every"] is None
 
 
 def test_sync_refuses_a_sheet_with_withdrawn_but_no_ia_withdrawn(tmp_path, monkeypatch, capsys):

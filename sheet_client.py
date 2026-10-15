@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Google client retries per read_grid/write_cells: 5xx, 429 and timeouts, with exponential backoff.
+SHEETS_NUM_RETRIES = 5
+
 
 def column_letter(index: int) -> str:
     """0 -> A, 25 -> Z, 26 -> AA."""
@@ -66,7 +69,7 @@ class SheetClient:
             self._service.spreadsheets()
             .values()
             .get(spreadsheetId=self._spreadsheet_id, range=quote_tab(self._tab))
-            .execute()
+            .execute(num_retries=SHEETS_NUM_RETRIES)
         )
         return response.get("values", [])
 
@@ -83,9 +86,10 @@ class SheetClient:
                 for update in updates
             ],
         }
+        # Safe to retry: the same RAW values land in the same cells.
         self._service.spreadsheets().values().batchUpdate(
             spreadsheetId=self._spreadsheet_id, body=body
-        ).execute()
+        ).execute(num_retries=SHEETS_NUM_RETRIES)
 
     def ensure_tab(self, header: list[str]) -> None:
         """Make this client's tab exist and carry `header` as its first row.

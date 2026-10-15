@@ -937,7 +937,9 @@ that quietly stopped short would read as a complete one.
 invocation uploads (counting rows actually ready to go out, not rows
 scanned — see `README.md`), and `--chunk-size N` overrides the 500-item
 batch size for that run. The two combine literally: `--limit 10
---chunk-size 3` uploads 10 items in batches of 3. A refused run names the
+--chunk-size 3` uploads 10 items in batches of 3. Within a batch, uploaded
+items appear in the Sheet (`ia_uploaded`, `ia_url`) every 10 successes
+(`--confirm-every N`), not only when the batch ends. A refused run names the
 `--limit` that fits the room left — `--limit 200` after 4,800 went out
 earlier in the day. The count is a rolling 24 hours rather than a calendar
 day, because IA's own day boundary is unknown, and it reads only this Sheet:

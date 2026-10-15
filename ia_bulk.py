@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import unicodedata
+from collections import deque
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -138,6 +139,8 @@ REPO_ROOT = Path(__file__).resolve().parent
 # change from the one this constant's shrink makes.
 SHEET_REQUIRED_COLUMNS = ("mediatype",)
 CHUNK_SIZE = 500
+# Successful uploads per mid-chunk confirm write, so the Sheet shows progress during a chunk.
+CONFIRM_EVERY = 10
 # Internet Archive's per-account daily item cap. CHUNK_SIZE covers the
 # 500-items-per-run half of the limit in `.claude/CLAUDE.md` ("IA batch
 # limits: 500 items per upload run, 5000/day"); this covers the other half,
@@ -1068,6 +1071,7 @@ def log_run_header(
     chunk_size: int = CHUNK_SIZE,
     batch: str | None = None,
     planned: int | None = None,
+    confirm_every: int | None = None,
 ) -> None:
     """The first line written to a Sheet-path run's log. `head -1 <log>` then
     answers "what did this run send, under what field names, and what did it
@@ -1091,7 +1095,8 @@ def log_run_header(
     --chunk-size, cannot be explained later by the rest of this record alone.
     Both default to "the run's own default" (None / CHUNK_SIZE) so the three
     tests that call this directly without passing them still get a header
-    that says so explicitly, rather than omitting the fields.
+    that says so explicitly, rather than omitting the fields. `confirm_every`
+    is upload's --confirm-every, for the same reason.
 
     `batch` is there for the same reason and is the strongest case of the
     three: a scoped run uploads a fraction of the ready rows and looks, in
@@ -1133,6 +1138,7 @@ def log_run_header(
         "limit": limit,
         "planned": planned,  # How many items this run meant to upload, after --limit; None for sync-metadata.
         "chunk_size": chunk_size,
+        "confirm_every": confirm_every,  # None for sync-metadata, which has no confirm step.
         "batch": batch,
         "batch_column": config.batch_column,
     }
@@ -1454,9 +1460,10 @@ class UploadFailed(RuntimeError):
 # 5xx statuses worth repeating. 503 and 429 are deliberately ABSENT: they
 # are Internet Archive saying "slow down", and this tool already answers
 # that with something stronger than a retry - is_rate_limit_error() stops
-# the whole run after the current chunk's confirm write so the operator
-# resumes later. Retrying them here would delay that stop for every
-# rate-limited row while making the overload marginally worse.
+# the whole run once the current chunk's unconfirmed successes are
+# confirmed, so the operator resumes later. Retrying them here would delay
+# that stop for every rate-limited row while making the overload marginally
+# worse.
 RETRYABLE_STATUS_CODES = (500, 502, 504)
 
 # Transport failures, which arrive as an exception with no status at all
@@ -4018,6 +4025,8 @@ class SheetUploadRun:
     # still defaults to whatever CHUNK_SIZE is at call time - including a
     # test's own monkeypatched value).
     chunk_size: int = CHUNK_SIZE
+    # --confirm-every: successes confirmed per mid-chunk write; the chunk's end confirms the rest.
+    confirm_every: int = CONFIRM_EVERY
     # Set by the first interrupt; checked before each item and each chunk.
     stop_request: StopRequest = field(default_factory=StopRequest)
     # The registry's subject_columns, sent together as `subject`.
@@ -4041,9 +4050,18 @@ class SheetUploadRun:
 
         Chunking is what keeps this inside the Sheets API's 60 writes per
         minute per user - a batch counts as one request, so ~10,000 rows cost
-        about 40 requests instead of 10,000. It is also why the guard has to
-        run per chunk: the last chunk's reserve write can be hours after the
-        read that fixed its row numbers.
+        about 20 reserve writes instead of 10,000. It is also why the guard
+        has to run per chunk: the last chunk's reserve write can be hours
+        after the read that fixed its row numbers.
+
+        The confirm leg runs every `self.confirm_every` successes inside a
+        chunk, and once more at its end for the remainder, so someone watching
+        the Sheet sees progress during a 500-item chunk. Each confirm is its
+        own verify (one read) + write; at ~20s an upload and 10 uploads per
+        confirm that is a few requests a minute, far under the 60/minute
+        quotas, and SheetClient retries a 429 or 5xx with backoff. A row is
+        confirmed at most once. The same read re-checks the chunk's rows not
+        yet uploaded, so a row that moved mid-chunk is skipped, never sent.
 
         `self.chunk_size` is read here rather than taken as chunk_rows'
         default so the chunk boundary is reachable in a test - a protocol
@@ -4053,7 +4071,7 @@ class SheetUploadRun:
 
         A rate-limited row (is_rate_limit_error() matches its exception), or
         a stop request (the first interrupt; see stop_request.py), stops the
-        run after finishing this chunk's confirm write, through one path.
+        run after confirming this chunk's unconfirmed successes, through one path.
         The request is checked before each item and before each chunk's
         reserve write, so the item in flight always finishes. Every row this
         run already uploaded successfully, in this chunk or an earlier one,
@@ -4089,22 +4107,68 @@ class SheetUploadRun:
         # run-stopping problem leaves unattempted, with nothing counted twice.
         settled = 0
 
-        def stop_early(stop: RunStop) -> UploadSummary:
-            """A rate limit or a stop request: the rest of the run counts as not attempted."""
+        def stop_early(stop: RunStop, rest_counted: bool = False) -> UploadSummary:
+            """A rate limit or a stop request: the rest of the run counts as not
+            attempted, unless a failed confirm already counted it."""
             nonlocal run_stop
             run_stop = stop
-            tally["not_attempted"] += total - settled
+            if not rest_counted:
+                tally["not_attempted"] += total - settled
             print_run_stop(stop, attempted=tally["success"] + len(failures), uploaded=tally["success"])
             return summary()
+
+        def confirm(
+            batch: list[UploadTarget], rest: Sequence[UploadTarget] = ()
+        ) -> list[UploadTarget] | None:
+            """Verify, then confirm, rows uploaded but not yet confirmed. The same
+            read re-checks `rest`, the chunk's reserved rows not yet uploaded,
+            and returns those still in place; None means the run must stop."""
+            nonlocal settled
+            if not self.write_back or not batch:
+                return list(rest)
+            sent = {target.row_number for target in batch}
+            outcome = self._verify([*batch, *rest], reserved_already=True)
+            for target in outcome.moved:
+                if target.row_number in sent:
+                    unconfirmed.append(
+                        RowFailure(
+                            identifier=target.identifier,
+                            error=self._report_moved(
+                                target, uploaded=True, cause=outcome.stop_reason
+                            ),
+                        )
+                    )
+                elif outcome.stop_reason is None:
+                    # Moved before it was sent: skipped, exactly like a reserve-leg move.
+                    tally["not_attempted"] += 1
+                    settled += 1
+                    skipped.append(
+                        RowFailure(
+                            identifier=target.identifier,
+                            error=self._report_moved(target, uploaded=False),
+                        )
+                    )
+            if outcome.stop_reason is not None:
+                tally["not_attempted"] += total - settled
+                return None
+            confirmed = [target for target in outcome.ok if target.row_number in sent]
+            # Fresh per confirm, not per run or chunk: ia_uploaded feeds the
+            # rolling 24-hour daily cap, so it should be close to the upload.
+            updates = confirm_updates(confirmed, self.columns, upload_timestamp())
+            if not self._write(updates, "confirm"):
+                for target in confirmed:
+                    unconfirmed.append(
+                        RowFailure(identifier=target.identifier, error="the Sheet write failed")
+                    )
+                    self._log(target, "unconfirmed", error="the Sheet write failed")
+                tally["not_attempted"] += total - settled
+                return None
+            return [target for target in outcome.ok if target.row_number not in sent]
 
         for chunk in chunk_rows(targets, self.chunk_size):
             # Before the reserve write, so a pending request never reserves another chunk.
             if self.stop_request.requested:
                 return stop_early(RequestedStop())
-            # Every chunk gets a fresh timestamp. One timestamp for the whole
-            # run would stamp chunk 20 with the time chunk 1 started, which on
-            # a full-collection run is hours wrong.
-            uploaded_at = upload_timestamp()
             working = chunk
 
             if self.write_back:
@@ -4133,12 +4197,15 @@ class SheetUploadRun:
                     return summary()
                 working = outcome.ok
 
-            succeeded: list[UploadTarget] = []
+            # Uploaded but not yet confirmed; emptied by every confirm.
+            awaiting_confirm: list[UploadTarget] = []
+            queue = deque(working)
             stop: RunStop | None = None
-            for target in working:
+            while queue:
                 if self.stop_request.requested:
                     stop = RequestedStop()
                     break
+                target = queue.popleft()
                 position += 1
                 settled += 1
                 print(f"[{position}/{total}] uploading {target.uploaded_as} ({target.row['file']})")
@@ -4155,7 +4222,7 @@ class SheetUploadRun:
                 except Exception as exc:
                     # A rate limit is logged as an ordinary failure - the
                     # message is the server's either way - and additionally
-                    # ends the run after this chunk's confirm write.
+                    # ends the run once this chunk's unconfirmed successes are confirmed.
                     failures.append(RowFailure(identifier=target.identifier, error=str(exc)))
                     print(f"    - {format_row_error(exc)}")
                     self._log(target, "failure", error=str(exc), http_status=parsed_status_code(exc))
@@ -4171,33 +4238,18 @@ class SheetUploadRun:
                         "run sync-metadata to push this row's metadata"
                     )
                 self._log(target, "success", already_on_ia=already_on_ia)
-                succeeded.append(target)
+                awaiting_confirm.append(target)
+                if len(awaiting_confirm) >= self.confirm_every:
+                    still_placed = confirm(awaiting_confirm, queue)
+                    if still_placed is None:
+                        return summary()
+                    queue = deque(still_placed)
+                    awaiting_confirm = []
 
-            if self.write_back and succeeded:
-                outcome = self._verify(succeeded, reserved_already=True)
-                for target in outcome.moved:
-                    unconfirmed.append(
-                        RowFailure(
-                            identifier=target.identifier,
-                            error=self._report_moved(
-                                target, uploaded=True, cause=outcome.stop_reason
-                            ),
-                        )
-                    )
-                if outcome.stop_reason is not None:
-                    tally["not_attempted"] += total - settled
-                    return summary()
-                if not self._write(confirm_updates(outcome.ok, self.columns, uploaded_at), "confirm"):
-                    for target in outcome.ok:
-                        unconfirmed.append(
-                            RowFailure(
-                                identifier=target.identifier,
-                                error="the Sheet write failed",
-                            )
-                        )
-                        self._log(target, "unconfirmed", error="the Sheet write failed")
-                    tally["not_attempted"] += total - settled
-                    return summary()
+            # The remainder, including before a rate-limit or requested stop.
+            if confirm(awaiting_confirm) is None:
+                # Still name the stop, not only the failed Sheet write.
+                return stop_early(stop, rest_counted=True) if stop is not None else summary()
 
             if stop is not None:
                 return stop_early(stop)
@@ -4210,11 +4262,13 @@ class SheetUploadRun:
         BOTH writes - see split_moved_targets for why the fingerprint, and not
         `ia_identifier`, is what makes the check meaningful.
 
-        This step added two Sheets READS per chunk - roughly 80 across a
-        full-collection run spanning hours - so one transient 503 among them is
-        likely rather than exotic, and it must not end a run that has already
-        created thousands of permanent Internet Archive items with a stack
-        trace. Both failure modes below stop the run cleanly instead: the
+        This step costs one read per chunk plus one per confirm - about 51
+        per 500-item chunk at --confirm-every 10, over 1,000 across a
+        full-collection run spanning hours - so a transient 503 among them is
+        expected (SheetClient retries those first), and one that outlasts the
+        retries must not end a run that has already created thousands of
+        permanent Internet Archive items with a stack trace. Both failure
+        modes below stop the run cleanly instead: the
         caller still prints the summary and the log path, and every affected
         row is logged."""
         try:
@@ -4905,6 +4959,19 @@ def cmd_upload(args) -> int:
         return upload_from_sheet(args)
 
 
+def positive_count(args: argparse.Namespace, name: str, default: int, consequence: str) -> int | None:
+    """`args.<name>`, else `default` as passed now (so a monkeypatched constant
+    applies); None, after printing the refusal, when it is not positive."""
+    value = getattr(args, name, None)
+    if value is None:
+        value = default
+    if value <= 0:
+        flag = "--" + name.replace("_", "-")
+        print(f"{flag} must be a positive number of items, not {value}. {consequence}", file=sys.stderr)
+        return None
+    return value
+
+
 def upload_from_sheet(args) -> int:
     registry = load_registry(args.registry)
     config = load_project_config(registry, args.project)
@@ -4950,29 +5017,28 @@ def upload_from_sheet(args) -> int:
         )
         return 1
 
-    # getattr's default is looked up fresh on every call (it is an ordinary
-    # function argument, not a class default evaluated once at import time),
-    # so falling back to the module-level CHUNK_SIZE here - rather than
-    # snapshotting it into make_upload_args()'s Namespace - is what keeps
-    # every existing `monkeypatch.setattr("ia_bulk.CHUNK_SIZE", 1)` test
-    # working: those tests never set args.chunk_size at all, so this always
-    # sees whatever CHUNK_SIZE is right now.
-    chunk_size = getattr(args, "chunk_size", None)
+    # CHUNK_SIZE is passed at call time, not snapshotted into
+    # make_upload_args()'s Namespace, so every existing
+    # `monkeypatch.setattr("ia_bulk.CHUNK_SIZE", 1)` test keeps working.
+    # Two failure modes, both worse than a clean refusal: chunk_rows()'s
+    # range(0, len(rows), chunk_size) raises ValueError mid-run for 0 (a bare
+    # traceback in place of the run summary), and silently produces ZERO
+    # chunks for a negative value - the run uploads nothing and still reports
+    # success, exactly like the --limit <= 0 case above.
+    chunk_size = positive_count(
+        args,
+        "chunk_size",
+        CHUNK_SIZE,
+        "Zero raises inside chunk_rows(); a negative value silently produces zero chunks, "
+        "uploading nothing while the run still reports success.",
+    )
     if chunk_size is None:
-        chunk_size = CHUNK_SIZE
-    if chunk_size <= 0:
-        # Two different failure modes, both worse than a clean refusal:
-        # chunk_rows()'s range(0, len(rows), chunk_size) raises ValueError
-        # mid-run for 0 (a bare traceback in place of the run summary), and
-        # silently produces ZERO chunks for a negative value - the run
-        # uploads nothing and still reports success, exactly like the
-        # --limit <= 0 case above.
-        print(
-            f"--chunk-size must be a positive number of items, not {chunk_size}. Zero raises "
-            "inside chunk_rows(); a negative value silently produces zero chunks, uploading "
-            "nothing while the run still reports success.",
-            file=sys.stderr,
-        )
+        return 1
+
+    confirm_every = positive_count(
+        args, "confirm_every", CONFIRM_EVERY, "Pass --confirm-every 1 to confirm after every item."
+    )
+    if confirm_every is None:
         return 1
 
     # Read before any Sheet I/O for the same reason --limit and --chunk-size
@@ -5155,6 +5221,7 @@ def upload_from_sheet(args) -> int:
             chunk_size=chunk_size,
             batch=getattr(args, "batch", None),
             planned=len(targets),
+            confirm_every=confirm_every,
         )
     except Exception as exc:
         # This record is a receipt for later, not part of the upload itself -
@@ -5183,6 +5250,7 @@ def upload_from_sheet(args) -> int:
             write_back=write_back,
             log_path=log_path,
             chunk_size=chunk_size,
+            confirm_every=confirm_every,
             stop_request=stop_request,
             subject_columns=config.subject_columns,
         ).execute(targets).with_skipped(skipped_rows(blocked))
@@ -6624,16 +6692,14 @@ def sync_from_sheet(args) -> int:
     # after open_log/log_run_header have already run, leaving a log with a
     # header and no summary - and silently yields zero chunks for a negative
     # value, so the run pushes nothing and still reports success.
-    chunk_size = getattr(args, "chunk_size", None)
+    chunk_size = positive_count(
+        args,
+        "chunk_size",
+        CHUNK_SIZE,
+        "Zero raises inside chunk_rows(); a negative value silently produces zero chunks, "
+        "pushing nothing while the run still reports success.",
+    )
     if chunk_size is None:
-        chunk_size = CHUNK_SIZE
-    if chunk_size <= 0:
-        print(
-            f"--chunk-size must be a positive number of items, not {chunk_size}. Zero raises "
-            "inside chunk_rows(); a negative value silently produces zero chunks, pushing "
-            "nothing while the run still reports success.",
-            file=sys.stderr,
-        )
         return 1
 
     try:
@@ -7397,6 +7463,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"default {CHUNK_SIZE}, Internet Archive's own per-run item cap). Applied to "
             "whatever --limit leaves, not instead of it - see --limit's help for the exact "
             "combination."
+        ),
+    )
+    upload_parser.add_argument(
+        "--confirm-every",
+        type=int,
+        default=CONFIRM_EVERY,
+        help=(
+            "Record uploaded items in the Sheet after every N successes within a batch "
+            f"(must be positive; default {CONFIRM_EVERY}). The batch's end records the rest."
         ),
     )
 

@@ -246,6 +246,16 @@ Per chunk, `SheetUploadRun.execute()` does four things in this order:
 4. **verify, then confirm** — re-verifies the rows that actually succeeded,
    then one batch write of `ia_uploaded`, `ia_url`, and `ia_identifier_bib` —
    only for rows whose upload succeeded and whose fingerprint still matches.
+   This step runs inside the chunk every `--confirm-every` successes (default
+   10, `CONFIRM_EVERY`) and once more at the chunk's end for the rest, so the
+   Sheet shows progress during a 500-item chunk. Each run of it covers only
+   rows not yet confirmed, stamps `ia_uploaded` with its own time, and costs
+   one read and one write — a few requests a minute at a typical upload
+   pace, far under the Sheets API's 60/minute quotas. `SheetClient` retries
+   each read and write on a 5xx, 429 or timeout (`SHEETS_NUM_RETRIES`). A
+   verify or write that still fails stops the run before the next upload,
+   wherever in the chunk it happens. The same re-read also checks the chunk's
+   reserved rows not yet uploaded, and a row that moved is skipped, never sent.
 
 Reserving before uploading is deliberate: uploading first would let a crash
 strand an item on Internet Archive that the Sheet has no record of, and the
@@ -254,8 +264,8 @@ photograph, permanently — see
 [`DECISIONS.md`](decisions/IDENTIFIERS.md#identifiers-are-minted-by-upload-and-written-back-to-the-sheet).
 A `write` that fails mid-protocol (`SheetUploadRun._write()`) prints a clean
 message and stops the run rather than raising, and a rate-limited row
-(`is_rate_limit_error()`) stops the run after finishing the current chunk's
-confirm write, so nothing already uploaded is left reserved-but-unconfirmed —
+(`is_rate_limit_error()`) stops the run after confirming the current chunk's
+unconfirmed successes, so nothing already uploaded is left reserved-but-unconfirmed —
 see "Chunking" below. A stop request (the first Ctrl-C; see
 `decisions/QUOTA-AND-RUNS.md`, "An interrupt stops a run after the current
 item") ends the run the same way: it is checked before each item and before
@@ -281,7 +291,7 @@ enforced by `upload`".
 `upload` processes targets in batches of 500 (IA's per-run batch
 limit) by default, via `chunk_rows()`. This is a real checkpoint boundary:
 each chunk gets its own re-read of the Sheet, reserve write, uploads and
-confirm write. It is not one `ia upload --spreadsheet` call per chunk — each
+confirm writes (one per `--confirm-every` successes, plus the remainder). It is not one `ia upload --spreadsheet` call per chunk — each
 row is uploaded individually through the `internetarchive` Python library so
 outcomes are captured per-row. `upload --chunk-size N` overrides the batch
 size for that run (`SheetUploadRun.chunk_size`, threaded into `chunk_rows()`).
@@ -297,9 +307,9 @@ names the fix, a `--limit` sized to the room left, with
 (valid, ready, not already done — `plan_upload_targets()`'s own output) a
 single invocation processes at all, applied before chunking: `--limit 10
 --chunk-size 3` means 10 items total, in batches of 3. It counts targets
-in scope, never raw Sheet rows scanned, and it and `--chunk-size` are both
-recorded in the run's `run_header` log record (below) so a capped or
-rechunked run stays reconstructable later. See `DECISIONS.md`, "`--limit`
+in scope, never raw Sheet rows scanned, and it, `--chunk-size` and
+`--confirm-every` are all recorded in the run's `run_header` log record
+(below) so a capped or rechunked run stays reconstructable later. See `DECISIONS.md`, "`--limit`
 counts planned targets...".
 
 If an upload fails with what `is_rate_limit_error()` recognizes as
@@ -588,11 +598,12 @@ same reason `run_stamp()` uses UTC.
 `upload`'s `log_run_header()` writes one more record as the log's
 **first** line, before any row result: `{record: "run_header", timestamp,
 project, live, dry_run, sheet_id, collection, files_dir, file_template,
-columns, held_back, required_for_upload, limit, planned, chunk_size, batch,
-batch_column}`. `columns` and `held_back` come from that run's `ColumnMap`
+columns, held_back, required_for_upload, limit, planned, chunk_size,
+confirm_every, batch, batch_column}`. `columns` and `held_back` come from that run's `ColumnMap`
 (every header the Sheet had, and which were excluded as `(LCPS Internal)`);
-`required_for_upload`, `limit`, `chunk_size` and `batch` are the
-readiness/scope/batching rules in effect that run. `sheet_id` and
+`required_for_upload`, `limit`, `chunk_size`, `confirm_every` and `batch`
+are the readiness/scope/batching rules in effect that run (`confirm_every`
+is `null` for `sync-metadata`). `sheet_id` and
 `collection` name what the run actually used, not what the registry
 configures — a test run records `test_collection` and the test Sheet ID,
 because a receipt naming the real, permanent collection for items that went
